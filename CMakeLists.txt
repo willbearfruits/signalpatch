@@ -161,6 +161,11 @@ target_sources(signalpatch_tests PRIVATE
 
 target_compile_features(signalpatch_tests PRIVATE cxx_std_20)
 target_compile_definitions(signalpatch_tests PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS})
+if(NOT MSVC)
+    # The tests replace global new/delete for the allocation trap; GCC cannot
+    # see the malloc/free pairing is internally consistent.
+    target_compile_options(signalpatch_tests PRIVATE -Wno-mismatched-new-delete)
+endif()
 
 if(SIGNALPATCH_HAS_NAM)
     target_compile_definitions(signalpatch_tests PRIVATE SIGNALPATCH_HAS_NAM=1)
