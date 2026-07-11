@@ -124,16 +124,19 @@ NodeComponent::NodeComponent (PatchEngine& engineToUse, NodeId nodeId)
             for (int track = 1; track <= 4; ++track)
                 addCommand (juce::String (track), "arm" + juce::String (track), colours::warning);
         }
-        else if (kind == NodeKind::neuralAmpPlaceholder)
+        else if (kind == NodeKind::neuralAmpPlaceholder || kind == NodeKind::neuralPedal)
         {
+            addCommand ("<", "prev-model", colours::panelRaised);
             CommandButton entry;
-            entry.button = std::make_unique<juce::TextButton> ("LOAD MODEL");
+            entry.button = std::make_unique<juce::TextButton> ("LOAD");
             entry.command = "load";
             entry.activeColour = colours::panelRaised;
             entry.button->setColour (juce::TextButton::buttonColourId, colours::panelRaised);
+            entry.button->setTooltip ("Choose a .nam capture; the arrows step through its folder");
             entry.button->onClick = [this] { chooseNamModel(); };
             addAndMakeVisible (*entry.button);
             commandButtons.push_back (std::move (entry));
+            addCommand (">", "next-model", colours::panelRaised);
         }
         else if (kind == NodeKind::script)
         {
@@ -277,7 +280,8 @@ int NodeComponent::preferredHeight() const noexcept
     auto height = juce::jmax (node->hardware ? 150 : 210, portsHeight, controlsHeight);
     if (kind == NodeKind::script)
         height += 92;
-    if (kind == NodeKind::sampler || kind == NodeKind::neuralAmpPlaceholder)
+    if (kind == NodeKind::sampler || kind == NodeKind::neuralAmpPlaceholder
+        || kind == NodeKind::neuralPedal)
         height += 32;
     if (kind == NodeKind::fourTrack)
         height += 62;

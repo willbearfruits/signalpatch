@@ -24,14 +24,19 @@ patching studio, voice processor and synthesizer.** Plug a guitar or a mic
 into a small interface, pick up the handheld, and the whole rack is an
 instrument you hold: stomp switches on triggers, macro knobs on sticks,
 patching on the touchscreen. Every phase of the [roadmap](docs/ROADMAP.md)
-walks toward that.
+walks toward that. The dedicated-machine build guide (stripped-down Linux,
+boot-to-instrument kiosk, `--kiosk --unmute` flags, latency budgeting) lives
+in [`docs/APPLIANCE.md`](docs/APPLIANCE.md).
 
 ## What it does today
 
-- **35 modules** across six families:
+- **36 modules** across seven families:
   *utility* (gain, 4-ch mixer, crossfade) ·
   *effects* (distortion, SVF filter, delay, reverb, chorus, phaser, tremolo,
-  bitcrusher, ring mod, pitch shifter, granular cloud, Neural Amp) ·
+  bitcrusher, ring mod, pitch shifter, granular cloud) ·
+  *neural* (Neural Amp head and Neural Pedal — any .nam capture, stepped
+  through your model folder like a pedal library, each showing its own
+  per-block cost) ·
   *voice* (vowel/formant filter, 12-band vocoder, autotune) ·
   *instruments* (mono synth, Karplus-Strong pluck, noise, drum machine,
   live-input sampler, 60 s 4-track tape with varispeed) ·
@@ -41,7 +46,9 @@ walks toward that.
   math expression on the fly).
 - **Neural Amp Modeler, for real.** Load any `.nam` profile; parsing happens
   on a worker thread and the model swaps into the audio path atomically. The
-  model path is saved with the patch.
+  model path is saved with the patch, and a benchmark harness qualifies any
+  folder of captures against the 64-sample deadline
+  (`SIGNALPATCH_BENCH_NAM_DIR=... ./signalpatch_tests`).
 - **Rack interaction.** Accent-coloured face plates with rails, screws and
   activity LEDs; true-bypass stomp footswitches; cables that sag, glow with
   signal level and carry flow pulses toward their destination; right-click
@@ -135,6 +142,7 @@ buffers is roadmap item 0.4.
 | Doc | What it is |
 | --- | --- |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | The ordered plan, 0.2 → handheld instrument |
+| [`docs/APPLIANCE.md`](docs/APPLIANCE.md) | Building the dedicated handheld rig (ROG Ally + Zoom F4) |
 | [`docs/PRODUCT.md`](docs/PRODUCT.md) | Product specification |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Engine design: document → compiler → snapshot |
 | [`docs/REALTIME_SAFETY.md`](docs/REALTIME_SAFETY.md) | The audio-callback contract (a release gate) |

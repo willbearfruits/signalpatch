@@ -11,9 +11,22 @@ public:
     [[nodiscard]] const juce::String getApplicationVersion() override { return ProjectInfo::versionString; }
     [[nodiscard]] bool moreThanOneInstanceAllowed() override { return true; }
 
-    void initialise (const juce::String& commandLine) override
+    void initialise (const juce::String&) override
     {
-        mainWindow = std::make_unique<MainWindow> (getApplicationName(), commandLine.unquoted().trim());
+        // Flags for appliance/handheld use: --kiosk fullscreens without
+        // chrome, --unmute skips the restore-muted safety pause (explicit
+        // opt-in for a dedicated machine). A bare argument is a patch file.
+        Options options;
+        for (const auto& argument : getCommandLineParameterArray())
+        {
+            if (argument == "--kiosk")
+                options.kiosk = true;
+            else if (argument == "--unmute")
+                options.unmute = true;
+            else if (! argument.startsWith ("-"))
+                options.patchPath = argument.unquoted();
+        }
+        mainWindow = std::make_unique<MainWindow> (getApplicationName(), options);
     }
 
     void shutdown() override
@@ -27,10 +40,17 @@ public:
     }
 
 private:
+    struct Options
+    {
+        juce::String patchPath;
+        bool kiosk = false;
+        bool unmute = false;
+    };
+
     class MainWindow final : public juce::DocumentWindow
     {
     public:
-        explicit MainWindow (const juce::String& name, const juce::String& patchPath)
+        MainWindow (const juce::String& name, const Options& options)
             : DocumentWindow (name,
                               ui::colours::workspace,
                               juce::DocumentWindow::allButtons,
@@ -41,10 +61,19 @@ private:
             setResizeLimits (1080, 680, 3840, 2160);
             auto* content = new ui::MainComponent();
             setContentOwned (content, true);
-            if (patchPath.isNotEmpty())
-                content->loadPatchFile (juce::File::getCurrentWorkingDirectory().getChildFile (patchPath));
+            if (options.patchPath.isNotEmpty())
+                content->loadPatchFile (juce::File::getCurrentWorkingDirectory()
+                                            .getChildFile (options.patchPath));
+            if (options.unmute)
+                content->fadeInNow();
             centreWithSize (1440, 900);
             setVisible (true);
+            if (options.kiosk)
+            {
+                setTitleBarHeight (0);
+                setFullScreen (true);
+                juce::Desktop::getInstance().setKioskModeComponent (this, false);
+            }
         }
 
         void closeButtonPressed() override

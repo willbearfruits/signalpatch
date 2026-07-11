@@ -748,7 +748,7 @@ void testAllNodeKindsRenderFiniteOutput()
         NodeKind::noiseSource, NodeKind::pluck, NodeKind::drumMachine, NodeKind::sampler,
         NodeKind::fourTrack, NodeKind::lfo, NodeKind::randomLfo, NodeKind::envelopeFollower,
         NodeKind::stepSequencer, NodeKind::macro, NodeKind::spectralFollower,
-        NodeKind::script, NodeKind::neuralAmpPlaceholder
+        NodeKind::script, NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal
     };
 
     for (const auto kind : kinds)
@@ -869,7 +869,7 @@ PatchDocument buildKitchenSinkDocument()
         NodeKind::bitcrusher, NodeKind::ringMod, NodeKind::vowelFilter,
         NodeKind::pitchShifter, NodeKind::pitchCorrector, NodeKind::granular,
         NodeKind::compressor, NodeKind::gate, NodeKind::limiter,
-        NodeKind::neuralAmpPlaceholder, NodeKind::script
+        NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal, NodeKind::script
     };
     NodeId previous = 0;
     for (const auto kind : chainKinds)
@@ -1052,6 +1052,86 @@ void testRecompileChurnKeepsRendering()
     renderPlanBlocks (*finalCompiled.plan, 20, true);
 }
 
+// Stage-3 qualification tool (docs/NAM_ROADMAP.md): benchmark every .nam in
+// SIGNALPATCH_BENCH_NAM_DIR against the 64-sample/48 kHz deadline and print a
+// table. Informational unless a model fails to load.
+void testNamModelBenchmark()
+{
+#if SIGNALPATCH_HAS_NAM
+    const auto* directoryEnv = std::getenv ("SIGNALPATCH_BENCH_NAM_DIR");
+    if (directoryEnv == nullptr)
+    {
+        std::cout << "  (set SIGNALPATCH_BENCH_NAM_DIR=<folder> to benchmark .nam models)\n";
+        return;
+    }
+    const juce::File folder ((juce::String (directoryEnv)));
+    auto files = folder.findChildFiles (juce::File::findFiles, false, "*.nam");
+    expect (! files.isEmpty(),
+            "no .nam files found in " + folder.getFullPathName().toStdString());
+    files.sort();
+
+    constexpr int benchBlocks = 1500;
+    const auto budgetSeconds = static_cast<double> (blockSize) / sampleRate;
+    std::cout << "  model                                    avg%   max%   verdict @64/48k\n";
+
+    for (const auto& file : files)
+    {
+        auto node = createNodeProcessor (NodeKind::neuralPedal);
+        node->prepare (sampleRate, blockSize);
+        auto state = std::make_unique<juce::DynamicObject>();
+        state->setProperty ("model", file.getFullPathName());
+        node->setExtraState (juce::var (state.release()));
+        const auto status = node->statusText();
+        expect (! status.startsWith ("LOAD FAILED"),
+                file.getFileName().toStdString() + " failed to load: " + status.toStdString());
+
+        juce::AudioBuffer<float> inputs (node->getNumInputPorts(), blockSize);
+        juce::AudioBuffer<float> outputs (node->getNumOutputPorts(), blockSize);
+        double phase = 0.0;
+        auto fill = [&]
+        {
+            for (int sample = 0; sample < blockSize; ++sample)
+            {
+                const auto value = 0.4f * static_cast<float> (
+                    std::sin (juce::MathConstants<double>::twoPi * 220.0 * phase / sampleRate));
+                phase += 1.0;
+                for (int channel = 0; channel < inputs.getNumChannels(); ++channel)
+                    inputs.setSample (channel, sample, value);
+            }
+        };
+        for (int block = 0; block < 32; ++block) // warm-up
+        {
+            fill();
+            node->render (inputs, outputs, blockSize);
+        }
+
+        double totalSeconds = 0.0;
+        double worstSeconds = 0.0;
+        for (int block = 0; block < benchBlocks; ++block)
+        {
+            fill();
+            const auto start = juce::Time::getHighResolutionTicks();
+            node->render (inputs, outputs, blockSize);
+            const auto elapsed = juce::Time::highResolutionTicksToSeconds (
+                juce::Time::getHighResolutionTicks() - start);
+            totalSeconds += elapsed;
+            worstSeconds = std::max (worstSeconds, elapsed);
+        }
+        const auto averagePercent = 100.0 * (totalSeconds / benchBlocks) / budgetSeconds;
+        const auto worstPercent = 100.0 * worstSeconds / budgetSeconds;
+        const auto* verdict = worstPercent < 60.0 ? "OK"
+                            : worstPercent < 100.0 ? "TIGHT (headroom < 40%)"
+                                                   : "OVER BUDGET";
+        std::cout << "  " << file.getFileNameWithoutExtension().paddedRight (' ', 40).toStdString()
+                  << juce::String (averagePercent, 1).paddedLeft (' ', 5).toStdString() << "  "
+                  << juce::String (worstPercent, 1).paddedLeft (' ', 5).toStdString() << "   "
+                  << verdict << "\n";
+    }
+#else
+    std::cout << "  (built without NAM; benchmark skipped)\n";
+#endif
+}
+
 struct TestCase
 {
     const char* name;
@@ -1082,7 +1162,8 @@ int main()
         { "all node kinds render finite output", testAllNodeKindsRenderFiniteOutput },
         { "NAM model loads and processes", testNeuralAmpModelLoadsAndProcesses },
         { "callback path performs no allocation", testCallbackPathDoesNotAllocate },
-        { "recompile churn keeps rendering", testRecompileChurnKeepsRendering }
+        { "recompile churn keeps rendering", testRecompileChurnKeepsRendering },
+        { "NAM model benchmark (env-gated)", testNamModelBenchmark }
     };
 
     int failures = 0;

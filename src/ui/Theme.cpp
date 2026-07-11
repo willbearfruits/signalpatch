@@ -43,6 +43,7 @@ juce::Colour kindAccent (NodeKind kind)
         case NodeKind::spectralFollower:     return juce::Colour (0xff8fd0ff);
         case NodeKind::script:               return juce::Colour (0xff9be564);
         case NodeKind::neuralAmpPlaceholder: return juce::Colour (0xffb0889a);
+        case NodeKind::neuralPedal:          return juce::Colour (0xffe879b8);
     }
 
     jassertfalse;
@@ -89,7 +90,8 @@ juce::String kindTag (NodeKind kind)
         case NodeKind::macro:
         case NodeKind::spectralFollower:     return "CTL";
         case NodeKind::script:               return "CODE";
-        case NodeKind::neuralAmpPlaceholder: return "NAM";
+        case NodeKind::neuralAmpPlaceholder:
+        case NodeKind::neuralPedal:          return "NAM";
     }
 
     jassertfalse;
@@ -439,6 +441,13 @@ void drawKindGlyph (juce::Graphics& graphics, NodeKind kind,
             path.lineTo (x + w * 0.28f, y + h * 0.22f);
             graphics.strokePath (path, stroke);
             return;
+        case NodeKind::neuralPedal:
+            graphics.drawRoundedRectangle (x + w * 0.14f, y, w * 0.72f, h, 2.5f, 1.4f);
+            graphics.fillEllipse (x + w * 0.5f - 2.6f, y + h * 0.68f - 2.6f, 5.2f, 5.2f);
+            graphics.fillEllipse (x + w * 0.32f - 1.5f, y + h * 0.28f - 1.5f, 3.0f, 3.0f);
+            graphics.fillEllipse (x + w * 0.5f - 1.5f, y + h * 0.18f - 1.5f, 3.0f, 3.0f);
+            graphics.fillEllipse (x + w * 0.68f - 1.5f, y + h * 0.28f - 1.5f, 3.0f, 3.0f);
+            return;
         case NodeKind::neuralAmpPlaceholder:
             for (int column = 0; column < 3; ++column)
                 for (int row = 0; row < (column == 1 ? 3 : 2); ++row)
@@ -469,7 +478,8 @@ const std::vector<NodePaletteEntry>& nodePalette()
         { NodeKind::ringMod,              "RING MOD",       "EFFECTS",     "Carrier multiplication; robots and bells" },
         { NodeKind::pitchShifter,         "PITCH SHIFTER",  "EFFECTS",     "Dual-tap windowed transposition, -24..+24 st" },
         { NodeKind::granular,             "GRANULAR",       "EFFECTS",     "Grain cloud over a live 4 s buffer" },
-        { NodeKind::neuralAmpPlaceholder, "NEURAL AMP",     "EFFECTS",     "Neural Amp Modeler; load a .nam profile" },
+        { NodeKind::neuralAmpPlaceholder, "NEURAL AMP",     "NEURAL",      "Neural Amp Modeler head; load a .nam capture" },
+        { NodeKind::neuralPedal,          "NEURAL PEDAL",   "NEURAL",      "NAM pedal capture with wet/dry mix; step models with the arrows" },
         { NodeKind::vowelFilter,          "VOWEL FILTER",   "VOICE",       "Formant filter morphing A-E-I-O-U" },
         { NodeKind::vocoder,              "VOCODER",        "VOICE",       "12-band vocoder: voice shapes carrier" },
         { NodeKind::pitchCorrector,       "AUTOTUNE",       "VOICE",       "Pitch detection snapped to a scale" },

@@ -1,6 +1,7 @@
 #include "Processors.h"
 
 #include <cmath>
+#include <cstdlib>
 
 #if SIGNALPATCH_HAS_NAM
  #include "NAM/get_dsp.h"
@@ -604,16 +605,50 @@ private:
     std::atomic<int> activeStep { 0 };
 };
 
+// One engine, two personalities: the amp head and the stompbox. Both run any
+// .nam capture; the pedal adds a wet/dry mix because drive captures are often
+// blended, and both can step through the models folder like a pedal library.
 class NeuralAmpNode final : public DspNode
 {
 public:
-    NeuralAmpNode() : DspNode (NodeKind::neuralAmpPlaceholder,
-                               nodeKindName (NodeKind::neuralAmpPlaceholder))
+    explicit NeuralAmpNode (NodeKind kindToUse)
+        : DspNode (kindToUse, nodeKindName (kindToUse))
     {
-        addInputPort ("Guitar", SignalType::audio);
+        addInputPort (kindToUse == NodeKind::neuralPedal ? "In" : "Guitar", SignalType::audio);
         addOutputPort ("Audio", SignalType::audio);
         addParameter ("input-trim", "Input trim", "dB", juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, 0.25f);
         addParameter ("output-trim", "Output trim", "dB", juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, 0.25f);
+        if (kindToUse == NodeKind::neuralPedal)
+            addParameter ("mix", "Mix", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 100.0f, 0.5f);
+    }
+
+    /** Where model cycling looks when the node has no model yet. */
+    static juce::File defaultModelsDirectory()
+    {
+        if (const auto* env = std::getenv ("SIGNALPATCH_MODELS_DIR"))
+        {
+            const juce::File dir { juce::String (env) };
+            if (dir.isDirectory())
+                return dir;
+        }
+        const auto documents = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+            .getChildFile ("SignalPatch").getChildFile ("models");
+        if (documents.isDirectory())
+            return documents;
+        const auto lv2Clone = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+            .getChildFile ("Projects/GitHub/external_clones/neural-amp-modeler-lv2-a2/models");
+        if (lv2Clone.isDirectory())
+            return lv2Clone;
+        return juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+    }
+
+    bool handleUiCommand (const juce::String& command) override
+    {
+        if (command == "prev-model")
+            return cycleModel (-1);
+        if (command == "next-model")
+            return cycleModel (1);
+        return false;
     }
 
     juce::var getExtraState() const override
@@ -623,6 +658,32 @@ public:
         auto object = std::make_unique<juce::DynamicObject>();
         object->setProperty ("model", modelPath);
         return juce::var (object.release());
+    }
+
+    // Message thread. Steps to the neighbouring .nam file in the current
+    // model's folder (or the default models folder when empty).
+    bool cycleModel (int delta)
+    {
+        const auto currentFile = juce::File (modelPath);
+        const auto directory = modelPath.isNotEmpty() && currentFile.getParentDirectory().isDirectory()
+            ? currentFile.getParentDirectory()
+            : defaultModelsDirectory();
+        auto candidates = directory.findChildFiles (juce::File::findFiles, false, "*.nam");
+        if (candidates.isEmpty())
+            return false;
+        candidates.sort();
+        int index = 0;
+        for (int i = 0; i < candidates.size(); ++i)
+            if (candidates.getReference (i) == currentFile)
+            {
+                index = i + delta;
+                break;
+            }
+        index = (index % candidates.size() + candidates.size()) % candidates.size();
+        auto object = std::make_unique<juce::DynamicObject>();
+        object->setProperty ("model", candidates.getReference (index).getFullPathName());
+        setExtraState (juce::var (object.release()));
+        return true;
     }
 
 #if SIGNALPATCH_HAS_NAM
@@ -666,12 +727,15 @@ public:
         if (loadError.isNotEmpty())
             return "LOAD FAILED: " + loadError;
         if (activeModel.load (std::memory_order_relaxed) == nullptr)
-            return "no model - right-click or LOAD";
+            return "no model - LOAD or step with the arrows";
         auto label = juce::File (modelPath).getFileNameWithoutExtension();
         const auto expected = currentModel != nullptr ? currentModel->GetExpectedSampleRate() : -1.0;
         if (expected > 0.0 && std::abs (expected - sampleRate) > 1.0)
             label += " (" + juce::String (expected / 1000.0, 1) + "k model at "
                    + juce::String (sampleRate / 1000.0, 1) + "k)";
+        const auto permille = costPermille.load (std::memory_order_relaxed);
+        if (permille > 0)
+            label += " - " + juce::String (permille / 10.0f, 1) + "% of block";
         return label;
     }
 
@@ -757,17 +821,32 @@ private:
             scratchIn[static_cast<std::size_t> (sample)] = std::isfinite (raw) ? raw : 0.0f;
         }
 
+        const auto startTicks = juce::Time::getHighResolutionTicks();
         auto* inPointer = scratchIn.data();
         auto* outPointer = scratchOut.data();
         model->process (&inPointer, &outPointer, frames);
+        const auto elapsed = juce::Time::highResolutionTicksToSeconds (
+            juce::Time::getHighResolutionTicks() - startTicks);
+        const auto blockDuration = static_cast<double> (frames) / juce::jmax (1.0, sampleRate);
+        costPermille.store (juce::jlimit (0, 4000,
+                                          juce::roundToInt (1000.0 * elapsed / blockDuration)),
+                            std::memory_order_relaxed);
 
+        const bool isPedal = getKind() == NodeKind::neuralPedal;
         for (int sample = 0; sample < frames; ++sample)
         {
             const auto outputGain = juce::Decibels::decibelsToGain (parameterValue (1, inputs, sample));
             auto value = scratchOut[static_cast<std::size_t> (sample)] * outputGain;
             if (! std::isfinite (value))
                 value = 0.0f;
-            output[sample] = juce::jlimit (-4.0f, 4.0f, value);
+            value = juce::jlimit (-4.0f, 4.0f, value);
+            if (isPedal)
+            {
+                const auto mix = juce::jlimit (0.0f, 1.0f, parameterValue (2, inputs, sample) * 0.01f);
+                const auto dry = scratchIn[static_cast<std::size_t> (sample)];
+                value = dry + mix * (value - dry);
+            }
+            output[sample] = value;
         }
         if (frames < numSamples)
             juce::FloatVectorOperations::clear (output + frames, numSamples - frames);
@@ -777,6 +856,7 @@ private:
     std::unique_ptr<nam::DSP> retiredModel;
     std::atomic<nam::DSP*> activeModel { nullptr };
     std::atomic<bool> loading { false };
+    std::atomic<int> costPermille { 0 }; // model cost as 0.1% units of the block deadline
     std::vector<float> scratchIn;
     std::vector<float> scratchOut;
     int maximumBlockSize = 128;
@@ -3410,7 +3490,8 @@ std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
         case NodeKind::macro:                return std::make_shared<MacroNode>();
         case NodeKind::spectralFollower:     return std::make_shared<SpectralFollowerNode>();
         case NodeKind::script:               return std::make_shared<ScriptNode>();
-        case NodeKind::neuralAmpPlaceholder: return std::make_shared<NeuralAmpNode>();
+        case NodeKind::neuralAmpPlaceholder: return std::make_shared<NeuralAmpNode> (NodeKind::neuralAmpPlaceholder);
+        case NodeKind::neuralPedal:          return std::make_shared<NeuralAmpNode> (NodeKind::neuralPedal);
         case NodeKind::hardwareInput:
         case NodeKind::hardwareOutput:       break;
     }

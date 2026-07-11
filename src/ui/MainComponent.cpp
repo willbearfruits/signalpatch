@@ -192,7 +192,7 @@ void MainComponent::updateStatus()
         + juce::String (status.inputChannels) + " IN -> " + juce::String (status.outputChannels) + " OUT  |  "
         + "graph " + juce::String (status.graphLatencySamples) + " smp / " + juce::String (graphMs, 2) + " ms  |  "
         + "DSP " + juce::String (status.cpuLoad * 100.0f, 1) + "% (pk "
-        + juce::String (status.cpuPeak * 100.0f, 0) + "%)  |  xruns "
+        + juce::String (juce::roundToInt (status.cpuPeak * 100.0f)) + "%)  |  xruns "
         + (status.xruns >= 0 ? juce::String (status.xruns) : "?"),
         juce::dontSendNotification);
 
@@ -287,6 +287,13 @@ void MainComponent::showSaveDialog()
         const auto result = engine.savePatch (file);
         setMessage (result.wasOk() ? "Saved " + file.getFileName() : result.getErrorMessage(), result.failed());
     });
+}
+
+void MainComponent::fadeInNow()
+{
+    engine.setPanicMuted (false);
+    setMessage ("Unmuted at startup (--unmute)");
+    updateStatus();
 }
 
 void MainComponent::loadPatchFile (const juce::File& file)

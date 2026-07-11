@@ -57,7 +57,8 @@ enum class NodeKind
     macro,
     spectralFollower,
     script,
-    neuralAmpPlaceholder
+    neuralAmpPlaceholder,
+    neuralPedal
 };
 
 juce::String nodeKindName (NodeKind kind);

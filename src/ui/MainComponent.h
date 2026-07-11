@@ -21,6 +21,9 @@ public:
         starts panic-muted like any other load. */
     void loadPatchFile (const juce::File& file);
 
+    /** --unmute: skip the restore-muted safety pause (appliance opt-in). */
+    void fadeInNow();
+
 private:
     class PaletteButton final : public juce::Button
     {
