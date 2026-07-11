@@ -1057,6 +1057,11 @@ struct TestCase
 
 int main()
 {
+    // Flush every insertion so a crash on CI still shows which test was
+    // running (pipes are fully buffered otherwise).
+    std::cout.setf (std::ios::unitbuf);
+    std::cerr.setf (std::ios::unitbuf);
+
     const std::vector<TestCase> tests {
         { "dynamic hardware port counts", testDynamicHardwarePortCounts },
         { "straight-through rendering", testStraightThroughRendering },
