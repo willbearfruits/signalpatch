@@ -547,6 +547,10 @@ void testNonFiniteAudioAndDelayModulationAreContained()
     auto hostileControl = std::make_shared<NonFiniteControlNode>();
     hostileControl->prepare (sampleRate, blockSize);
     document.getNodes().push_back ({ hostileControlId, hostileControl, { 180.0f, 380.0f }, false });
+    // push_back may reallocate the node vector (it does on MSVC's 1.5x growth,
+    // not on libstdc++'s doubling) — the earlier pointer is invalid now.
+    delayNode = document.findNode (delay);
+    expect (delayNode != nullptr, "modulated delay test node disappeared after insert");
 
     expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 0, delay, 0 }),
               "could not connect hostile hardware audio to delay");
