@@ -59,9 +59,10 @@ and can opt into ASIO when the interface provides an ASIO driver.
   exact value entry with units.
 
 Current boundaries are deliberate: effect nodes are mono, and MIDI/OSC mapping
-and third-party plug-in hosting are not implemented yet. The NAM integration
-follows the staging in `docs/NAM_ROADMAP.md`; its performance-qualification
-gates (Stage 3) have not been run yet.
+and third-party plug-in hosting are not implemented yet. The ordered plan for
+what comes next is `docs/ROADMAP.md`; the NAM integration follows the staging
+in `docs/NAM_ROADMAP.md`, and verification status lives in
+`docs/PRODUCTION_READINESS.md`.
 
 ## Requirements
 
