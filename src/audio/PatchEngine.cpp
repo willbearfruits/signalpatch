@@ -429,6 +429,7 @@ EngineStatus PatchEngine::getStatus() const
     status.outputChannels = currentOutputChannels.load (std::memory_order_relaxed);
     status.graphLatencySamples = graphLatencySamples.load (std::memory_order_relaxed);
     status.cpuLoad = cpuLoad.load (std::memory_order_relaxed);
+    status.cpuPeak = cpuPeak.load (std::memory_order_relaxed);
     status.running = callbackRunning.load (std::memory_order_relaxed);
     status.panicMuted = isPanicMuted();
     status.graphMessage = graphMessage;
@@ -568,8 +569,12 @@ void PatchEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     const auto elapsed = juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - startTicks);
     const auto blockDuration = static_cast<double> (numSamples) / juce::jmax (1.0, sampleRate);
-    cpuLoad.store (static_cast<float> (juce::jlimit (0.0, 4.0, elapsed / blockDuration)),
-                   std::memory_order_relaxed);
+    const auto ratio = static_cast<float> (juce::jlimit (0.0, 4.0, elapsed / blockDuration));
+    cpuLoad.store (ratio, std::memory_order_relaxed);
+    // Worst-case latching matters more than the average; a lost race with the
+    // message-thread decay only shortens how long a peak is displayed.
+    if (ratio > cpuPeak.load (std::memory_order_relaxed))
+        cpuPeak.store (ratio, std::memory_order_relaxed);
 }
 
 void PatchEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
@@ -653,6 +658,8 @@ void PatchEngine::timerCallback()
 {
     reclaimRetiredPlans();
     writeAutosaveIfDue();
+    // Let the displayed worst case fade over a few seconds.
+    cpuPeak.store (cpuPeak.load (std::memory_order_relaxed) * 0.985f, std::memory_order_relaxed);
 
     auto errorLength = pendingDeviceErrorLength.load (std::memory_order_acquire);
     if (errorLength > 0

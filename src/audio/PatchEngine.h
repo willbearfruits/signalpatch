@@ -19,6 +19,7 @@ struct EngineStatus
     int graphLatencySamples = 0;
     int xruns = -1;
     float cpuLoad = 0.0f;
+    float cpuPeak = 0.0f;
     bool running = false;
     bool panicMuted = false;
 };
@@ -103,6 +104,7 @@ private:
     std::atomic<bool> panicMuted { false };
     std::atomic<bool> callbackRunning { false };
     std::atomic<float> cpuLoad { 0.0f };
+    std::atomic<float> cpuPeak { 0.0f };
     std::atomic<int> graphLatencySamples { 0 };
     std::atomic<int> currentInputChannels { 0 };
     std::atomic<int> currentOutputChannels { 0 };

@@ -2,14 +2,85 @@
 #include "../src/audio/Processors.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+// ---------------------------------------------------------------------------
+// Real-time allocation trap. While armed, every route through the global
+// allocator counts as a violation; the render-path test asserts zero. This
+// implements the REALTIME_SAFETY.md gate "run an allocation/deallocation trap
+// around the callback in test builds".
+// Break on rtTrapViolation in a debugger to see exactly which callback-path
+// code allocated.
+extern "C" __attribute__ ((noinline)) void rtTrapViolation()
+{
+    asm volatile (""); // keep the call site alive under optimization
+}
+
+namespace rtTrap
+{
+std::atomic<bool> armed { false };
+std::atomic<int> violations { 0 };
+
+inline void note() noexcept
+{
+    if (armed.load (std::memory_order_relaxed))
+    {
+        violations.fetch_add (1, std::memory_order_relaxed);
+        rtTrapViolation();
+    }
+}
+} // namespace rtTrap
+
+void* operator new (std::size_t size)
+{
+    rtTrap::note();
+    if (auto* pointer = std::malloc (size == 0 ? 1 : size))
+        return pointer;
+    throw std::bad_alloc();
+}
+
+void* operator new[] (std::size_t size)
+{
+    return ::operator new (size);
+}
+
+void* operator new (std::size_t size, std::align_val_t alignment)
+{
+    rtTrap::note();
+    void* pointer = nullptr;
+    if (posix_memalign (&pointer, static_cast<std::size_t> (alignment), size == 0 ? 1 : size) != 0)
+        throw std::bad_alloc();
+    return pointer;
+}
+
+void* operator new[] (std::size_t size, std::align_val_t alignment)
+{
+    return ::operator new (size, alignment);
+}
+
+void operator delete (void* pointer) noexcept
+{
+    rtTrap::note();
+    std::free (pointer); // glibc free() handles malloc and posix_memalign alike
+}
+
+void operator delete[] (void* pointer) noexcept { rtTrap::note(); std::free (pointer); }
+void operator delete (void* pointer, std::size_t) noexcept { rtTrap::note(); std::free (pointer); }
+void operator delete[] (void* pointer, std::size_t) noexcept { rtTrap::note(); std::free (pointer); }
+void operator delete (void* pointer, std::align_val_t) noexcept { rtTrap::note(); std::free (pointer); }
+void operator delete[] (void* pointer, std::align_val_t) noexcept { rtTrap::note(); std::free (pointer); }
+void operator delete (void* pointer, std::size_t, std::align_val_t) noexcept { rtTrap::note(); std::free (pointer); }
+void operator delete[] (void* pointer, std::size_t, std::align_val_t) noexcept { rtTrap::note(); std::free (pointer); }
 
 namespace
 {
@@ -737,6 +808,204 @@ void testNeuralAmpModelLoadsAndProcesses()
 #endif
 }
 
+// Builds a patch containing one of every user-creatable kind: audio effects
+// chained input -> ... -> output, sources mixed in, and controls modulating
+// real destinations. Shared by the allocation-trap and churn tests.
+PatchDocument buildKitchenSinkDocument()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 6), channelNames ("Output", 2));
+    document.prepareAll (sampleRate, blockSize);
+
+    const NodeKind chainKinds[] {
+        NodeKind::gain, NodeKind::distortion, NodeKind::filter, NodeKind::delay,
+        NodeKind::reverb, NodeKind::chorus, NodeKind::phaser, NodeKind::tremolo,
+        NodeKind::bitcrusher, NodeKind::ringMod, NodeKind::vowelFilter,
+        NodeKind::pitchShifter, NodeKind::pitchCorrector, NodeKind::granular,
+        NodeKind::compressor, NodeKind::gate, NodeKind::limiter,
+        NodeKind::neuralAmpPlaceholder, NodeKind::script
+    };
+    NodeId previous = 0;
+    for (const auto kind : chainKinds)
+    {
+        const auto id = document.addNode (kind, { 100.0f, 100.0f });
+        expect (id != 0, "kitchen sink could not create " + nodeKindKey (kind).toStdString());
+        expectOk (document.addConnection (previous == 0
+                                              ? Connection { PatchDocument::hardwareInputId, 0, id, 0 }
+                                              : Connection { previous, 0, id, 0 }),
+                  "kitchen sink chain connection failed at " + nodeKindKey (kind).toStdString());
+        previous = id;
+    }
+    expectOk (document.addConnection ({ previous, 0, PatchDocument::hardwareOutputId, 0 }),
+              "kitchen sink could not reach the hardware output");
+
+    // Sources summed into output 2 through a mixer.
+    const auto mixer = document.addNode (NodeKind::mixer, {});
+    const auto synth = document.addNode (NodeKind::monoSynth, {});
+    const auto drums = document.addNode (NodeKind::drumMachine, {});
+    const auto noise = document.addNode (NodeKind::noiseSource, {});
+    const auto pluck = document.addNode (NodeKind::pluck, {});
+    expectOk (document.addConnection ({ synth, 0, mixer, 0 }), "synth -> mixer");
+    expectOk (document.addConnection ({ drums, 0, mixer, 1 }), "drums -> mixer");
+    expectOk (document.addConnection ({ noise, 0, mixer, 2 }), "noise -> mixer");
+    expectOk (document.addConnection ({ pluck, 0, mixer, 3 }), "pluck -> mixer");
+    expectOk (document.addConnection ({ mixer, 0, PatchDocument::hardwareOutputId, 1 }),
+              "mixer -> output 2");
+
+    // Controls into live modulation targets, and the remaining kinds.
+    const auto lfo = document.addNode (NodeKind::lfo, {});
+    const auto sequencer = document.addNode (NodeKind::stepSequencer, {});
+    const auto randomLfo = document.addNode (NodeKind::randomLfo, {});
+    const auto macro = document.addNode (NodeKind::macro, {});
+    const auto follower = document.addNode (NodeKind::envelopeFollower, {});
+    const auto spectral = document.addNode (NodeKind::spectralFollower, {});
+    const auto crossfade = document.addNode (NodeKind::crossfade, {});
+    const auto sampler = document.addNode (NodeKind::sampler, {});
+    const auto fourTrack = document.addNode (NodeKind::fourTrack, {});
+    auto* synthNode = document.findNode (synth);
+    expect (synthNode != nullptr, "synth disappeared");
+    expectOk (document.addConnection ({ lfo, 0, synth,
+                                        synthNode->processor->getParameter (1).inputPortIndex }),
+              "lfo -> synth pitch mod");
+    expectOk (document.addConnection ({ sequencer, 0, synth, 0 }), "sequencer -> synth gate");
+    expectOk (document.addConnection ({ randomLfo, 0, pluck, 0 }), "random -> pluck trigger");
+    expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 1, follower, 0 }),
+              "input 2 -> envelope follower");
+    expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 2, spectral, 0 }),
+              "input 3 -> spectral follower");
+    expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 3, crossfade, 0 }),
+              "input 4 -> crossfade A");
+    expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 4, crossfade, 1 }),
+              "input 5 -> crossfade B");
+    expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 5, sampler, 0 }),
+              "input 6 -> sampler");
+    expectOk (document.addConnection ({ crossfade, 0, fourTrack, 0 }), "crossfade -> 4-track");
+    juce::ignoreUnused (macro);
+
+    // A guarded feedback loop around a gain stage.
+    const auto loopGain = document.addNode (NodeKind::gain, {});
+    const auto guard = document.addNode (NodeKind::feedbackGuard, {});
+    expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 1, loopGain, 0 }),
+              "input 2 -> loop gain");
+    expectOk (document.addConnection ({ loopGain, 0, guard, 0 }), "loop gain -> guard");
+    expectOk (document.addConnection ({ guard, 0, loopGain, 0 }), "guard -> loop gain");
+
+    // A vocoder fed voice and carrier.
+    const auto vocoder = document.addNode (NodeKind::vocoder, {});
+    expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 0, vocoder, 0 }),
+              "input 1 -> vocoder voice");
+    expectOk (document.addConnection ({ synth, 0, vocoder, 1 }), "synth -> vocoder carrier");
+
+    // Real NAM model when present so inference runs under the trap too.
+    const auto namModel = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+        .getChildFile ("Projects/GitHub/external_clones/neural-amp-modeler-lv2-a2/models/BossWN-feather.nam");
+    if (namModel.existsAsFile())
+        for (auto& node : document.getNodes())
+            if (node.processor->getKind() == NodeKind::neuralAmpPlaceholder)
+            {
+                auto state = std::make_unique<juce::DynamicObject>();
+                state->setProperty ("model", namModel.getFullPathName());
+                node.processor->setExtraState (juce::var (state.release()));
+            }
+
+    return document;
+}
+
+void renderPlanBlocks (RenderPlan& plan, int blockCount, bool varyBlockSizes, bool armTrap = false)
+{
+    // Everything the harness itself needs is allocated before the trap arms;
+    // inside the armed window only plan.render and arithmetic may run.
+    std::vector<std::vector<float>> inputStorage (6, std::vector<float> (blockSize, 0.0f));
+    std::vector<std::vector<float>> outputStorage (2, std::vector<float> (blockSize, 0.0f));
+    std::vector<const float*> inputPointers;
+    std::vector<float*> outputPointers;
+    for (const auto& channel : inputStorage)
+        inputPointers.push_back (channel.data());
+    for (auto& channel : outputStorage)
+        outputPointers.push_back (channel.data());
+
+    bool allFinite = true;
+    if (armTrap)
+    {
+        rtTrap::violations.store (0);
+        rtTrap::armed.store (true);
+    }
+
+    double phase = 0.0;
+    for (int block = 0; block < blockCount; ++block)
+    {
+        const auto numSamples = ! varyBlockSizes ? blockSize
+                              : (block % 3 == 0 ? 17 : (block % 3 == 1 ? 48 : blockSize));
+        for (auto& channel : inputStorage)
+            for (int sample = 0; sample < numSamples; ++sample)
+            {
+                channel[static_cast<std::size_t> (sample)] = 0.4f * static_cast<float> (
+                    std::sin (juce::MathConstants<double>::twoPi * 180.0 * phase / sampleRate));
+                phase += 1.0;
+            }
+        plan.render (inputPointers.data(), 6, outputPointers.data(), 2, 0, numSamples);
+        for (int channel = 0; channel < 2; ++channel)
+            for (int sample = 0; sample < numSamples; ++sample)
+                allFinite = allFinite
+                         && std::isfinite (outputStorage[static_cast<std::size_t> (channel)]
+                                                        [static_cast<std::size_t> (sample)]);
+    }
+
+    if (armTrap)
+        rtTrap::armed.store (false);
+    expect (allFinite, "kitchen-sink render produced a non-finite output sample");
+}
+
+void testCallbackPathDoesNotAllocate()
+{
+    auto document = buildKitchenSinkDocument();
+    auto compiled = GraphCompiler::compile (document, blockSize);
+    expect (compiled.succeeded(), "kitchen-sink graph did not compile: "
+                                  + compiled.error.toStdString());
+
+    // Warm-up outside the trap: lazy one-time work is allowed before
+    // publication, never inside the callback.
+    renderPlanBlocks (*compiled.plan, 8, false);
+
+    // SIGNALPATCH_SOAK_BLOCKS turns this into a long soak (e.g. 1687500
+    // blocks = 30 minutes of 48 kHz/64 audio through the worst-case graph).
+    auto blockCount = 400;
+    if (const auto* soak = std::getenv ("SIGNALPATCH_SOAK_BLOCKS"))
+        blockCount = juce::jmax (blockCount, std::atoi (soak));
+    renderPlanBlocks (*compiled.plan, blockCount, true, true);
+
+    const auto violations = rtTrap::violations.load();
+    expect (violations == 0,
+            "the render path allocated or freed memory " + std::to_string (violations)
+            + " time(s) - REALTIME_SAFETY.md forbids this");
+}
+
+void testRecompileChurnKeepsRendering()
+{
+    auto document = buildKitchenSinkDocument();
+    for (int round = 0; round < 25; ++round)
+    {
+        const auto extra = document.addNode (NodeKind::filter, {});
+        expect (extra != 0, "churn round could not add a filter");
+        expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 2, extra, 0 }),
+                  "churn connection failed");
+        auto compiled = GraphCompiler::compile (document, blockSize);
+        expect (compiled.succeeded(), "churn graph stopped compiling: "
+                                      + compiled.error.toStdString());
+        renderPlanBlocks (*compiled.plan, 6, true);
+        expect (document.removeNode (extra), "churn round could not remove the filter");
+        // Parameter gesture bursts between compiles, like a live performer.
+        for (auto& node : document.getNodes())
+            if (node.processor->getNumParameters() > 0)
+                node.processor->getParameter (0).setValue (
+                    node.processor->getParameter (0).range.convertFrom0to1 (
+                        static_cast<float> (round) / 25.0f));
+    }
+    auto finalCompiled = GraphCompiler::compile (document, blockSize);
+    expect (finalCompiled.succeeded(), "graph no longer compiles after churn");
+    renderPlanBlocks (*finalCompiled.plan, 20, true);
+}
+
 struct TestCase
 {
     const char* name;
@@ -760,7 +1029,9 @@ int main()
         { "Feedback Guard reset request", testFeedbackGuardResetIsConsumedByRender },
         { "JSON round-trip", testJsonRoundTrip },
         { "all node kinds render finite output", testAllNodeKindsRenderFiniteOutput },
-        { "NAM model loads and processes", testNeuralAmpModelLoadsAndProcesses }
+        { "NAM model loads and processes", testNeuralAmpModelLoadsAndProcesses },
+        { "callback path performs no allocation", testCallbackPathDoesNotAllocate },
+        { "recompile churn keeps rendering", testRecompileChurnKeepsRendering }
     };
 
     int failures = 0;

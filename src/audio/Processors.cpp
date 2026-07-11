@@ -633,31 +633,36 @@ public:
             return;
         modelPath = path;
         loadError.clear();
-        try
+
+        // Headless (tests): no message loop, load synchronously.
+        if (juce::MessageManager::getInstanceWithoutCreating() == nullptr)
         {
-            // Message-thread work: parse, allocate and warm the model, then
-            // hand it to the callback atomically. The previous model is kept
-            // alive until the next load so audio never frees it.
-            auto loaded = nam::get_dsp (std::filesystem::path (path.toStdString()));
-            if (loaded == nullptr)
-                throw std::runtime_error ("unrecognized model format");
-            if (loaded->NumInputChannels() != 1 || loaded->NumOutputChannels() != 1)
-                throw std::runtime_error ("only mono models are supported");
-            loaded->ResetAndPrewarm (sampleRate, juce::jmax (16, maximumBlockSize));
-            activeModel.store (nullptr, std::memory_order_release);
-            retiredModel = std::move (currentModel);
-            currentModel = std::move (loaded);
-            activeModel.store (currentModel.get(), std::memory_order_release);
+            juce::String error;
+            finishModelLoad (path, parseModel (path, error), error);
+            return;
         }
-        catch (const std::exception& error)
+
+        // Parsing a big WaveNet can take a second; do it on a worker so the
+        // UI never freezes, then apply on the message thread. The weak handle
+        // survives node deletion while the worker runs.
+        loading.store (true, std::memory_order_relaxed);
+        std::weak_ptr<DspNode> weakSelf = weak_from_this();
+        juce::Thread::launch ([weakSelf, path]
         {
-            loadError = error.what();
-            activeModel.store (nullptr, std::memory_order_release);
-        }
+            juce::String error;
+            auto loaded = std::make_shared<std::unique_ptr<nam::DSP>> (parseModel (path, error));
+            juce::MessageManager::callAsync ([weakSelf, path, error, loaded]
+            {
+                if (auto locked = weakSelf.lock())
+                    static_cast<NeuralAmpNode&> (*locked).finishModelLoad (path, std::move (*loaded), error);
+            });
+        });
     }
 
     juce::String statusText() const override
     {
+        if (loading.load (std::memory_order_relaxed))
+            return "loading " + juce::File (modelPath).getFileName() + "...";
         if (loadError.isNotEmpty())
             return "LOAD FAILED: " + loadError;
         if (activeModel.load (std::memory_order_relaxed) == nullptr)
@@ -671,6 +676,46 @@ public:
     }
 
 private:
+    static std::unique_ptr<nam::DSP> parseModel (const juce::String& path, juce::String& error)
+    {
+        try
+        {
+            auto loaded = nam::get_dsp (std::filesystem::path (path.toStdString()));
+            if (loaded == nullptr)
+                throw std::runtime_error ("unrecognized model format");
+            if (loaded->NumInputChannels() != 1 || loaded->NumOutputChannels() != 1)
+                throw std::runtime_error ("only mono models are supported");
+            return loaded;
+        }
+        catch (const std::exception& caught)
+        {
+            error = caught.what();
+            return nullptr;
+        }
+    }
+
+    // Message thread only. Warms the model for the current device settings
+    // and hands it to the callback atomically; the previous model is retained
+    // until the next successful load so audio never frees or races it.
+    void finishModelLoad (const juce::String& path, std::unique_ptr<nam::DSP> loaded,
+                          const juce::String& error)
+    {
+        if (path != modelPath)
+            return; // superseded by a newer request
+        loading.store (false, std::memory_order_relaxed);
+        if (loaded == nullptr)
+        {
+            loadError = error.isNotEmpty() ? error : "could not load the model";
+            activeModel.store (nullptr, std::memory_order_release);
+            return;
+        }
+        loadError.clear();
+        loaded->ResetAndPrewarm (sampleRate, juce::jmax (16, maximumBlockSize));
+        activeModel.store (nullptr, std::memory_order_release);
+        retiredModel = std::move (currentModel);
+        currentModel = std::move (loaded);
+        activeModel.store (currentModel.get(), std::memory_order_release);
+    }
     void prepareDsp (double newSampleRate, int newMaximumBlockSize) override
     {
         sampleRate = newSampleRate;
@@ -731,6 +776,7 @@ private:
     std::unique_ptr<nam::DSP> currentModel;
     std::unique_ptr<nam::DSP> retiredModel;
     std::atomic<nam::DSP*> activeModel { nullptr };
+    std::atomic<bool> loading { false };
     std::vector<float> scratchIn;
     std::vector<float> scratchOut;
     int maximumBlockSize = 128;

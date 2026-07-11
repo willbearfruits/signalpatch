@@ -134,7 +134,10 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoother;
 };
 
-class DspNode
+// enable_shared_from_this: nodes are always owned by shared_ptr (document +
+// render plans), and async workers (e.g. NAM model loading) need a weak
+// handle that outlives UI rebuilds.
+class DspNode : public std::enable_shared_from_this<DspNode>
 {
 public:
     DspNode (NodeKind kindToUse, juce::String displayName);

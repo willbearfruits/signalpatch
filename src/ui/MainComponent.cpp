@@ -191,7 +191,8 @@ void MainComponent::updateStatus()
         + juce::String (status.bufferSize) + " samples (" + juce::String (bufferMs, 2) + " ms/buffer)  |  "
         + juce::String (status.inputChannels) + " IN -> " + juce::String (status.outputChannels) + " OUT  |  "
         + "graph " + juce::String (status.graphLatencySamples) + " smp / " + juce::String (graphMs, 2) + " ms  |  "
-        + "DSP " + juce::String (status.cpuLoad * 100.0f, 1) + "%  |  xruns "
+        + "DSP " + juce::String (status.cpuLoad * 100.0f, 1) + "% (pk "
+        + juce::String (status.cpuPeak * 100.0f, 0) + "%)  |  xruns "
         + (status.xruns >= 0 ? juce::String (status.xruns) : "?"),
         juce::dontSendNotification);
 

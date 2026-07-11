@@ -1,4 +1,4 @@
-# Production readiness — status as of 2026-07-11
+# Production readiness — status as of 2026-07-11 (hardening pass 2)
 
 This document records what has been audited, what is verified by tests, and
 what remains open against the gates in `REALTIME_SAFETY.md` and the MVP scope
@@ -41,24 +41,26 @@ next swap; feedback-guard delay/reset semantics are pinned by tests.
 
 | Gate | State |
 | --- | --- |
-| Unit tests: prepare/reset, variable block lengths, bypass, invalid boundaries | Partial — 14 engine tests incl. all-kinds finite-output sweep with alternating 17/64-sample blocks; per-node parameter-boundary tests not exhaustive |
-| Allocation/deallocation trap around the callback | **Open** — no trap harness yet |
-| 30-minute worst-case soak at 48 kHz/64 on target machines | **Open** |
-| Stress: UI stalls, rapid edits, overflow, device restart | Partial — exercised manually, not automated |
+| Unit tests: prepare/reset, variable block lengths, bypass, invalid boundaries | Partial — 16 engine tests incl. all-kinds finite-output sweep with alternating block sizes; per-node parameter-boundary tests not exhaustive |
+| Allocation/deallocation trap around the callback | **Closed** — global new/delete trap (incl. aligned forms) armed around a kitchen-sink graph (every node kind, guarded feedback, live NAM inference); zero allocations over 400 variable-size blocks ("callback path performs no allocation" test) |
+| 30-minute worst-case soak at 48 kHz/64 | **Closed (offline)** — 1.69 M blocks (30 min of 48 kHz audio) rendered through the kitchen-sink graph under the allocation trap with finite outputs (`SIGNALPATCH_SOAK_BLOCKS=1687500`). A live-device wall-clock soak with xrun counting remains worthwhile before a stage gig |
+| Stress: rapid edits/recompiles | Partial — "recompile churn keeps rendering" test (25 add/connect/compile/remove rounds with parameter bursts); live UI-stall stress not automated |
 | Adversarial signals (NaN/Inf/full-scale/subnormal) | Partial — guard containment + all-kinds sweep tested; per-node NaN injection only for delay/guard |
-| Callback duration distribution measurement | **Open** — only average CPU load is displayed |
-| TSan/ASan/UBSan runs | **Open** |
+| Callback duration measurement | **Closed** — worst-case callback ratio latched in the callback, displayed as "DSP x% (pk y%)" with slow decay |
+| ASan/UBSan runs | **Closed** — full test suite passes under `-fsanitize=address,undefined -fno-sanitize-recover=all` (`build-asan/`) |
+| TSan run | **Open** — cross-thread engine paths not yet exercised under TSan |
 
 ## NAM status vs. NAM_ROADMAP.md
 
 Stages 0–2 are functionally in place (optional build boundary, model
 load/prewarm off the audio thread, atomic swap, patch persistence, mono
-enforcement, engine test loading a real WaveNet model). Stage 3 (performance
-qualification: benchmark matrix, callback-time percentiles, honest supported
-configurations) has **not** been run; heavy models on small buffers are
-unqualified. Model load currently runs synchronously on the message thread
-(UI freeze of ~0.1–1 s per load); the roadmap's worker-thread staging is still
-to do.
+enforcement, engine test loading a real WaveNet model). Model parsing now runs
+on a worker thread (`juce::Thread::launch` + message-thread apply through a
+weak node handle), so loading no longer freezes the UI; the node shows
+"loading ..." until the swap. NAM inference is covered by the allocation trap.
+Stage 3 (performance qualification: benchmark matrix across model classes and
+buffer sizes, honest supported configurations) has **not** been run; heavy
+models on small buffers remain unqualified.
 
 ## Known deliberate boundaries (not defects)
 
