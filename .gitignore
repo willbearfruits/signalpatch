@@ -1,0 +1,41 @@
+# CMake build trees and generated metadata
+/build/
+/build-*/
+/out/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+Testing/
+cmake_install.cmake
+compile_commands.json
+_deps/
+
+# JUCE and native build artefacts
+*_artefacts/
+*.a
+*.dll
+*.dylib
+*.exe
+*.ilk
+*.lib
+*.obj
+*.pdb
+*.so
+
+# Editors and operating systems
+.idea/
+.vs/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Runtime leftovers
+*.log
+*.tmp
+
+# Local Claude Code permissions
+.claude/settings.local.json

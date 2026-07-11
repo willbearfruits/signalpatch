@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "format": "signalpatch",
+  "nodes": [
+    {
+      "id": 500,
+      "kind": "neural-amp",
+      "name": "Neural Amp",
+      "x": 620.0,
+      "y": 140.0,
+      "parameters": [],
+      "extra": { "model": "/home/glitches/Projects/GitHub/external_clones/neural-amp-modeler-lv2-a2/models/BossWN-feather.nam" }
+    },
+    { "id": 501, "kind": "granular-cloud", "name": "Granular", "x": 950.0, "y": 140.0, "parameters": [] },
+    { "id": 502, "kind": "limiter", "name": "Limiter", "x": 1280.0, "y": 140.0, "parameters": [] },
+    { "id": 503, "kind": "drum-machine-8", "name": "Drum Machine", "x": 620.0, "y": 760.0, "parameters": [] },
+    {
+      "id": 504,
+      "kind": "script-expr",
+      "name": "Script",
+      "x": 1280.0,
+      "y": 760.0,
+      "parameters": [],
+      "extra": { "expr": "tanh(x * (1 + a * 9)) + noise() * b * 0.1" }
+    },
+    { "id": 505, "kind": "step-sequencer-8", "name": "8-Step Sequencer", "x": 300.0, "y": 760.0, "parameters": [] },
+    { "id": 506, "kind": "mono-synth", "name": "Mono Synth", "x": 950.0, "y": 760.0, "parameters": [] }
+  ],
+  "connections": [
+    { "sourceNode": 1, "sourcePort": 0, "destinationNode": 500, "destinationPort": 0 },
+    { "sourceNode": 500, "sourcePort": 0, "destinationNode": 501, "destinationPort": 0 },
+    { "sourceNode": 501, "sourcePort": 0, "destinationNode": 502, "destinationPort": 0 },
+    { "sourceNode": 502, "sourcePort": 0, "destinationNode": 2, "destinationPort": 0 },
+    { "sourceNode": 503, "sourcePort": 0, "destinationNode": 2, "destinationPort": 1 },
+    { "sourceNode": 505, "sourcePort": 0, "destinationNode": 506, "destinationPort": 2 },
+    { "sourceNode": 506, "sourcePort": 0, "destinationNode": 504, "destinationPort": 0 },
+    { "sourceNode": 504, "sourcePort": 0, "destinationNode": 2, "destinationPort": 2 }
+  ]
+}
