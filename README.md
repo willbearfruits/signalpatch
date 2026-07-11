@@ -99,14 +99,17 @@ flatpak run io.github.willbearfruits.SignalPatch
 
 ### Windows
 
-From a Visual Studio 2022 developer shell:
+From a Visual Studio (2022 or newer) developer shell:
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake -S . -B build -A x64
 cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 .\build\signalpatch_artefacts\Release\SignalPatch.exe
 ```
+
+(CMake picks your installed Visual Studio; add `-G "Visual Studio 17 2022"`
+to pin a specific one.)
 
 WASAPI is on by default; add `-DSIGNALPATCH_ENABLE_ASIO=ON` for ASIO (brings
 the Steinberg ASIO SDK licence terms into scope).
