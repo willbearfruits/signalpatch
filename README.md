@@ -1,111 +1,103 @@
 # SignalPatch
 
-SignalPatch is a native, cross-platform modular effects processor for Linux and
-Windows. Its patch graph discovers the selected sound device's actual input
-channel count instead of assuming that every interface has six inputs.
+**A real-time modular rack for guitar, voice and synthesis — patch it like
+hardware, play it like an instrument.**
 
-The application is built in C++20 with JUCE so audio processing stays in a
-native callback. Linux builds expose JUCE's ALSA and JACK backends; JACK can
-also run through PipeWire with `pw-jack`. Windows builds always expose WASAPI
-and can opt into ASIO when the interface provides an ASIO driver.
+[![CI](https://github.com/willbearfruits/signalpatch/actions/workflows/ci.yml/badge.svg)](https://github.com/willbearfruits/signalpatch/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Website](https://img.shields.io/badge/website-willbearfruits.github.io%2Fsignalpatch-4fd8c4)](https://willbearfruits.github.io/signalpatch/)
 
-## What works now
+![SignalPatch rack](docs/assets/rack.png)
 
-- The selected device's physical channel names become patch ports. Sparse
-  channel masks keep their physical identity, and unavailable saved channels
-  remain visible as disconnected placeholders instead of being silently
-  remapped or deleted.
-- The custom immutable render graph supports typed audio/control cables,
-  live graph replacement, fan-in/fan-out, and audio-rate modulation sockets on
-  every exposed parameter.
-- 33 built-in boxes across six palette groups: utility (gain, 4-ch mixer,
-  crossfade), effects (distortion, SVF filter, delay, reverb, chorus, phaser,
-  tremolo, bitcrusher, ring mod, pitch shifter, granular cloud, Neural Amp),
-  voice (vowel/formant filter, 12-band vocoder, autotune), instruments (mono
-  synth, Karplus-Strong pluck, noise, 3-lane drum machine, live-input sampler,
-  60 s 4-track tape loop with varispeed), dynamics (compressor, limiter, noise
-  gate, Feedback Guard) and control (LFO, random S&H, envelope follower,
-  8-step sequencer, macro, FFT spectral follower, per-sample Script node).
-- Rack/pedalboard interaction: modules wear accent-coloured face plates with
-  mounting rails, screws and an output-activity LED; every effect has a stomp
-  footswitch with an LED for true bypass; cables sag, carry flowing signal
-  comets and are coloured by their source module; right-click on empty canvas
-  adds a node at the cursor, right-click on a node offers bypass/delete.
-- Autosave recovery: on startup the last session is restored muted; the
-  default patch is only created when no autosave exists. Current audit status
-  lives in `docs/PRODUCTION_READINESS.md`.
-- The Neural Amp box runs real NAM models when built against a
-  NeuralAmpModelerCore checkout (`SIGNALPATCH_ENABLE_NAM`, on by default when
-  the checkout is present). Model loading and warm-up happen on the message
-  thread and are handed to the callback atomically; the model path is saved in
-  the patch. Without the checkout the box stays a safe passthrough.
-- A patch path can be passed on the command line:
-  `SignalPatch demo-pedalboard.signalpatch` (loads panic-muted).
-- On first launch (no saved audio state) the engine scans backends for a
-  Zoom F4 / H-series interface and opens it with every channel enabled;
-  once any device choice is saved, the saved state always wins.
-- Every cycle must contain a Feedback Guard. It provides a fixed causal delay,
-  gain, DC blocking, finite-value checks, a hard bound, runaway latching, and
-  a local reset. Device outputs also have a fixed safety ceiling and a 5 ms
-  panic/restart ramp.
-- Nodes show process-specific scopes, step state, delay decay, or gain
-  reduction. Cable brightness and moving pulses follow signal level; clipping
-  gets an explicit marker.
-- Patches save/load as versioned `.signalpatch` JSON, edit autosaves are kept
-  separately, and audio-device/backend/channel/buffer choices persist across
-  launches. Loaded patches stay muted until the user deliberately fades them
-  back in.
-- The canvas supports cable and node deletion, scroll/pan, 50-160% zoom, and
-  exact value entry with units.
+SignalPatch turns an audio interface into a patchable rack: drag cables
+between modules while the sound keeps running, stomp any effect in or out of
+the chain, feed real **Neural Amp Modeler** profiles, vocode and autotune a
+voice, sequence a synth and a drum machine, and bounce ideas onto a virtual
+4-track — all in one native C++/JUCE application built around a
+real-time-safe render graph.
 
-Current boundaries are deliberate: effect nodes are mono, and MIDI/OSC mapping
-and third-party plug-in hosting are not implemented yet. The ordered plan for
-what comes next is `docs/ROADMAP.md`; the NAM integration follows the staging
-in `docs/NAM_ROADMAP.md`, and verification status lives in
-`docs/PRODUCTION_READINESS.md`.
+## The end goal
 
-## Requirements
+SignalPatch is being built toward a specific destination: **a handheld
+device — an ASUS ROG Ally class machine — as a self-contained guitar
+patching studio, voice processor and synthesizer.** Plug a guitar or a mic
+into a small interface, pick up the handheld, and the whole rack is an
+instrument you hold: stomp switches on triggers, macro knobs on sticks,
+patching on the touchscreen. Every phase of the [roadmap](docs/ROADMAP.md)
+walks toward that.
 
-- CMake 3.22 or newer
-- A C++20 compiler
-- Ninja, Make, or Visual Studio 2022
-- JUCE 8.0.13
-- Linux: ALSA and JACK development packages
+## What it does today
 
-CMake first looks for an installed JUCE 8.0.13 package. On this workstation it
-resolves `/usr/local/lib/cmake/JUCE-8.0.13`. If the package is unavailable,
-CMake fetches the pinned `8.0.13` release from the official JUCE repository.
-Disable network fallback with `-DSIGNALPATCH_ALLOW_JUCE_FETCH=OFF`.
+- **35 modules** across six families:
+  *utility* (gain, 4-ch mixer, crossfade) ·
+  *effects* (distortion, SVF filter, delay, reverb, chorus, phaser, tremolo,
+  bitcrusher, ring mod, pitch shifter, granular cloud, Neural Amp) ·
+  *voice* (vowel/formant filter, 12-band vocoder, autotune) ·
+  *instruments* (mono synth, Karplus-Strong pluck, noise, drum machine,
+  live-input sampler, 60 s 4-track tape with varispeed) ·
+  *dynamics* (compressor, limiter, noise gate, Feedback Guard) ·
+  *control* (LFO, random S&H, envelope follower, 8-step sequencer, macro,
+  FFT spectral follower, and a **Script** module that compiles a per-sample
+  math expression on the fly).
+- **Neural Amp Modeler, for real.** Load any `.nam` profile; parsing happens
+  on a worker thread and the model swaps into the audio path atomically. The
+  model path is saved with the patch.
+- **Rack interaction.** Accent-coloured face plates with rails, screws and
+  activity LEDs; true-bypass stomp footswitches; cables that sag, glow with
+  signal level and carry flow pulses toward their destination; right-click
+  patching; a signal-aware inspector.
+- **Feedback as a feature, safely.** Cycles are legal only through a
+  Feedback Guard (causal delay → DC block → finite check → hard ceiling with
+  runaway latching). Outputs carry a fixed safety ceiling; loaded patches
+  come back muted and fade in deliberately.
+- **Everything is modulatable.** Every knob has a mod socket; any control
+  signal (LFO, envelope, sequencer, spectral band, macro, MIDI later) can
+  drive any parameter.
+- **Session honesty.** Versioned JSON patches, autosave recovery on launch,
+  device/channel identity preserved even when the interface changes.
 
-## Configure and build on Linux
+## Engineering posture
+
+The audio callback allocates nothing, locks nothing and never blocks — and
+that is *tested*, not asserted: a global allocation trap arms around a
+worst-case graph (every module, guarded feedback, live NAM inference) in the
+test suite, a 30-minutes-of-audio soak runs the same graph, and the suite
+passes ASan+UBSan. Graph edits compile an immutable snapshot on the message
+thread and swap at a block boundary; retired snapshots are reclaimed off the
+audio thread. Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+[`docs/REALTIME_SAFETY.md`](docs/REALTIME_SAFETY.md),
+[`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md).
+
+## Build
+
+Requirements: CMake ≥ 3.22, a C++20 compiler, Ninja/Make/VS2022. JUCE 8.0.13
+and NeuralAmpModelerCore are fetched automatically when not found locally
+(`-DSIGNALPATCH_ALLOW_JUCE_FETCH=OFF` disables the JUCE fallback;
+`-DSIGNALPATCH_ENABLE_NAM=OFF` builds without the neural amp).
+
+### Linux
 
 ```sh
-cmake -S . -B build -G Ninja \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DJUCE_DIR=/usr/local/lib/cmake/JUCE-8.0.13
+sudo apt install ninja-build libasound2-dev libjack-jackd2-dev \
+  libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev \
+  libfreetype6-dev libfontconfig1-dev
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
+./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch          # ALSA/JACK
+pw-jack ./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch  # PipeWire
 ```
 
-Run the application:
+### Flatpak
 
 ```sh
-./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch
+flatpak install flathub org.flatpak.Builder org.freedesktop.Sdk//24.08
+flatpak run org.flatpak.Builder --user --install --force-clean \
+    build-flatpak packaging/flatpak/io.github.willbearfruits.SignalPatch.yml
+flatpak run io.github.willbearfruits.SignalPatch
 ```
 
-If the desktop audio graph is managed by PipeWire and the JACK backend is
-preferred, run it through the installed bridge:
-
-```sh
-pw-jack ./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch
-```
-
-For live monitoring, start with 48 kHz and a 128-sample buffer, then try 64
-samples if the device and patch remain stable. A 64-sample buffer at 48 kHz is
-1.33 ms per buffer; complete input-to-output latency is higher because drivers
-and converters add their own buffers.
-
-## Configure and build on Windows
+### Windows
 
 From a Visual Studio 2022 developer shell:
 
@@ -116,34 +108,38 @@ ctest --test-dir build -C Release --output-on-failure
 .\build\signalpatch_artefacts\Release\SignalPatch.exe
 ```
 
-WASAPI is enabled by default. For the lowest latency with a hardware interface,
-enable ASIO at configure time:
+WASAPI is on by default; add `-DSIGNALPATCH_ENABLE_ASIO=ON` for ASIO (brings
+the Steinberg ASIO SDK licence terms into scope).
 
-```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-  -DSIGNALPATCH_ENABLE_ASIO=ON
-```
+A patch file can be passed on the command line:
+`SignalPatch demo-pedalboard.signalpatch` (loads muted; press MUTED to fade
+in — the same applies to the restored last session).
 
-ASIO support only helps when a suitable driver is installed. It also brings
-the Steinberg ASIO SDK licence terms into scope.
+## Neural Amp Modeler notes
 
-## Repository layout
+The `Neural Amp` module builds against
+[NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore)
+(pinned commit, fetched automatically, with a tiny guard patch from
+`packaging/patches/` for toolchains whose libstdc++ predates
+`std::atomic<std::shared_ptr>`). Point `SIGNALPATCH_NAM_CORE_DIR` at a local
+checkout to skip the fetch. Get `.nam` profiles from
+[ToneHunt](https://tonehunt.org) and load them with the module's
+**LOAD MODEL** button; performance qualification for heavy models at small
+buffers is roadmap item 0.4.
 
-```text
-src/Main.cpp          application entry point
-src/audio/            real-time graph, nodes, effects, metering and safety
-src/ui/               patch canvas, boxes, cables and visualisations
-tests/EngineTests.cpp audio-engine console tests
-docs/                 product and architecture notes
-```
+## Documentation
 
-The CMake target names are `signalpatch` and `signalpatch_tests`.
+| Doc | What it is |
+| --- | --- |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | The ordered plan, 0.2 → handheld instrument |
+| [`docs/PRODUCT.md`](docs/PRODUCT.md) | Product specification |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Engine design: document → compiler → snapshot |
+| [`docs/REALTIME_SAFETY.md`](docs/REALTIME_SAFETY.md) | The audio-callback contract (a release gate) |
+| [`docs/NAM_ROADMAP.md`](docs/NAM_ROADMAP.md) | Neural amp staging and gates |
+| [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md) | Which verification gates are closed vs. open |
 
-## Licensing
+## Licence
 
-JUCE 8 modules are dual-licensed under AGPLv3 and JUCE's commercial licence.
-Choose and comply with one of those licences before distributing SignalPatch.
-Enabling `SIGNALPATCH_ENABLE_ASIO` additionally requires compliance with the
-licence bundled with JUCE's Steinberg ASIO SDK headers. SignalPatch itself does
-not yet declare a distribution licence; add one before publishing binaries or
-source.
+SignalPatch is released under the **GNU AGPL-3.0** (see [LICENSE](LICENSE)),
+matching JUCE 8's open-source licence tier. NeuralAmpModelerCore is MIT;
+enabling ASIO additionally involves Steinberg's SDK licence.

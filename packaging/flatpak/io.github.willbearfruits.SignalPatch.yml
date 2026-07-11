@@ -1,0 +1,42 @@
+# Local build:
+#   flatpak run org.flatpak.Builder --user --install --force-clean \
+#       build-flatpak packaging/flatpak/io.github.willbearfruits.SignalPatch.yml
+#   flatpak run io.github.willbearfruits.SignalPatch
+#
+# JACK inside the sandbox is PipeWire's JACK shim shipped with the
+# freedesktop runtime; the pipewire socket is shared in. Note: this manifest
+# allows network during build because JUCE and NeuralAmpModelerCore are
+# fetched at configure time — fine for local builds; a Flathub submission
+# would need those vendored as manifest sources instead.
+app-id: io.github.willbearfruits.SignalPatch
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: SignalPatch
+finish-args:
+  - --share=ipc
+  - --socket=x11
+  - --device=dri
+  - --socket=pulseaudio
+  - --filesystem=xdg-run/pipewire-0
+  - --env=LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/pipewire-0.3/jack
+  - --filesystem=xdg-music
+  - --filesystem=xdg-documents
+modules:
+  - name: signalpatch
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - -DSIGNALPATCH_NAM_CORE_DIR=/nonexistent
+    build-options:
+      build-args:
+        - --share=network
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - build
+          - build-asan
+          - build-flatpak
+          - .git

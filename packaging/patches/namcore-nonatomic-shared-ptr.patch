@@ -1,0 +1,35 @@
+diff --git a/NAM/wavenet/slimmable.cpp b/NAM/wavenet/slimmable.cpp
+index 19b019e..fcef6df 100644
+--- a/NAM/wavenet/slimmable.cpp
++++ b/NAM/wavenet/slimmable.cpp
+@@ -291,7 +291,7 @@ bool is_full_size(const std::vector<wavenet::LayerArrayParams>& params, const st
+ 
+ } // anonymous namespace
+ 
+-#ifdef _LIBCPP_VERSION
++#if defined(_LIBCPP_VERSION) || defined(NAM_NONATOMIC_SHARED_PTR)
+ void SlimmableWavenet::_pending_clear_release()
+ {
+   std::atomic_store_explicit(&_pending_staged, std::shared_ptr<StagedSlimModel>{}, std::memory_order_release);
+diff --git a/NAM/wavenet/slimmable.h b/NAM/wavenet/slimmable.h
+index f0687c0..bf16907 100644
+--- a/NAM/wavenet/slimmable.h
++++ b/NAM/wavenet/slimmable.h
+@@ -3,7 +3,7 @@
+ #include <memory>
+ #include <vector>
+ 
+-#ifdef _LIBCPP_VERSION
++#if defined(_LIBCPP_VERSION) || defined(NAM_NONATOMIC_SHARED_PTR)
+ // libc++: std::atomic<std::shared_ptr<T>> is not viable; staging uses deprecated atomic_* free functions.
+ #else
+   #include <atomic>
+@@ -70,7 +70,7 @@ private:
+     std::shared_ptr<DSP> model;
+     std::vector<int> channels;
+   };
+-#ifdef _LIBCPP_VERSION
++#if defined(_LIBCPP_VERSION) || defined(NAM_NONATOMIC_SHARED_PTR)
+   /// Staged model; synchronized via deprecated std::atomic_* overloads for shared_ptr only.
+   std::shared_ptr<StagedSlimModel> _pending_staged;
+ #else

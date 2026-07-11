@@ -51,27 +51,52 @@ set(SIGNALPATCH_COMMON_DEFINITIONS
     JUCE_VST3_CAN_REPLACE_VST2=0)
 
 # --- Neural Amp Modeler core (third-party, compiled quietly as a static lib).
+# Source resolution order: a local checkout (SIGNALPATCH_NAM_CORE_DIR), then a
+# pinned upstream fetch. Both get the small guard patch shipped in
+# packaging/patches (GCC 11's libstdc++ lacks std::atomic<std::shared_ptr>;
+# the patch widens NAM's existing libc++ fallback guard to an opt-in macro).
 set(SIGNALPATCH_HAS_NAM FALSE)
-if(SIGNALPATCH_ENABLE_NAM AND EXISTS "${SIGNALPATCH_NAM_CORE_DIR}/NAM/dsp.h")
+set(SIGNALPATCH_NAM_SOURCE_DIR "")
+if(SIGNALPATCH_ENABLE_NAM)
+    if(EXISTS "${SIGNALPATCH_NAM_CORE_DIR}/NAM/dsp.h")
+        set(SIGNALPATCH_NAM_SOURCE_DIR "${SIGNALPATCH_NAM_CORE_DIR}")
+        message(STATUS "SignalPatch: NAM core from local checkout ${SIGNALPATCH_NAM_CORE_DIR}")
+    else()
+        include(FetchContent)
+        find_package(Git REQUIRED)
+        FetchContent_Declare(namcore
+            GIT_REPOSITORY https://github.com/sdatkinson/NeuralAmpModelerCore.git
+            GIT_TAG ab72c078cd141be60d963d357bd501d56cc9606b
+            PATCH_COMMAND ${GIT_EXECUTABLE} apply --ignore-whitespace
+                "${CMAKE_CURRENT_SOURCE_DIR}/packaging/patches/namcore-nonatomic-shared-ptr.patch")
+        FetchContent_GetProperties(namcore)
+        if(NOT namcore_POPULATED)
+            FetchContent_Populate(namcore)
+        endif()
+        set(SIGNALPATCH_NAM_SOURCE_DIR "${namcore_SOURCE_DIR}")
+        message(STATUS "SignalPatch: NAM core fetched to ${SIGNALPATCH_NAM_SOURCE_DIR}")
+    endif()
+endif()
+
+if(NOT SIGNALPATCH_NAM_SOURCE_DIR STREQUAL "")
     file(GLOB NAM_CORE_SOURCES
-        "${SIGNALPATCH_NAM_CORE_DIR}/NAM/*.cpp"
-        "${SIGNALPATCH_NAM_CORE_DIR}/NAM/wavenet/*.cpp")
+        "${SIGNALPATCH_NAM_SOURCE_DIR}/NAM/*.cpp"
+        "${SIGNALPATCH_NAM_SOURCE_DIR}/NAM/wavenet/*.cpp")
     add_library(nam_core STATIC ${NAM_CORE_SOURCES})
     target_include_directories(nam_core SYSTEM PUBLIC
-        "${SIGNALPATCH_NAM_CORE_DIR}"
-        "${SIGNALPATCH_NAM_CORE_DIR}/Dependencies/eigen"
-        "${SIGNALPATCH_NAM_CORE_DIR}/Dependencies/nlohmann")
-    # NAM_NONATOMIC_SHARED_PTR selects the fork's fallback staging path
-    # (deprecated std::atomic_* shared_ptr overloads); GCC 11's libstdc++ has
-    # no std::atomic<std::shared_ptr>. The local clone's guards were widened
-    # to accept this macro (see CLAUDE.md).
+        "${SIGNALPATCH_NAM_SOURCE_DIR}"
+        "${SIGNALPATCH_NAM_SOURCE_DIR}/Dependencies/eigen"
+        "${SIGNALPATCH_NAM_SOURCE_DIR}/Dependencies/nlohmann")
     target_compile_definitions(nam_core PUBLIC NAM_SAMPLE_FLOAT NAM_NONATOMIC_SHARED_PTR)
     target_compile_features(nam_core PRIVATE cxx_std_20)
-    target_compile_options(nam_core PRIVATE -w -O3)
+    if(MSVC)
+        target_compile_options(nam_core PRIVATE /w /O2)
+    else()
+        target_compile_options(nam_core PRIVATE -w -O3)
+    endif()
     set(SIGNALPATCH_HAS_NAM TRUE)
-    message(STATUS "SignalPatch: NAM enabled from ${SIGNALPATCH_NAM_CORE_DIR}")
 else()
-    message(STATUS "SignalPatch: NAM core not found; Neural Amp node stays a passthrough")
+    message(STATUS "SignalPatch: NAM disabled; Neural Amp node stays a passthrough")
 endif()
 
 juce_add_gui_app(signalpatch
@@ -154,3 +179,15 @@ target_link_libraries(signalpatch_tests
         juce::juce_recommended_warning_flags)
 
 add_test(NAME signalpatch_engine_tests COMMAND signalpatch_tests)
+
+# --- Install rules (used by the flatpak and other packagers).
+include(GNUInstallDirs)
+install(TARGETS signalpatch RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+if(UNIX AND NOT APPLE)
+    install(FILES packaging/linux/io.github.willbearfruits.SignalPatch.desktop
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/applications")
+    install(FILES packaging/linux/io.github.willbearfruits.SignalPatch.metainfo.xml
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo")
+    install(FILES packaging/linux/io.github.willbearfruits.SignalPatch.svg
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps")
+endif()

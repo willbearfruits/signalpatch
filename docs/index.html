@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SignalPatch — real-time modular rack for guitar, voice and synthesis</title>
+<meta name="description" content="A patchable rack of audio modules: guitar effects, Neural Amp Modeler, vocoder, autotune, synths, drum machine, sampler and a 4-track — real-time safe, open source.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect x='8' y='8' width='84' height='84' rx='14' fill='%231b2228'/><circle cx='35' cy='40' r='11' fill='none' stroke='%234fd8c4' stroke-width='6'/><circle cx='68' cy='63' r='11' fill='none' stroke='%23b48cff' stroke-width='6'/><path d='M35 40 C 45 75, 55 80, 68 63' fill='none' stroke='%23ffb45b' stroke-width='6' stroke-linecap='round'/></svg>">
+<style>
+  :root{
+    --bg:#0d1114; --panel:#14191d; --raised:#1e262c; --line:#232d34;
+    --text:#efeadd; --muted:#8e9aa1;
+    --teal:#4fd8c4; --violet:#b48cff; --amber:#ffb45b; --green:#92d95e;
+    --orange:#ff7a53; --pink:#ff9eb5;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--text);font:16px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif}
+  a{color:var(--teal);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .rainbow{height:4px;background:linear-gradient(90deg,var(--teal),var(--green),var(--amber),var(--violet))}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 24px}
+  header{padding:72px 0 40px;text-align:center}
+  .logo{display:inline-flex;align-items:center;gap:14px;margin-bottom:18px}
+  .logo .bar{width:6px;height:44px;border-radius:3px;background:var(--teal)}
+  h1{font-size:clamp(2.2rem,6vw,3.4rem);letter-spacing:.04em}
+  .tagline{color:var(--muted);font-size:1.15rem;max-width:640px;margin:14px auto 0}
+  .cta{margin-top:30px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .btn{display:inline-block;padding:12px 22px;border-radius:8px;font-weight:600;border:1px solid var(--line)}
+  .btn.primary{background:var(--teal);color:#0d1114}
+  .btn.primary:hover{filter:brightness(1.1);text-decoration:none}
+  .btn.ghost{background:var(--raised);color:var(--text)}
+  .btn.ghost:hover{border-color:var(--teal);text-decoration:none}
+  .hero-shot{display:block;width:100%;border-radius:12px;border:1px solid var(--line);box-shadow:0 24px 60px rgba(0,0,0,.5);margin:36px 0 0}
+  section{padding:64px 0 8px}
+  h2{font-size:1.6rem;letter-spacing:.06em;margin-bottom:8px}
+  h2::after{content:"";display:block;width:34px;height:3px;margin-top:8px;background:var(--teal);border-radius:2px}
+  .lead{color:var(--muted);max-width:760px;margin-top:12px}
+  .grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));margin-top:28px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px 20px 18px;position:relative;overflow:hidden}
+  .card::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:4px;border-radius:2px;background:var(--accent,var(--teal))}
+  .card h3{font-size:1.02rem;margin-bottom:6px;letter-spacing:.03em}
+  .card p{color:var(--muted);font-size:.93rem}
+  .fam{display:flex;flex-wrap:wrap;gap:10px;margin-top:24px}
+  .chip{background:var(--raised);border:1px solid var(--line);border-radius:999px;padding:7px 15px;font-size:.86rem;color:var(--muted)}
+  .chip b{color:var(--text);font-weight:600}
+  .vision{background:linear-gradient(180deg,var(--panel),transparent);border:1px solid var(--line);border-radius:14px;padding:34px;margin-top:28px}
+  .vision p{max-width:820px}
+  .vision .goal{color:var(--text);font-size:1.12rem;margin-bottom:10px}
+  .road{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-top:26px}
+  .step{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .step .v{font-weight:700;color:var(--accent,var(--teal));letter-spacing:.05em;font-size:.85rem}
+  .step p{color:var(--muted);font-size:.86rem;margin-top:4px}
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;overflow-x:auto;font-size:.88rem;margin-top:22px;color:#cfe8e2}
+  footer{margin-top:70px;padding:28px 0 40px;border-top:1px solid var(--line);color:var(--muted);font-size:.88rem;text-align:center}
+</style>
+</head>
+<body>
+<div class="rainbow"></div>
+
+<header class="wrap">
+  <div class="logo"><span class="bar"></span><h1>SIGNALPATCH</h1></div>
+  <p class="tagline">A real-time modular rack for guitar, voice and synthesis.
+  Patch it like hardware. Play it like an instrument.</p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/willbearfruits/signalpatch">View on GitHub</a>
+    <a class="btn ghost" href="https://github.com/willbearfruits/signalpatch#build">Build it</a>
+    <a class="btn ghost" href="https://github.com/willbearfruits/signalpatch/blob/main/docs/ROADMAP.md">Roadmap</a>
+  </div>
+  <img class="hero-shot" src="assets/rack.png" alt="SignalPatch rack: Neural Amp, granular, sequencer, drum machine and synth modules patched together with coloured cables">
+</header>
+
+<section class="wrap">
+  <h2>WHAT IT IS</h2>
+  <p class="lead">Drag cables between modules while the audio keeps running. Every cable
+  glows with its live signal and carries flow pulses toward its destination. Every effect
+  has a true-bypass stomp switch. Feedback loops are legal — through a guard stage that
+  keeps them finite. Patches save as JSON and your last session comes back on launch.</p>
+  <div class="grid">
+    <div class="card" style="--accent:var(--orange)"><h3>NEURAL AMP MODELER</h3>
+      <p>Load real .nam amp profiles. Models parse on a worker thread and swap into the audio path atomically — no dropout, no freeze.</p></div>
+    <div class="card" style="--accent:var(--pink)"><h3>VOICE RACK</h3>
+      <p>12-band vocoder, vowel/formant filter and an autotune that snaps pitch to a key — from transparent correction to full robot.</p></div>
+    <div class="card" style="--accent:var(--violet)"><h3>GRANULAR &amp; GLITCH</h3>
+      <p>A grain cloud over a live 4-second buffer, pitch shifter, ring mod, bitcrusher, and a Script module that runs your own per-sample math.</p></div>
+    <div class="card" style="--accent:var(--amber)"><h3>INSTRUMENTS INSIDE</h3>
+      <p>Sequenced mono synth, Karplus-Strong pluck, drum machine with a clickable grid, live-input sampler and a 60-second 4-track tape with varispeed.</p></div>
+    <div class="card" style="--accent:var(--green)"><h3>REAL-TIME SAFE, PROVEN</h3>
+      <p>The callback allocates nothing — enforced by an allocation-trap test around a worst-case graph, a 30-minute soak and ASan/UBSan runs.</p></div>
+    <div class="card" style="--accent:var(--teal)"><h3>EVERYTHING MODULATES</h3>
+      <p>Every knob has a mod socket. LFOs, envelopes, sequencers, FFT band energies and macros patch into any parameter of any module.</p></div>
+  </div>
+  <div class="fam">
+    <span class="chip"><b>35 modules</b></span>
+    <span class="chip">utility</span><span class="chip">effects</span>
+    <span class="chip">voice</span><span class="chip">instruments</span>
+    <span class="chip">dynamics</span><span class="chip">control</span>
+    <span class="chip"><b>Linux</b> ALSA / JACK / PipeWire</span>
+    <span class="chip"><b>Windows</b> WASAPI / ASIO</span>
+    <span class="chip">C++20 · JUCE 8 · AGPL-3.0</span>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>THE END GOAL</h2>
+  <div class="vision">
+    <p class="goal">A handheld — an ASUS ROG Ally class device — as a self-contained
+    guitar patching studio, voice processor and synthesizer.</p>
+    <p class="lead">Plug in, pick it up, play. Stomp switches on the triggers, macro knobs
+    on the sticks, patching on the touchscreen, a fullscreen performance surface readable
+    at arm's length. Every roadmap phase walks toward that: playability first, then stereo
+    and recording, then qualified neural amps, then the handheld itself.</p>
+    <div class="road">
+      <div class="step" style="--accent:var(--teal)"><span class="v">0.2</span><p>MIDI in, MIDI learn, undo/redo, presets — play it like an instrument</p></div>
+      <div class="step" style="--accent:var(--green)"><span class="v">0.3</span><p>Stereo, master recorder, sampler &amp; 4-track persistence</p></div>
+      <div class="step" style="--accent:var(--amber)"><span class="v">0.4</span><p>NAM performance qualification, cab/IR node, model browser</p></div>
+      <div class="step" style="--accent:var(--orange)"><span class="v">0.5</span><p>Engine maturity, Windows, packaging, licence-clean releases</p></div>
+      <div class="step" style="--accent:var(--violet)"><span class="v">0.6</span><p>Handheld instrument mode: controller-first, boot-to-patch</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>GET IT RUNNING</h2>
+  <pre><code># Linux
+git clone https://github.com/willbearfruits/signalpatch
+cd signalpatch
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build --parallel &amp;&amp; ctest --test-dir build
+pw-jack ./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch
+
+# Flatpak
+flatpak run org.flatpak.Builder --user --install --force-clean \
+    build-flatpak packaging/flatpak/io.github.willbearfruits.SignalPatch.yml</code></pre>
+  <p class="lead">JUCE and NeuralAmpModelerCore are fetched automatically. Windows builds
+  with Visual Studio 2022 — see the <a href="https://github.com/willbearfruits/signalpatch#build">README</a>.
+  Amp profiles: <a href="https://tonehunt.org">ToneHunt</a>.</p>
+</section>
+
+<footer>
+  <div class="wrap">
+    SignalPatch · AGPL-3.0 ·
+    <a href="https://github.com/willbearfruits/signalpatch">GitHub</a> ·
+    <a href="https://github.com/willbearfruits/signalpatch/blob/main/docs/ARCHITECTURE.md">Architecture</a> ·
+    <a href="https://github.com/willbearfruits/signalpatch/blob/main/docs/PRODUCTION_READINESS.md">Production readiness</a> ·
+    built with JUCE 8 and NeuralAmpModelerCore
+  </div>
+</footer>
+</body>
+</html>

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.willbearfruits.SignalPatch</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+  <name>SignalPatch</name>
+  <summary>Real-time modular guitar, voice and synth rack</summary>
+  <description>
+    <p>
+      SignalPatch is a patchable rack of audio modules that runs on your
+      audio interface with minimal latency. Chain guitar effects, run real
+      Neural Amp Modeler profiles, vocode and autotune your voice, sequence
+      a synth and a drum machine, record onto a virtual 4-track — all by
+      dragging cables between modules while the audio keeps running.
+    </p>
+    <p>
+      Every cable shows its live signal. Every module has a true-bypass stomp
+      switch. Feedback loops are first-class citizens, protected by a
+      dedicated guard stage. Patches save as JSON and the last session is
+      restored on launch.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.willbearfruits.SignalPatch.desktop</launchable>
+  <url type="homepage">https://willbearfruits.github.io/signalpatch/</url>
+  <url type="vcs-browser">https://github.com/willbearfruits/signalpatch</url>
+  <url type="bugtracker">https://github.com/willbearfruits/signalpatch/issues</url>
+  <developer id="io.github.willbearfruits">
+    <name>willbearfruits</name>
+  </developer>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://willbearfruits.github.io/signalpatch/assets/rack.png</image>
+      <caption>A patch running: Neural Amp, granular cloud, sequenced synth and drum machine</caption>
+    </screenshot>
+  </screenshots>
+  <categories>
+    <category>Audio</category>
+    <category>Music</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-07-11">
+      <description>
+        <p>First public release: 35 modules, Neural Amp Modeler support,
+        rack UI with stomp bypass and live cables, guarded feedback,
+        autosave recovery.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -99,6 +99,32 @@ The remaining ARCHITECTURE.md gates plus distribution:
 Exit: a stranger can download a build, and a soak on stage hardware produces
 a clean xrun log.
 
+## 0.6 — Handheld instrument (the end goal)
+
+The destination: an ASUS ROG Ally-class handheld as a self-contained guitar
+patching studio, voice processor and synthesizer — SignalPatch not as
+software you operate but as an instrument you hold. Windows support (the
+Ally's native OS) therefore stops being a checkbox and becomes the stage.
+
+- **Controller-first navigation**: full gamepad map (sticks scrub knobs,
+  d-pad walks modules/ports, triggers = stomp switches, shoulder buttons
+  cycle pages). The engine already treats all control as events; the gamepad
+  becomes another event source like MIDI.
+- **Performance mode**: a fullscreen instrument surface — oversized macro
+  knobs, stomp row, drum grid and sampler transport — no patching UI, no
+  window chrome, readable at arm's length on a 7" screen.
+- **Touch-grade targets**: hit areas, drag gestures and long-press menus
+  sized for fingers; pinch zoom on the rack.
+- **Handheld audio profile**: qualification on the Ally's onboard I/O and on
+  a small USB interface (latency, buffer sizes, battery-vs-performance
+  presets; the peak-DSP readout drives an on-device "will this patch glitch"
+  indicator).
+- **Boot-to-instrument**: launch fullscreen into the last patch, unmuted by
+  explicit opt-in, controller-only recoverable from any state.
+
+Exit: pick the handheld up, plug in, and play a gig without touching a
+keyboard, mouse or desktop.
+
 ## Beyond (unscheduled, deliberately)
 
 - Plug-in target (VST3/CLAP) hosting the same engine — the standalone-first
@@ -114,6 +140,9 @@ a clean xrun log.
 Control (0.2) precedes stereo (0.3) because a playable mono rig makes music
 today, while stereo without playability is still furniture. NAM qualification
 (0.4) waits for the recorder/persistence loop so benchmarks reflect real
-sessions. Engine maturity (0.5) lands last among the numbered phases because
-its items are invisible until patches get large — but TSan/CI inside it
-should be pulled earlier if any 0.2 concurrency work feels risky.
+sessions. Engine maturity (0.5) lands before the handheld phase because a
+stage device needs the Windows build, packaging and TSan-clean engine that
+0.5 delivers — but TSan/CI should be pulled earlier if any 0.2 concurrency
+work feels risky. Everything numbered serves 0.6: the handheld instrument is
+the reason the mono rig must be playable, recordable, qualified and shippable
+first.

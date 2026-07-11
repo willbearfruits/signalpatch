@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=SignalPatch
+GenericName=Modular Audio Rack
+Comment=Real-time modular guitar, voice and synth patching studio
+Exec=SignalPatch %f
+Icon=io.github.willbearfruits.SignalPatch
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Music;
+Keywords=modular;guitar;pedalboard;synth;effects;NAM;neural;amp;vocoder;patch;
+StartupWMClass=SignalPatch
