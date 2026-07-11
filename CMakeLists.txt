@@ -90,7 +90,7 @@ if(NOT SIGNALPATCH_NAM_SOURCE_DIR STREQUAL "")
     target_compile_definitions(nam_core PUBLIC NAM_SAMPLE_FLOAT NAM_NONATOMIC_SHARED_PTR)
     target_compile_features(nam_core PRIVATE cxx_std_20)
     if(MSVC)
-        target_compile_options(nam_core PRIVATE /w /O2)
+        target_compile_options(nam_core PRIVATE /w) # optimization comes from the config
     else()
         target_compile_options(nam_core PRIVATE -w -O3)
     endif()

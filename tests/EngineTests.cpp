@@ -14,6 +14,10 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+ #include <malloc.h> // _aligned_malloc / _aligned_free
+#endif
+
 // ---------------------------------------------------------------------------
 // Real-time allocation trap. While armed, every route through the global
 // allocator counts as a violation; the render-path test asserts zero. This
@@ -21,10 +25,18 @@
 // around the callback in test builds".
 // Break on rtTrapViolation in a debugger to see exactly which callback-path
 // code allocated.
+#if defined(_MSC_VER)
+extern "C" __declspec (noinline) void rtTrapViolation()
+{
+    static volatile int keepAlive = 0;
+    keepAlive = keepAlive + 1; // prevent the empty function from folding away
+}
+#else
 extern "C" __attribute__ ((noinline)) void rtTrapViolation()
 {
     asm volatile (""); // keep the call site alive under optimization
 }
+#endif
 
 namespace rtTrap
 {
@@ -39,7 +51,39 @@ inline void note() noexcept
         rtTrapViolation();
     }
 }
+
+// Plain allocations pair with std::free; over-aligned ones pair with the
+// platform's aligned allocator (the compiler always calls the matching
+// aligned delete for over-aligned types, so the pairs never mix).
+inline void* alignedAlloc (std::size_t size, std::size_t alignment) noexcept
+{
+#if defined(_WIN32)
+    return _aligned_malloc (size == 0 ? 1 : size, alignment);
+#else
+    void* pointer = nullptr;
+    const auto safeAlignment = alignment < sizeof (void*) ? sizeof (void*) : alignment;
+    if (posix_memalign (&pointer, safeAlignment, size == 0 ? 1 : size) != 0)
+        return nullptr;
+    return pointer;
+#endif
+}
+
+inline void alignedFree (void* pointer) noexcept
+{
+#if defined(_WIN32)
+    _aligned_free (pointer);
+#else
+    std::free (pointer);
+#endif
+}
 } // namespace rtTrap
+
+// GCC cannot see that these replacement operators are internally consistent
+// (plain new is malloc-backed, so free() is its correct pair).
+#if defined(__GNUC__) && ! defined(__clang__)
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
 
 void* operator new (std::size_t size)
 {
@@ -57,10 +101,9 @@ void* operator new[] (std::size_t size)
 void* operator new (std::size_t size, std::align_val_t alignment)
 {
     rtTrap::note();
-    void* pointer = nullptr;
-    if (posix_memalign (&pointer, static_cast<std::size_t> (alignment), size == 0 ? 1 : size) != 0)
-        throw std::bad_alloc();
-    return pointer;
+    if (auto* pointer = rtTrap::alignedAlloc (size, static_cast<std::size_t> (alignment)))
+        return pointer;
+    throw std::bad_alloc();
 }
 
 void* operator new[] (std::size_t size, std::align_val_t alignment)
@@ -68,19 +111,18 @@ void* operator new[] (std::size_t size, std::align_val_t alignment)
     return ::operator new (size, alignment);
 }
 
-void operator delete (void* pointer) noexcept
-{
-    rtTrap::note();
-    std::free (pointer); // glibc free() handles malloc and posix_memalign alike
-}
-
+void operator delete (void* pointer) noexcept { rtTrap::note(); std::free (pointer); }
 void operator delete[] (void* pointer) noexcept { rtTrap::note(); std::free (pointer); }
 void operator delete (void* pointer, std::size_t) noexcept { rtTrap::note(); std::free (pointer); }
 void operator delete[] (void* pointer, std::size_t) noexcept { rtTrap::note(); std::free (pointer); }
-void operator delete (void* pointer, std::align_val_t) noexcept { rtTrap::note(); std::free (pointer); }
-void operator delete[] (void* pointer, std::align_val_t) noexcept { rtTrap::note(); std::free (pointer); }
-void operator delete (void* pointer, std::size_t, std::align_val_t) noexcept { rtTrap::note(); std::free (pointer); }
-void operator delete[] (void* pointer, std::size_t, std::align_val_t) noexcept { rtTrap::note(); std::free (pointer); }
+void operator delete (void* pointer, std::align_val_t) noexcept { rtTrap::note(); rtTrap::alignedFree (pointer); }
+void operator delete[] (void* pointer, std::align_val_t) noexcept { rtTrap::note(); rtTrap::alignedFree (pointer); }
+void operator delete (void* pointer, std::size_t, std::align_val_t) noexcept { rtTrap::note(); rtTrap::alignedFree (pointer); }
+void operator delete[] (void* pointer, std::size_t, std::align_val_t) noexcept { rtTrap::note(); rtTrap::alignedFree (pointer); }
+
+#if defined(__GNUC__) && ! defined(__clang__)
+ #pragma GCC diagnostic pop
+#endif
 
 namespace
 {
