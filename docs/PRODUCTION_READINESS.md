@@ -70,7 +70,13 @@ not saved into patches; drum-machine grid steps are not modulatable.
 
 ## Build/platform
 
-Linux build is warning-clean with JUCE recommended warnings. Windows path
-(WASAPI/ASIO) compiles in CI-less theory only — **untested this pass**. The
-NAM dependency builds from a local checkout with a 3-line guard patch
-(documented in CLAUDE.md); re-pulling that clone requires reapplying it.
+Linux build is warning-clean with JUCE recommended warnings. **CI runs both
+platforms on every push**: Linux (GCC) and Windows (MSVC) build from a bare
+clone — JUCE and NeuralAmpModelerCore fetched automatically, the NAM guard
+patch applied from `packaging/patches/` — and pass the full test suite
+including the allocation trap. The Windows bring-up caught one real bug: a
+use-after-realloc in a test that only manifested under MSVC's 1.5x vector
+growth (libstdc++'s doubling left spare capacity, so Linux and ASan never
+saw it — a good reminder that green ASan is not a proof). Windows remains
+untested against real audio hardware (WASAPI/ASIO runtime behaviour is
+roadmap 0.5).

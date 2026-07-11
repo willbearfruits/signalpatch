@@ -66,7 +66,7 @@ Read `docs/ARCHITECTURE.md` for the full design; the essentials:
 
 ## Publishing infrastructure
 
-- **CI**: `.github/workflows/ci.yml` — Linux (green) and Windows (MSVC; as of 2026-07-11 the test suite segfaults on the Windows runner — under investigation with unbuffered test output). CI forces the NAM FetchContent path via `-DSIGNALPATCH_NAM_CORE_DIR=<nonexistent>`.
+- **CI**: `.github/workflows/ci.yml` — Linux (GCC) and Windows (MSVC), both green, both running the full suite incl. the allocation trap. CI forces the NAM FetchContent path via `-DSIGNALPATCH_NAM_CORE_DIR=<nonexistent>`. Windows lesson already paid for: MSVC's 1.5x vector growth exposed a use-after-realloc that libstdc++'s doubling hid from Linux and ASan — don't hold raw pointers into `PatchDocument::getNodes()` across mutations.
 - **Pages**: served from `main:/docs` with `.nojekyll`; `docs/index.html` is the landing page, screenshots in `docs/assets/`.
 - **Packaging**: `packaging/linux/` (.desktop, AppStream metainfo — add a `<release>` entry per version — and SVG icon), `packaging/flatpak/` (manifest), `packaging/patches/` (NAM guard patch; the local clone carries the same patch applied in-tree — if that clone is re-pulled, reapply or rely on the FetchContent path).
 - Licence: AGPL-3.0 (JUCE open-source tier; NAM core is MIT; ASIO opt-in brings Steinberg terms).
