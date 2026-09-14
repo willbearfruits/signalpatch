@@ -16,9 +16,11 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-Run: `./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch [patch.signalpatch]` — on this workstation (PipeWire desktop) use `pw-jack ./build/.../SignalPatch`; PipeWire holds the Zoom F4 in Pro Audio mode, so raw ALSA cannot open it.
+Run: `./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch [patch.signalpatch|bundle.zip]` — on a PipeWire desktop use `PIPEWIRE_LATENCY=128/48000 pw-jack ./build/.../SignalPatch` (64 also works but forces the whole graph, i.e. every desktop app on the same interface, to that quantum). Keep the interface on PipeWire's **Pro Audio** profile: a raw ALSA open by JUCE makes WirePlumber drop the capture node, and the first-launch device pick now tries JACK before ALSA and rejects a device that opened with zero outputs. The status bar shows the block size the callback actually receives (pipewire-jack reports its max quantum as the buffer size).
 
-- **JUCE 8.0.13 EXACT**: installed package at `/usr/local/lib/cmake/JUCE-8.0.13` preferred, FetchContent fallback otherwise (`-DSIGNALPATCH_ALLOW_JUCE_FETCH=OFF` disables).
+- **JUCE 8.0.13 EXACT**: installed package at `/usr/local/lib/cmake/JUCE-8.0.13` preferred, FetchContent fallback otherwise (`-DSIGNALPATCH_ALLOW_JUCE_FETCH=OFF` disables). A JUCE source tree already on disk can be reused with `-DFETCHCONTENT_SOURCE_DIR_JUCE=<path>`.
+- **NAM patch step is idempotent** (`packaging/patches/apply-namcore-patch.cmake`): FetchContent re-runs PATCH_COMMAND on reconfigure, so a plain `git apply` used to fail the second time.
+- **Adding a node kind** now also means: the `nodePalette()` table drives the canvas "Insert module here" cable menu (audio families only), and `tests/EngineTests.cpp` kinds lists.
 - **NAM source resolution**: local checkout at `SIGNALPATCH_NAM_CORE_DIR` (defaults to the `external_clones/neural-amp-modeler-plugin-a2` submodule path) if present, else FetchContent of pinned upstream `NeuralAmpModelerCore@ab72c07` with `packaging/patches/namcore-nonatomic-shared-ptr.patch` applied. `-DSIGNALPATCH_ENABLE_NAM=OFF` builds the Neural Amp node as passthrough.
 - **Windows**: `cmake -S . -B build -A x64` — do NOT pass an explicit `-G "Visual Studio 17 2022"`; runner/user VS versions vary.
 - **Sanitizers**: `build-asan/` is configured with `-fsanitize=address,undefined -fno-sanitize-recover=all`; build `signalpatch_tests` there and run it.
@@ -53,13 +55,18 @@ Read `docs/ARCHITECTURE.md` for the full design; the essentials:
 
 **UI lifetime rule:** node components are torn down and rebuilt on every engine change broadcast — any async UI callback (menus, choosers) launched from a `NodeComponent` must hold a `Component::SafePointer`, never a raw `this`.
 
+**UI repaint budget.** The rack repaints at 30 Hz, but only what moves: `NodeComponent::paint` blits a cached face-plate image (`plateCache`, invalidated on resize/selection) while a transparent `LiveLayer` child draws LED/scope/output-port glow/status, and `repaintLive()` dirties just those rects (a whole-node repaint would re-render every knob underneath). `PatchCanvas` is opaque, caches each cable as a flattened polyline plus two images (quiet core, full-level glow drawn with the live opacity), and skips cables/nodes whose `SignalMeter::getVersion()` has not moved (meters stop bumping below -60 dBFS). `SIGNALPATCH_PAINT_STATS=1` prints paints/s per layer; `SIGNALPATCH_NO_LIVE/NO_CABLES/NO_TIMER=1` are attribution switches. `--gl` routes painting through `juce::OpenGLContext`; it measured ~2.5x the CPU of the software renderer on the reference desktop (RTX 3060 + XWayland), so software is the default.
+
 ## Real-time safety is a release gate
 
 `docs/REALTIME_SAFETY.md` is the contract for any callback-reachable code: no allocation, locks, I/O, exceptions, UI calls, or `shared_ptr` last-owner release; bounded loops over prepared storage; finite output on NaN/Inf input; any block length from zero to the prepared maximum. Consult its review checklist before touching `src/audio/`. Verified so far: allocation trap, 30-min-audio soak, ASan+UBSan (see PRODUCTION_READINESS.md; TSan and a live-device soak remain open).
 
 ## Deliberate boundaries (don't "fix" silently)
 
-- Effect nodes are mono; MIDI/OSC mapping, undo/redo, plug-in hosting are roadmap items, not omissions.
+- Effect nodes are mono; MIDI/OSC mapping and plug-in hosting are roadmap items, not omissions.
+- Undo/redo lives in `src/audio/PatchHistory.{h,cpp}` (headless, tested): entries are recorded *after* the document changed, deleted nodes keep their processor alive so undo restores the same object, knob/node drags coalesce until `closeGesture()`. Every `PatchEngine` mutation records; `loadPatch`/`newPatch`/device relayout clear the stack.
+- Portable projects live in `src/audio/PatchBundle.{h,cpp}` (headless, tested): asset paths (`extra.model`, `extra.ir`, `extra.irB`) are saved relative to the patch folder when inside it, else absolute; export = `<name>/<name>.signalpatch + assets/` zipped; Open/Import accept `.zip`. Sampler/4-track audio still is not persisted (roadmap 0.3).
+- `PatchEngine::connect` rolls the cable back out of the document when the compile rejects it (unguarded cycle) — otherwise every later edit failed to compile too.
 - Sampler/4-track audio content is not saved with patches (roadmap 0.3).
 - First-launch device preference: `PatchEngine::applyPreferredCaptureDevice` picks a Zoom F4 / H-series interface when no saved `audio-device.xml` exists; saved state always wins afterwards. Delete `~/.config/SignalPatch/audio-device.xml` to re-trigger.
 - Autosave restores on startup, muted — that's the spec'd safety behaviour, not a bug.
