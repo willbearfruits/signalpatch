@@ -1,4 +1,5 @@
 #include "PatchEngine.h"
+#include "PatchBundle.h"
 
 #include <cmath>
 
@@ -509,20 +510,120 @@ juce::Result PatchEngine::savePatch (const juce::File& file)
         return juce::Result::fail ("No patch file selected.");
     if (! file.getParentDirectory().createDirectory())
         return juce::Result::fail ("Could not create the patch directory.");
-    if (! file.replaceWithText (juce::JSON::toString (document.toJson(), true)))
+    auto json = document.toJson();
+    bundle::rebaseAssetPaths (json, file.getParentDirectory(), true);
+    if (! file.replaceWithText (juce::JSON::toString (json, true)))
         return juce::Result::fail ("Could not write " + file.getFullPathName());
     return juce::Result::ok();
 }
 
-    modifiedSinceSave = false;
-juce::Result PatchEngine::loadPatch (const juce::File& file)
+juce::Result PatchEngine::importPatch (const juce::File& file)
 {
     if (! file.existsAsFile())
         return juce::Result::fail ("Patch file not found.");
-    const auto parsed = juce::JSON::parse (file);
+    auto parsed = juce::JSON::parse (file);
     if (parsed.isVoid())
         return juce::Result::fail ("The patch JSON is invalid.");
 
+    bundle::rebaseAssetPaths (parsed, file.getParentDirectory(), false);
+
+    std::vector<NodeId> addedNodes;
+    std::vector<Connection> addedCables;
+    const auto result = document.mergeJson (parsed, { 60.0f, 60.0f }, addedNodes, addedCables);
+    if (result.failed())
+        return result;
+    for (const auto id : addedNodes)
+        history.recordNodeAdded (id);
+    for (const auto& cable : addedCables)
+        history.recordConnected (cable);
+    if (! compileAndPublish (false))
+    {
+        // Roll the merge back rather than leave an uncompilable document.
+        for (const auto& cable : addedCables)
+            document.removeConnection (cable);
+        for (const auto id : addedNodes)
+            document.removeNode (id);
+        history.clear();
+        compileAndPublish (false);
+        return juce::Result::fail ("Imported patch could not be merged: " + graphMessage);
+    }
+    return juce::Result::ok();
+}
+
+juce::Result PatchEngine::exportBundle (const juce::File& zipFile)
+{
+    return bundle::exportBundle (document, zipFile);
+}
+
+juce::Result PatchEngine::extractBundle (const juce::File& zipFile, const juce::File& destinationRoot, juce::File& patchFileOut)
+{
+    return bundle::extractBundle (zipFile, destinationRoot, patchFileOut);
+}
+
+void PatchEngine::newPatch()
+{
+    setPanicMuted (true);
+    createDefaultPatch();
+    modifiedSinceSave = false;
+}
+
+juce::Result PatchEngine::renameNode (NodeId id, const juce::String& newName)
+{
+    auto* node = document.findNode (id);
+    if (node == nullptr)
+        return juce::Result::fail ("That node no longer exists.");
+    const auto trimmed = newName.trim();
+    if (trimmed.isEmpty())
+        return juce::Result::fail ("A node needs a name.");
+    history.recordRename (id, node->processor->getName(), trimmed);
+    node->processor->setName (trimmed);
+    markDocumentEdited();
+    sendChangeMessage();
+    return juce::Result::ok();
+}
+
+NodeId PatchEngine::duplicateNode (NodeId id)
+{
+    const auto* source = document.findNode (id);
+    if (source == nullptr || source->hardware)
+        return 0;
+    const auto kind = source->processor->getKind();
+    const auto position = source->position + juce::Point<float> (48.0f, 48.0f);
+    const auto newId = document.addNode (kind, position);
+    if (newId == 0)
+        return 0;
+    // addNode may have reallocated the node vector: look both up again.
+    source = document.findNode (id);
+    auto* copy = document.findNode (newId);
+    if (source == nullptr || copy == nullptr)
+        return 0;
+    const auto parameterCount = juce::jmin (source->processor->getNumParameters(), copy->processor->getNumParameters());
+    for (int index = 0; index < parameterCount; ++index)
+    {
+        const auto& from = source->processor->getParameter (index);
+        auto& to = copy->processor->getParameter (index);
+        to.setValue (from.getValue());
+        to.setModulationDepth (from.getModulationDepth());
+    }
+    copy->processor->setName (source->processor->getName());
+    copy->processor->setBypassed (source->processor->isBypassed());
+    const auto extra = source->processor->getExtraState();
+    if (! extra.isVoid())
+        copy->processor->setExtraState (extra);
+    history.recordNodeAdded (newId);
+    compileAndPublish (false);
+    return newId;
+}
+
+juce::Result PatchEngine::loadPatch (const juce::File& file)
+{
+    history.clear();
+    if (! file.existsAsFile())
+        return juce::Result::fail ("Patch file not found.");
+    auto parsed = juce::JSON::parse (file);
+    if (parsed.isVoid())
+        return juce::Result::fail ("The patch JSON is invalid.");
+    bundle::rebaseAssetPaths (parsed, file.getParentDirectory(), false);
     setPanicMuted (true);
     const auto result = document.loadJson (parsed);
     if (result.failed())

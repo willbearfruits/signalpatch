@@ -1,5 +1,7 @@
 #include "Graph.h"
 
+#include <map>
+
 #include "Processors.h"
 
 #include <algorithm>
@@ -741,6 +743,74 @@ juce::Result PatchDocument::loadJson (const juce::var& value)
     std::vector<int> retainedOutputCallbacks;
     if (const auto* input = findNode (hardwareInputId))
         for (int port = 0; port < input->processor->getNumOutputPorts(); ++port)
+juce::Result PatchDocument::mergeJson (const juce::var& value, juce::Point<float> offset,
+                                       std::vector<NodeId>& addedNodes, std::vector<Connection>& addedCables)
+{
+    const auto* root = value.getDynamicObject();
+    if (root == nullptr || root->getProperty ("format").toString() != "signalpatch")
+        return juce::Result::fail ("This is not a SignalPatch document.");
+    if (static_cast<int> (root->getProperty ("schema")) > 1)
+        return juce::Result::fail ("This patch was made by a newer SignalPatch version.");
+
+    std::map<NodeId, NodeId> idMap { { hardwareInputId, hardwareInputId }, { hardwareOutputId, hardwareOutputId } };
+    if (const auto* nodeArray = root->getProperty ("nodes").getArray())
+    {
+        for (const auto& nodeValue : *nodeArray)
+        {
+            const auto* object = nodeValue.getDynamicObject();
+            if (object == nullptr)
+                continue;
+            const auto maybeKind = nodeKindFromKey (object->getProperty ("kind").toString());
+            if (! maybeKind.has_value() || *maybeKind == NodeKind::hardwareInput || *maybeKind == NodeKind::hardwareOutput)
+                continue;
+            const auto oldId = static_cast<NodeId> (static_cast<juce::int64> (object->getProperty ("id")));
+            const juce::Point<float> position { static_cast<float> (object->getProperty ("x")) + offset.x,
+                                                static_cast<float> (object->getProperty ("y")) + offset.y };
+            const auto newId = addNode (*maybeKind, position);
+            auto* model = findNode (newId);
+            if (model == nullptr)
+                continue;
+            idMap[oldId] = newId;
+            addedNodes.push_back (newId);
+            const auto savedName = object->getProperty ("name").toString();
+            if (savedName.isNotEmpty())
+                model->processor->setName (savedName);
+            model->processor->setBypassed (static_cast<bool> (object->getProperty ("bypassed")));
+            if (object->hasProperty ("extra"))
+                model->processor->setExtraState (object->getProperty ("extra"));
+            if (const auto* parameterArray = object->getProperty ("parameters").getArray())
+                for (const auto& parameterValue : *parameterArray)
+                    if (const auto* parameterObject = parameterValue.getDynamicObject())
+                    {
+                        const auto parameterId = parameterObject->getProperty ("id").toString();
+                        for (int index = 0; index < model->processor->getNumParameters(); ++index)
+                        {
+                            auto& parameter = model->processor->getParameter (index);
+                            if (parameter.id != parameterId)
+                                continue;
+                            parameter.setValue (static_cast<float> (parameterObject->getProperty ("value")));
+                            parameter.setModulationDepth (static_cast<float> (parameterObject->getProperty ("depth")));
+                        }
+                    }
+        }
+    }
+
+    if (const auto* connectionArray = root->getProperty ("connections").getArray())
+        for (const auto& connectionValue : *connectionArray)
+            if (const auto* object = connectionValue.getDynamicObject())
+            {
+                const auto source = idMap.find (static_cast<NodeId> (static_cast<juce::int64> (object->getProperty ("sourceNode"))));
+                const auto destination = idMap.find (static_cast<NodeId> (static_cast<juce::int64> (object->getProperty ("destinationNode"))));
+                if (source == idMap.end() || destination == idMap.end())
+                    continue;
+                const Connection cable { source->second, static_cast<int> (object->getProperty ("sourcePort")),
+                                         destination->second, static_cast<int> (object->getProperty ("destinationPort")) };
+                if (addConnection (cable).wasOk())
+                    addedCables.push_back (cable);
+            }
+    return juce::Result::ok();
+}
+
         {
             const auto& info = input->processor->getOutputPort (port);
             retainedInputNames.add (info.name);

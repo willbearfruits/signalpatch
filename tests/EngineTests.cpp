@@ -1,4 +1,6 @@
 #include "../src/audio/Graph.h"
+#include "../src/audio/PatchHistory.h"
+#include "../src/audio/PatchBundle.h"
 #include "../src/audio/Processors.h"
 
 #include <algorithm>
@@ -1140,6 +1142,341 @@ struct TestCase
 };
 } // namespace
 
+void testUndoRedoStructure()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 2), channelNames ("Output", 2));
+    PatchHistory history (document);
+
+    const auto delay = document.addNode (NodeKind::delay, { 100.0f, 100.0f });
+    history.recordNodeAdded (delay);
+    const Connection in { PatchDocument::hardwareInputId, 0, delay, 0 };
+    const Connection out { delay, 0, PatchDocument::hardwareOutputId, 0 };
+    expectOk (document.addConnection (in), "connect in");
+    history.recordConnected (in);
+    expectOk (document.addConnection (out), "connect out");
+    history.recordConnected (out);
+    expect (history.getUndoCount() == 3, "three structural entries expected");
+
+    expect (history.undo() == PatchHistory::Applied::structure, "undo cable is structural");
+    expect (document.getConnections().size() == 1, "undo did not remove the last cable");
+    expect (history.undo() == PatchHistory::Applied::structure, "undo second cable");
+    expect (history.undo() == PatchHistory::Applied::structure, "undo add node");
+    expect (document.findNode (delay) == nullptr, "undo did not remove the added node");
+    expect (document.getConnections().empty(), "cables survived node undo");
+    expect (history.undo() == PatchHistory::Applied::none, "history should be exhausted");
+
+    expect (history.redo() == PatchHistory::Applied::structure, "redo add node");
+    expect (document.findNode (delay) != nullptr, "redo did not restore the node under its old id");
+    expect (history.redo() == PatchHistory::Applied::structure && history.redo() == PatchHistory::Applied::structure,
+            "redo cables");
+    expect (document.getConnections().size() == 2, "redo did not restore both cables");
+    expect (history.redo() == PatchHistory::Applied::none, "redo should be exhausted");
+
+    // Compile must still succeed after the round trip.
+    const auto compiled = GraphCompiler::compile (document, 64, true);
+    expect (compiled.succeeded(), "graph failed to compile after undo/redo round trip");
+}
+
+void testUndoDeleteRestoresSameProcessorAndCables()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 2), channelNames ("Output", 2));
+    PatchHistory history (document);
+
+    const auto drive = document.addNode (NodeKind::distortion, { 10.0f, 10.0f });
+    const auto lfo = document.addNode (NodeKind::lfo, { 10.0f, 200.0f });
+    auto* driveNode = document.findNode (drive);
+    expect (driveNode != nullptr, "distortion missing");
+    driveNode->processor->getParameter (0).setValue (17.5f);
+    const auto* processorBefore = driveNode->processor.get();
+    const auto modPort = driveNode->processor->getParameter (0).inputPortIndex;
+    expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 0, drive, 0 }), "in");
+    expectOk (document.addConnection ({ drive, 0, PatchDocument::hardwareOutputId, 0 }), "out");
+    expectOk (document.addConnection ({ lfo, 0, drive, modPort }), "mod");
+
+    expect (history.removeNode (drive), "removeNode failed");
+    expect (document.findNode (drive) == nullptr, "node still present after delete");
+    expect (document.getConnections().empty(), "delete left cables behind");
+
+    expect (history.undo() == PatchHistory::Applied::structure, "undo delete");
+    auto* restored = document.findNode (drive);
+    expect (restored != nullptr, "undo did not restore the node");
+    expect (restored->processor.get() == processorBefore, "undo created a new processor instead of restoring the old one");
+    expect (std::abs (restored->processor->getParameter (0).getValue() - 17.5f) < 1.0e-6f,
+            "parameter value lost across delete/undo");
+    expect (document.getConnections().size() == 3, "undo did not restore all three cables");
+
+    expect (history.redo() == PatchHistory::Applied::structure, "redo delete");
+    expect (document.findNode (drive) == nullptr && document.getConnections().empty(), "redo delete incomplete");
+}
+
+void testUndoCoalescesKnobGestures()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    PatchHistory history (document);
+
+    const auto gain = document.addNode (NodeKind::gain, { 0.0f, 0.0f });
+    auto& parameter = document.findNode (gain)->processor->getParameter (0);
+    const auto start = parameter.getValue();
+
+    // A drag: many tiny edits of the same knob in quick succession.
+    float value = start;
+    for (int step = 0; step < 25; ++step)
+    {
+        const auto next = value + 0.2f;
+        history.recordParameter (gain, 0, value, next);
+        parameter.setValue (next);
+        value = next;
+    }
+    expect (history.getUndoCount() == 1, "a knob drag should be a single undo step");
+
+    // A second gesture on the same knob after an explicit close is a new step.
+    history.closeGesture();
+    history.recordParameter (gain, 0, value, value + 1.0f);
+    parameter.setValue (value + 1.0f);
+    expect (history.getUndoCount() == 2, "closing the gesture should start a new entry");
+
+    expect (history.undo() == PatchHistory::Applied::values, "undo second gesture");
+    expect (std::abs (parameter.getValue() - value) < 1.0e-6f, "second gesture not undone");
+    expect (history.undo() == PatchHistory::Applied::values, "undo drag");
+    expect (std::abs (parameter.getValue() - start) < 1.0e-6f, "drag undo did not return to the pre-drag value");
+    expect (history.redo() == PatchHistory::Applied::values, "redo drag");
+    expect (std::abs (parameter.getValue() - value) < 1.0e-6f, "drag redo did not restore the end of the drag");
+
+    // Editing after an undo discards the redo branch.
+    history.recordParameter (gain, 0, value, 3.0f);
+    expect (! history.canRedo(), "new edit should clear redo");
+}
+
+void writeTestImpulseFile (const juce::File& file, double sampleRate)
+{
+    // A 4-sample impulse response: a small tap at zero and the main tap three
+    // samples later, so passthrough (one spike) and convolution (two spikes)
+    // are distinguishable.
+    file.deleteFile();
+    juce::WavAudioFormat format;
+    std::unique_ptr<juce::AudioFormatWriter> writer (
+        format.createWriterFor (new juce::FileOutputStream (file), sampleRate, 1, 24, {}, 0));
+    expect (writer != nullptr, "could not create the test impulse file");
+    juce::AudioBuffer<float> impulse (1, 4);
+    impulse.clear();
+    impulse.setSample (0, 0, 0.25f);
+    impulse.setSample (0, 3, 1.0f);
+    writer->writeFromAudioSampleBuffer (impulse, 0, 4);
+}
+
+// juce::dsp::Convolution builds a new engine on its background thread and
+// installs it from a later process() call, then cross-fades it in over
+// 50 ms. Tests therefore pace their blocks in real time; a tight loop would
+// measure the placeholder engine.
+template <typename RenderBlock>
+void renderPaced (RenderBlock&& renderBlock, int blocks)
+{
+    for (int block = 0; block < blocks; ++block)
+    {
+        renderBlock();
+        juce::Thread::sleep (5);
+    }
+}
+
+void testRawJuceConvolutionSanity()
+{
+    // Isolates juce::dsp::Convolution from the cabinet node using the node's
+    // exact ingredients (WAV read, normalise, reset after prepare, two
+    // convolvers on one queue).
+    const double sampleRate = 48000.0;
+    const int blockSize = 64;
+    const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getChildFile ("signalpatch-test-raw-ir.wav");
+    writeTestImpulseFile (file, sampleRate);
+
+    juce::dsp::ConvolutionMessageQueue queue;
+    juce::dsp::Convolution convolver (queue);
+    juce::dsp::Convolution other (queue);
+    const juce::dsp::ProcessSpec spec { sampleRate, static_cast<juce::uint32> (blockSize), 1 };
+    convolver.prepare (spec);
+    other.prepare (spec);
+    convolver.reset();
+
+    juce::AudioFormatManager manager;
+    manager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (manager.createReaderFor (file));
+    expect (reader != nullptr, "raw: reader failed");
+    juce::AudioBuffer<float> impulse (1, static_cast<int> (reader->lengthInSamples));
+    reader->read (&impulse, 0, impulse.getNumSamples(), 0, true, false);
+    convolver.loadImpulseResponse (std::move (impulse), reader->sampleRate,
+                                   juce::dsp::Convolution::Stereo::no,
+                                   juce::dsp::Convolution::Trim::no,
+                                   juce::dsp::Convolution::Normalise::yes);
+
+    std::vector<float> scratch (static_cast<std::size_t> (blockSize), 0.0f);
+    auto run = [&]
+    {
+        float* channels[1] { scratch.data() };
+        juce::dsp::AudioBlock<float> block (channels, 1, static_cast<std::size_t> (blockSize));
+        juce::dsp::ProcessContextReplacing<float> context (block);
+        convolver.process (context);
+    };
+    renderPaced ([&] { std::fill (scratch.begin(), scratch.end(), 0.0f); run(); }, 200);
+    std::fill (scratch.begin(), scratch.end(), 0.0f);
+    scratch[0] = 1.0f;
+    run();
+    std::string firstSamples;
+    for (int sample = 0; sample < 6; ++sample)
+        firstSamples += std::to_string (scratch[static_cast<std::size_t> (sample)]) + " ";
+    const auto ratio = scratch[0] / scratch[3];
+    expect (scratch[3] > 0.1f && std::abs (ratio - 0.25f) < 0.02f,
+            "raw juce convolution did not reproduce the IR: " + firstSamples);
+    file.deleteFile();
+}
+
+void testCabinetConvolvesImpulse()
+{
+    const double sampleRate = 48000.0;
+    const int blockSize = 64;
+    const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getChildFile ("signalpatch-test-cab-ir.wav");
+    writeTestImpulseFile (file, sampleRate);
+
+    auto node = createNodeProcessor (NodeKind::cabinet);
+    expect (node != nullptr, "cabinet node not created");
+    node->getParameter (2).setValue (20.0f);    // low cut wide open
+    node->getParameter (3).setValue (20000.0f); // high cut wide open: keep the impulse peak in place
+    node->prepare (sampleRate, blockSize);
+    {
+        auto state = std::make_unique<juce::DynamicObject>();
+        state->setProperty ("ir", file.getFullPathName());
+        node->setExtraState (juce::var (state.release()));
+    }
+    expect (! node->statusText().contains ("LOAD FAILED"),
+            "impulse failed to load: " + node->statusText().toStdString());
+
+    juce::AudioBuffer<float> inputs (node->getNumInputPorts(), blockSize);
+    juce::AudioBuffer<float> outputs (node->getNumOutputPorts(), blockSize);
+    inputs.clear();
+    renderPaced ([&] { node->render (inputs, outputs, blockSize); }, 200);
+
+    inputs.setSample (0, 0, 1.0f);
+    node->render (inputs, outputs, blockSize);
+    int peakIndex = -1;
+    float peak = 0.0f;
+    for (int sample = 0; sample < blockSize; ++sample)
+    {
+        const auto magnitude = std::abs (outputs.getSample (0, sample));
+        if (magnitude > peak)
+        {
+            peak = magnitude;
+            peakIndex = sample;
+        }
+    }
+    std::string firstSamples;
+    for (int sample = 0; sample < 8; ++sample)
+        firstSamples += std::to_string (outputs.getSample (0, sample)) + " ";
+    expect (peak > 0.05f, "cabinet output was silent for an impulse: " + firstSamples);
+    expect (peakIndex == 3, "impulse response delay not reproduced (peak at " + std::to_string (peakIndex)
+                            + "; first samples " + firstSamples + ")");
+    const auto ratio = outputs.getSample (0, 0) / outputs.getSample (0, 3);
+    expect (std::abs (ratio - 0.25f) < 0.05f, "impulse taps not in proportion: " + firstSamples);
+    file.deleteFile();
+}
+
+void testMergeJsonAddsNodesWithFreshIds()
+{
+    PatchDocument source;
+    source.configureHardware (channelNames ("Input", 2), channelNames ("Output", 2));
+    const auto drive = source.addNode (NodeKind::distortion, { 100.0f, 100.0f }, 500);
+    const auto delay = source.addNode (NodeKind::delay, { 300.0f, 100.0f }, 501);
+    source.findNode (drive)->processor->getParameter (0).setValue (13.0f);
+    source.findNode (drive)->processor->setName ("Fuzz");
+    expectOk (source.addConnection ({ PatchDocument::hardwareInputId, 0, drive, 0 }), "in");
+    expectOk (source.addConnection ({ drive, 0, delay, 0 }), "chain");
+    expectOk (source.addConnection ({ delay, 0, PatchDocument::hardwareOutputId, 1 }), "out");
+    const auto json = source.toJson();
+
+    PatchDocument target;
+    target.configureHardware (channelNames ("Input", 2), channelNames ("Output", 2));
+    const auto existing = target.addNode (NodeKind::gain, { 0.0f, 0.0f }, 500); // same id as the source's drive
+    std::vector<NodeId> added;
+    std::vector<Connection> cables;
+    expectOk (target.mergeJson (json, { 50.0f, 50.0f }, added, cables), "merge");
+    expect (added.size() == 2, "two nodes should have been merged");
+    expect (target.findNode (existing)->processor->getKind() == NodeKind::gain, "existing node clobbered by merge");
+    expect (cables.size() == 3, "three cables expected after merge");
+    const auto* fuzz = target.findNode (added[0]);
+    expect (fuzz != nullptr && fuzz->processor->getName() == "Fuzz", "merged node lost its name");
+    expect (std::abs (fuzz->processor->getParameter (0).getValue() - 13.0f) < 1.0e-5f, "merged parameter lost");
+    expect (fuzz->position == juce::Point<float> (150.0f, 150.0f), "merged node not offset");
+    expect (GraphCompiler::compile (target, 64, true).succeeded(), "merged document does not compile");
+}
+
+void testBundleRoundTripKeepsAssetsRelative()
+{
+    const auto temp = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getChildFile ("signalpatch-bundle-test-" + juce::Uuid().toString());
+    temp.createDirectory();
+    const auto impulse = temp.getChildFile ("my cab.wav");
+    writeTestImpulseFile (impulse, 48000.0);
+
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    const auto cab = document.addNode (NodeKind::cabinet, { 10.0f, 10.0f });
+    {
+        auto state = std::make_unique<juce::DynamicObject>();
+        state->setProperty ("ir", impulse.getFullPathName());
+        document.findNode (cab)->processor->setExtraState (juce::var (state.release()));
+    }
+    const auto nam = document.addNode (NodeKind::neuralPedal, { 200.0f, 10.0f });
+    {
+        auto state = std::make_unique<juce::DynamicObject>();
+        state->setProperty ("model", temp.getChildFile ("does-not-exist.nam").getFullPathName());
+        document.findNode (nam)->processor->setExtraState (juce::var (state.release()));
+    }
+
+    const auto zip = temp.getChildFile ("MyRig.zip");
+    const auto exported = bundle::exportBundle (document, zip);
+    expect (zip.existsAsFile(), "export did not write a zip");
+    expect (exported.failed() && exported.getErrorMessage().contains ("does-not-exist.nam"),
+            "export should report the missing model but still write the bundle");
+
+    const auto unpackRoot = temp.getChildFile ("unpacked");
+    juce::File patchFile;
+    expectOk (bundle::extractBundle (zip, unpackRoot, patchFile), "extract");
+    expect (patchFile.getFileName() == "MyRig.signalpatch", "bundle patch not named after the zip: " + patchFile.getFileName().toStdString());
+    auto json = juce::JSON::parse (patchFile);
+    juce::String storedIr;
+    for (const auto& nodeValue : *json.getDynamicObject()->getProperty ("nodes").getArray())
+        if (auto* extra = nodeValue.getDynamicObject()->getProperty ("extra").getDynamicObject())
+            if (extra->hasProperty ("ir"))
+                storedIr = extra->getProperty ("ir").toString();
+    expect (storedIr == "assets/irs/my cab.wav", "impulse path not relative inside the bundle: " + storedIr.toStdString());
+    expect (patchFile.getParentDirectory().getChildFile (storedIr).existsAsFile(), "impulse not copied into the bundle");
+
+    // Loading resolves the relative path against the bundle folder.
+    bundle::rebaseAssetPaths (json, patchFile.getParentDirectory(), false);
+    PatchDocument reloaded;
+    reloaded.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    expectOk (reloaded.loadJson (json), "reload");
+    juce::String resolved;
+    for (const auto& node : reloaded.getNodes())
+        if (node.processor->getKind() == NodeKind::cabinet)
+            resolved = node.processor->getExtraState().getProperty ("ir", "").toString();
+    expect (juce::File::isAbsolutePath (resolved) && juce::File (resolved).existsAsFile(),
+            "reloaded impulse path did not resolve: " + resolved.toStdString());
+
+    // Saving next to assets keeps paths relative; saving elsewhere keeps them absolute.
+    auto saved = reloaded.toJson();
+    bundle::rebaseAssetPaths (saved, patchFile.getParentDirectory(), true);
+    bool relative = false;
+    for (const auto& nodeValue : *saved.getDynamicObject()->getProperty ("nodes").getArray())
+        if (auto* extra = nodeValue.getDynamicObject()->getProperty ("extra").getDynamicObject())
+            if (extra->hasProperty ("ir"))
+                relative = ! juce::File::isAbsolutePath (extra->getProperty ("ir").toString());
+    expect (relative, "re-save inside the project folder should store a relative path");
+    temp.deleteRecursively();
+}
+
 int main()
 {
     // Flush every insertion so a crash on CI still shows which test was
@@ -1164,7 +1501,14 @@ int main()
         { "NAM model loads and processes", testNeuralAmpModelLoadsAndProcesses },
         { "callback path performs no allocation", testCallbackPathDoesNotAllocate },
         { "recompile churn keeps rendering", testRecompileChurnKeepsRendering },
-        { "NAM model benchmark (env-gated)", testNamModelBenchmark }
+        { "NAM model benchmark (env-gated)", testNamModelBenchmark },
+        { "undo/redo structure round trip", testUndoRedoStructure },
+        { "undo delete restores processor and cables", testUndoDeleteRestoresSameProcessorAndCables },
+        { "undo coalesces knob gestures", testUndoCoalescesKnobGestures },
+        { "raw juce convolution sanity", testRawJuceConvolutionSanity },
+        { "cabinet convolves an impulse", testCabinetConvolvesImpulse },
+        { "merge patch adds nodes with fresh ids", testMergeJsonAddsNodesWithFreshIds },
+        { "portable bundle round trip", testBundleRoundTripKeepsAssetsRelative }
     };
 
     int failures = 0;

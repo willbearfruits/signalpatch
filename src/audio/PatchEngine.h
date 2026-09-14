@@ -77,6 +77,12 @@ public:
     // portable project; exportBundle builds one and zips it.
     juce::Result savePatch (const juce::File& file);
     juce::Result loadPatch (const juce::File& file);
+    /** Merges another patch's nodes and cables into the current one (undoable). */
+    juce::Result importPatch (const juce::File& file);
+    /** Writes <name>.zip containing <name>/<name>.signalpatch + assets/. */
+    juce::Result exportBundle (const juce::File& zipFile);
+    /** Unzips a bundle under destinationRoot and returns its patch file. */
+    static juce::Result extractBundle (const juce::File& zipFile, const juce::File& destinationRoot, juce::File& patchFileOut);
     void createDefaultPatch();
 
 private:

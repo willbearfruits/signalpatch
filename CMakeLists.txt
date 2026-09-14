@@ -158,6 +158,8 @@ target_sources(signalpatch_tests PRIVATE
     tests/EngineTests.cpp
     src/audio/Graph.cpp
     src/audio/Graph.h
+    src/audio/PatchHistory.cpp
+    src/audio/PatchBundle.cpp
     src/audio/Processors.cpp
     src/audio/Processors.h)
 

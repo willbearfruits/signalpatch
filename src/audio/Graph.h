@@ -306,6 +306,13 @@ private:
     bool hardwareLayoutConfigured = false;
 };
 
+    /** Adds another patch's user nodes and cables to this one (fresh ids,
+        positions offset). Cables to hardware map by port index. */
+    juce::Result mergeJson (const juce::var& value, juce::Point<float> offset,
+                            std::vector<NodeId>& addedNodes, std::vector<Connection>& addedCables);
+
+    [[nodiscard]] double getSampleRate() const noexcept { return currentSampleRate; }
+    [[nodiscard]] int getMaximumBlockSize() const noexcept { return currentMaximumBlockSize; }
 class RenderPlan
 {
 public:
