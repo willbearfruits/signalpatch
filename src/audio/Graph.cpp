@@ -616,6 +616,19 @@ void PatchDocument::clearUserPatch()
 }
 
 NodeModel* PatchDocument::findNode (NodeId id) noexcept
+bool PatchDocument::insertNode (NodeModel model, double preparedSampleRate, int preparedMaximumBlockSize)
+{
+    if (model.hardware || model.processor == nullptr || model.id == hardwareInputId
+        || model.id == hardwareOutputId || findNode (model.id) != nullptr)
+        return false;
+
+    if (preparedSampleRate != currentSampleRate || preparedMaximumBlockSize != currentMaximumBlockSize)
+        model.processor->prepare (currentSampleRate, currentMaximumBlockSize);
+    nextNodeId = juce::jmax (nextNodeId, model.id + 1);
+    nodes.push_back (std::move (model));
+    return true;
+}
+
 {
     const auto found = std::find_if (nodes.begin(), nodes.end(), [id] (const NodeModel& node) { return node.id == id; });
     return found == nodes.end() ? nullptr : &*found;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Graph.h"
+#include "PatchHistory.h"
 
 #include <array>
 #include <atomic>
@@ -60,7 +61,21 @@ public:
     void togglePanic() noexcept;
     [[nodiscard]] bool isPanicMuted() const noexcept;
 
-    juce::Result savePatch (const juce::File& file) const;
+    // Undo/redo over every edit above (message thread). Both return false
+    // when there is nothing to apply; the description names the edit.
+    bool undo();
+    bool redo();
+    [[nodiscard]] bool canUndo() const noexcept { return history.canUndo(); }
+    [[nodiscard]] bool canRedo() const noexcept { return history.canRedo(); }
+    [[nodiscard]] juce::String getUndoDescription() const { return history.getUndoDescription(); }
+    [[nodiscard]] juce::String getRedoDescription() const { return history.getRedoDescription(); }
+    void closeEditGesture() noexcept { history.closeGesture(); }
+
+    // Patch files store asset paths (NAM models, cab impulses) relative to
+    // the patch's folder when they live under it, absolute otherwise. A
+    // folder with the patch plus an assets/ subfolder is therefore already a
+    // portable project; exportBundle builds one and zips it.
+    juce::Result savePatch (const juce::File& file);
     juce::Result loadPatch (const juce::File& file);
     void createDefaultPatch();
 
@@ -102,6 +117,7 @@ private:
 
     std::atomic<bool> deviceReady { false };
     std::atomic<bool> panicMuted { false };
+    void markDocumentEdited();
     std::atomic<bool> callbackRunning { false };
     std::atomic<float> cpuLoad { 0.0f };
     std::atomic<float> cpuPeak { 0.0f };
@@ -110,6 +126,7 @@ private:
     std::atomic<int> currentOutputChannels { 0 };
     std::atomic<int> currentBufferSize { 128 };
     std::atomic<double> currentSampleRate { 48000.0 };
+    PatchHistory history { document };
     std::array<char, 512> pendingDeviceErrorText {};
     std::atomic<int> pendingDeviceErrorLength { 0 }; // 0 empty, -1 writer/reader owns the buffer.
 
@@ -124,4 +141,6 @@ private:
     bool documentDirty = false;
     juce::int64 lastDocumentChangeMs = 0;
 };
+    std::atomic<int> observedBlockSize { 0 }; // what the callback really gets (pipewire-jack reports its max quantum)
 } // namespace signalpatch
+    bool modifiedSinceSave = false;

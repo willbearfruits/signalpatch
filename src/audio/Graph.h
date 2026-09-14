@@ -291,6 +291,9 @@ public:
     [[nodiscard]] const std::vector<Connection>& getConnections() const noexcept { return connections; }
 
     [[nodiscard]] juce::var toJson() const;
+    // Re-inserts a previously removed node (undo/redo). The processor is
+    // re-prepared only if the document's rate/block changed since it left.
+    bool insertNode (NodeModel model, double preparedSampleRate, int preparedMaximumBlockSize);
     juce::Result loadJson (const juce::var& value);
 
 private:

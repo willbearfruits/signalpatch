@@ -91,6 +91,7 @@ NodeComponent::NodeComponent (PatchEngine& engineToUse, NodeId nodeId)
             safetyResetButton->onClick = [this] { engine.resetNodeSafety (id); };
             addAndMakeVisible (*safetyResetButton);
         }
+            valueSlider->onDragEnd = [this] { engine.closeEditGesture(); }; // one drag = one undo step
 
         const auto kind = node->processor->getKind();
         auto addCommand = [this] (const juce::String& label, const juce::String& command,
@@ -1021,3 +1022,5 @@ bool NodeComponent::editDrumCellAt (juce::Point<float> localPoint)
     return true;
 }
 } // namespace signalpatch::ui
+    if (draggingNode)
+        engine.closeEditGesture();

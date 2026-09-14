@@ -130,9 +130,15 @@ void PatchEngine::applyPreferredCaptureDevice()
     // Shapes the first launch only; once a device choice has been saved the
     // restored state wins and this is never reached.
     for (auto* type : deviceManager.getAvailableDeviceTypes())
+    // Try JACK before raw ALSA: on a PipeWire desktop the interface's ALSA
+    // playback side is held by the sound server, so a raw ALSA open "succeeds"
+    // with inputs only and the rig is silent.
+    juce::Array<juce::AudioIODeviceType*> orderedTypes;
     {
-        if (type == nullptr)
-            continue;
+        if (type != nullptr)
+            (type->getTypeName() == "JACK" ? orderedTypes.insert (0, type) : orderedTypes.add (type));
+
+    for (auto* type : orderedTypes)
         type->scanForDevices();
         for (const auto& inputName : type->getDeviceNames (true))
         {
@@ -151,7 +157,12 @@ void PatchEngine::applyPreferredCaptureDevice()
             setup.useDefaultInputChannels = true;
             setup.useDefaultOutputChannels = true;
             if (deviceManager.setAudioDeviceSetup (setup, true).isEmpty())
-                return; // The preferred interface is open; stop searching.
+            {
+                if (auto* device = deviceManager.getCurrentAudioDevice();
+                    device != nullptr && device->getActiveOutputChannels().countNumberOfSetBits() > 0)
+                    return; // The preferred interface is open with outputs; stop searching.
+                deviceManager.closeAudioDevice(); // Inputs only: keep looking on another backend.
+            }
         }
     }
 }
@@ -189,6 +200,7 @@ void PatchEngine::configureAllAvailableChannels()
 void PatchEngine::rebuildForCurrentDevice (bool markDeviceReady)
 {
     auto* device = deviceManager.getCurrentAudioDevice();
+    history.clear();
     juce::StringArray inputNames;
     juce::StringArray outputNames;
     std::vector<int> inputCallbackChannels;
@@ -248,7 +260,7 @@ bool PatchEngine::compileAndPublish (bool markDeviceReady, bool markDirty)
     publishPlan (std::move (compiled.plan));
     if (markDirty)
     {
-        documentDirty = true;
+        documentDirty = modifiedSinceSave = true;
         lastDocumentChangeMs = juce::Time::currentTimeMillis();
     }
     sendChangeMessage();
@@ -289,16 +301,25 @@ void PatchEngine::reclaimRetiredPlans() noexcept
 }
 
 NodeId PatchEngine::addNode (NodeKind kind, juce::Point<float> position)
+void PatchEngine::markDocumentEdited()
+{
+    documentDirty = modifiedSinceSave = true;
+    lastDocumentChangeMs = juce::Time::currentTimeMillis();
+}
+
 {
     const auto id = document.addNode (kind, position);
     if (id != 0)
         compileAndPublish (false);
+    {
+        history.recordNodeAdded (id);
     return id;
+    }
 }
 
 bool PatchEngine::removeNode (NodeId id)
 {
-    if (! document.removeNode (id))
+    if (! history.removeNode (id))
         return false;
     compileAndPublish (false);
     return true;
@@ -311,7 +332,13 @@ juce::Result PatchEngine::connect (Connection connection)
         return result;
     if (! compileAndPublish (false))
         return juce::Result::fail (graphMessage);
+    {
+        // The last valid graph keeps running, but the rejected cable must not
+        // linger in the document or every later edit fails to compile too.
+        document.removeConnection (connection);
     return juce::Result::ok();
+    }
+    history.recordConnected (connection);
 }
 
 bool PatchEngine::disconnect (const Connection& connection)
@@ -319,6 +346,7 @@ bool PatchEngine::disconnect (const Connection& connection)
     if (! document.removeConnection (connection))
         return false;
     compileAndPublish (false);
+    history.recordDisconnected (connection);
     return true;
 }
 
@@ -327,8 +355,8 @@ void PatchEngine::moveNode (NodeId id, juce::Point<float> position)
     if (auto* node = document.findNode (id))
     {
         node->position = position;
-        documentDirty = true;
-        lastDocumentChangeMs = juce::Time::currentTimeMillis();
+        history.recordMove (id, node->position, position);
+        markDocumentEdited();
     }
 }
 
@@ -338,9 +366,10 @@ void PatchEngine::setParameter (NodeId id, int parameterIndex, float value)
     {
         if (juce::isPositiveAndBelow (parameterIndex, node->processor->getNumParameters()))
         {
-            node->processor->getParameter (parameterIndex).setValue (value);
-            documentDirty = true;
-            lastDocumentChangeMs = juce::Time::currentTimeMillis();
+            auto& parameter = node->processor->getParameter (parameterIndex);
+            history.recordParameter (id, parameterIndex, parameter.getValue(), value);
+            parameter.setValue (value);
+            markDocumentEdited();
         }
     }
 }
@@ -351,14 +380,45 @@ void PatchEngine::setModulationDepth (NodeId id, int parameterIndex, float depth
     {
         if (juce::isPositiveAndBelow (parameterIndex, node->processor->getNumParameters()))
         {
-            node->processor->getParameter (parameterIndex).setModulationDepth (depth);
-            documentDirty = true;
-            lastDocumentChangeMs = juce::Time::currentTimeMillis();
+            auto& parameter = node->processor->getParameter (parameterIndex);
+            history.recordModulationDepth (id, parameterIndex, parameter.getModulationDepth(), depth);
+            parameter.setModulationDepth (depth);
+            markDocumentEdited();
         }
     }
 }
 
 void PatchEngine::resetNodeSafety (NodeId id)
+bool PatchEngine::undo()
+{
+    const auto applied = history.undo();
+    if (applied == PatchHistory::Applied::none)
+        return false;
+    if (applied == PatchHistory::Applied::structure)
+        compileAndPublish (false);
+    else
+    {
+        markDocumentEdited();
+        sendChangeMessage();
+    }
+    return true;
+}
+
+bool PatchEngine::redo()
+{
+    const auto applied = history.redo();
+    if (applied == PatchHistory::Applied::none)
+        return false;
+    if (applied == PatchHistory::Applied::structure)
+        compileAndPublish (false);
+    else
+    {
+        markDocumentEdited();
+        sendChangeMessage();
+    }
+    return true;
+}
+
 {
     if (auto* node = document.findNode (id))
         node->processor->resetSafety();
@@ -370,7 +430,8 @@ void PatchEngine::setNodeBypassed (NodeId id, bool bypassed)
     {
         // Atomic flag read by the callback; no recompilation required.
         node->processor->setBypassed (bypassed);
-        documentDirty = true;
+        history.recordBypass (id, node->processor->isBypassed(), bypassed);
+        documentDirty = modifiedSinceSave = true;
         lastDocumentChangeMs = juce::Time::currentTimeMillis();
         sendChangeMessage();
     }
@@ -388,7 +449,8 @@ void PatchEngine::applyNodeExtraState (NodeId id, const juce::var& state)
     if (auto* node = document.findNode (id))
     {
         node->processor->setExtraState (state);
-        documentDirty = true;
+        history.recordExtraState (id, node->processor->getExtraState(), state);
+        documentDirty = modifiedSinceSave = true;
         lastDocumentChangeMs = juce::Time::currentTimeMillis();
         sendChangeMessage();
     }
@@ -424,7 +486,10 @@ EngineStatus PatchEngine::getStatus() const
         status.backendName = "No audio backend";
     }
     status.sampleRate = currentSampleRate.load (std::memory_order_relaxed);
-    status.bufferSize = currentBufferSize.load (std::memory_order_relaxed);
+    {
+        const auto observed = observedBlockSize.load (std::memory_order_relaxed);
+        status.bufferSize = observed > 0 ? observed : currentBufferSize.load (std::memory_order_relaxed);
+    }
     status.inputChannels = currentInputChannels.load (std::memory_order_relaxed);
     status.outputChannels = currentOutputChannels.load (std::memory_order_relaxed);
     status.graphLatencySamples = graphLatencySamples.load (std::memory_order_relaxed);
@@ -438,7 +503,7 @@ EngineStatus PatchEngine::getStatus() const
     return status;
 }
 
-juce::Result PatchEngine::savePatch (const juce::File& file) const
+juce::Result PatchEngine::savePatch (const juce::File& file)
 {
     if (file == juce::File())
         return juce::Result::fail ("No patch file selected.");
@@ -449,6 +514,7 @@ juce::Result PatchEngine::savePatch (const juce::File& file) const
     return juce::Result::ok();
 }
 
+    modifiedSinceSave = false;
 juce::Result PatchEngine::loadPatch (const juce::File& file)
 {
     if (! file.existsAsFile())
@@ -551,6 +617,7 @@ void PatchEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         {
             const auto chunk = juce::jmin (maximumChunk, numSamples - offset);
             activePlan->render (inputChannelData, numInputChannels,
+    history.clear();
                                 outputChannelData, numOutputChannels,
                                 offset, chunk);
         }
@@ -564,12 +631,14 @@ void PatchEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         audioThreadMasterGain += juce::jlimit (-maximumStep, maximumStep, targetGain - audioThreadMasterGain);
         for (int channel = 0; channel < numOutputChannels; ++channel)
             if (outputChannelData[channel] != nullptr)
+    modifiedSinceSave = false;
                 outputChannelData[channel][sample] *= audioThreadMasterGain;
     }
 
     const auto elapsed = juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - startTicks);
     const auto blockDuration = static_cast<double> (numSamples) / juce::jmax (1.0, sampleRate);
     const auto ratio = static_cast<float> (juce::jlimit (0.0, 4.0, elapsed / blockDuration));
+    history.clear();
     cpuLoad.store (ratio, std::memory_order_relaxed);
     // Worst-case latching matters more than the average; a lost race with the
     // message-thread decay only shortens how long a peak is displayed.
@@ -616,6 +685,8 @@ void PatchEngine::audioDeviceError (const juce::String& errorMessage)
             ++length;
         }
         pendingDeviceErrorText[static_cast<std::size_t> (length)] = '\0';
+    if (numSamples > 0)
+        observedBlockSize.store (numSamples, std::memory_order_relaxed);
         pendingDeviceErrorLength.store (length, std::memory_order_release);
     }
     deviceReady.store (false, std::memory_order_release);
@@ -700,6 +771,7 @@ juce::String PatchEngine::currentDeviceSignature()
     auto* device = deviceManager.getCurrentAudioDevice();
     if (device == nullptr)
         return "offline";
+    observedBlockSize.store (0, std::memory_order_relaxed);
     return device->getTypeName() + "|" + device->getName()
          + "|" + juce::String (device->getCurrentSampleRate(), 3)
          + "|" + juce::String (device->getCurrentBufferSizeSamples())
