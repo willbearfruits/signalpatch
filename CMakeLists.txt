@@ -67,8 +67,10 @@ if(SIGNALPATCH_ENABLE_NAM)
         FetchContent_Declare(namcore
             GIT_REPOSITORY https://github.com/sdatkinson/NeuralAmpModelerCore.git
             GIT_TAG ab72c078cd141be60d963d357bd501d56cc9606b
-            PATCH_COMMAND ${GIT_EXECUTABLE} apply --ignore-whitespace
-                "${CMAKE_CURRENT_SOURCE_DIR}/packaging/patches/namcore-nonatomic-shared-ptr.patch")
+            PATCH_COMMAND ${CMAKE_COMMAND}
+                -DGIT=${GIT_EXECUTABLE}
+                -DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/packaging/patches/namcore-nonatomic-shared-ptr.patch
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/packaging/patches/apply-namcore-patch.cmake)
         FetchContent_GetProperties(namcore)
         if(NOT namcore_POPULATED)
             FetchContent_Populate(namcore)
