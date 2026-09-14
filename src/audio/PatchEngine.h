@@ -84,6 +84,15 @@ public:
     /** Unzips a bundle under destinationRoot and returns its patch file. */
     static juce::Result extractBundle (const juce::File& zipFile, const juce::File& destinationRoot, juce::File& patchFileOut);
     void createDefaultPatch();
+    /** File > New: back to the default rig, history cleared, nothing unsaved. */
+    void newPatch();
+    /** Edits since the last save/load/new (the autosave keeps its own flag). */
+    [[nodiscard]] bool hasUnsavedChanges() const noexcept { return modifiedSinceSave; }
+
+    juce::Result renameNode (NodeId id, const juce::String& newName);
+    /** Copies a node (parameters, mod depths, bypass, extra state) next to the
+        original. Returns the new id, or 0. */
+    NodeId duplicateNode (NodeId id);
 
 private:
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData,
@@ -108,6 +117,7 @@ private:
     void publishPlan (std::unique_ptr<RenderPlan> plan) noexcept;
     void retirePlanFromAudioThread (RenderPlan* plan) noexcept;
     void reclaimRetiredPlans() noexcept;
+    void markDocumentEdited();
     void writeAutosaveIfDue();
     juce::File autosaveFile() const;
     juce::File audioStateFile() const;
@@ -116,6 +126,7 @@ private:
 
     juce::AudioDeviceManager deviceManager;
     PatchDocument document;
+    PatchHistory history { document };
 
     std::atomic<RenderPlan*> pendingPlan { nullptr };
     std::atomic<RenderPlan*> retiredPlans { nullptr };
@@ -123,7 +134,6 @@ private:
 
     std::atomic<bool> deviceReady { false };
     std::atomic<bool> panicMuted { false };
-    void markDocumentEdited();
     std::atomic<bool> callbackRunning { false };
     std::atomic<float> cpuLoad { 0.0f };
     std::atomic<float> cpuPeak { 0.0f };
@@ -131,8 +141,8 @@ private:
     std::atomic<int> currentInputChannels { 0 };
     std::atomic<int> currentOutputChannels { 0 };
     std::atomic<int> currentBufferSize { 128 };
+    std::atomic<int> observedBlockSize { 0 }; // what the callback really gets (pipewire-jack reports its max quantum)
     std::atomic<double> currentSampleRate { 48000.0 };
-    PatchHistory history { document };
     std::array<char, 512> pendingDeviceErrorText {};
     std::atomic<int> pendingDeviceErrorLength { 0 }; // 0 empty, -1 writer/reader owns the buffer.
 
@@ -140,6 +150,7 @@ private:
     juce::String graphMessage;
     juce::String deviceError;
     bool initialised = false;
+    bool modifiedSinceSave = false;
     bool audioCallbackRegistered = false;
     bool restoredAudioDeviceState = false;
     juce::String configuredDeviceSignature;
@@ -147,6 +158,4 @@ private:
     bool documentDirty = false;
     juce::int64 lastDocumentChangeMs = 0;
 };
-    std::atomic<int> observedBlockSize { 0 }; // what the callback really gets (pipewire-jack reports its max quantum)
 } // namespace signalpatch
-    bool modifiedSinceSave = false;

@@ -1,5 +1,8 @@
 #include "MainComponent.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 namespace signalpatch::ui
 {
 MainComponent::PaletteButton::PaletteButton (NodeKind kindToUse, const juce::String& name)
@@ -99,8 +102,8 @@ MainComponent::MainComponent()
     panicButton.setColour (juce::TextButton::buttonColourId, colours::warning.darker (0.42f));
 
     audioSetupButton.onClick = [this] { showAudioSetup(); };
-    saveButton.onClick = [this] { showSaveDialog(); };
-    loadButton.onClick = [this] { showLoadDialog(); };
+    saveButton.onClick = [this] { saveCurrent(); };
+    loadButton.onClick = [this] { confirmDiscardChanges ([this] { showLoadDialog(); }); };
     panicButton.onClick = [this]
     {
         engine.togglePanic();
@@ -144,6 +147,20 @@ MainComponent::MainComponent()
         repaint();
     };
 
+    {
+        juce::PropertiesFile::Options options;
+        options.applicationName = "SignalPatch";
+        options.filenameSuffix = "settings";
+        options.folderName = "SignalPatch";
+        options.osxLibrarySubFolder = "Application Support";
+        settings = std::make_unique<juce::PropertiesFile> (options);
+        recentFiles.setMaxNumberOfItems (10);
+        recentFiles.restoreFromString (settings->getValue ("recentFiles"));
+        recentFiles.removeNonExistentFiles();
+    }
+    menuBar.setModel (this);
+    addAndMakeVisible (menuBar);
+
     engine.addChangeListener (this);
     const auto result = engine.initialise();
     if (result.failed())
@@ -160,6 +177,7 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
+    menuBar.setModel (nullptr);
     stopTimer();
     engine.removeChangeListener (this);
     viewport.setViewedComponent (nullptr, false);
@@ -208,8 +226,22 @@ void MainComponent::updateStatus()
 
 void MainComponent::timerCallback()
 {
+    if (std::getenv ("SIGNALPATCH_PAINT_STATS") != nullptr)
+    {
+        static int ticks = 0;
+        if (++ticks % 10 == 0)
+            std::fprintf (stderr, "paints/s  main %d  canvas %d  plate %d (raster %d)  live %d\n",
+                          paintStats::mainPaints.exchange (0), paintStats::canvasPaints.exchange (0),
+                          paintStats::platePaints.exchange (0), paintStats::plateRasters.exchange (0),
+                          paintStats::livePaints.exchange (0));
+    }
     updateStatus();
-    repaint();
+    // Header readouts and the inspector's live levels; palette and canvas are
+    // untouched (the canvas has its own, narrower, repaint schedule).
+    repaint (0, menuHeight, getWidth(), headerBarHeight);
+    updateWindowTitle();
+    if (inspectorNodeId != 0 || inspectorConnection.has_value())
+        repaint (getWidth() - inspectorWidth, headerHeight, inspectorWidth, getHeight() - headerHeight - footerHeight);
 }
 
 void MainComponent::changeListenerCallback (juce::ChangeBroadcaster*)
@@ -285,8 +317,245 @@ void MainComponent::showSaveDialog()
         if (! file.hasFileExtension ("signalpatch"))
             file = file.withFileExtension ("signalpatch");
         const auto result = engine.savePatch (file);
+        if (result.wasOk())
+            setCurrentFile (file);
         setMessage (result.wasOk() ? "Saved " + file.getFileName() : result.getErrorMessage(), result.failed());
     });
+}
+
+void MainComponent::saveCurrent()
+{
+    if (currentFile == juce::File())
+    {
+        showSaveDialog();
+        return;
+    }
+    const auto result = engine.savePatch (currentFile);
+    setMessage (result.wasOk() ? "Saved " + currentFile.getFileName() : result.getErrorMessage(), result.failed());
+    if (result.wasOk())
+        rememberRecentFile (currentFile);
+}
+
+void MainComponent::newPatch()
+{
+    confirmDiscardChanges ([this]
+    {
+        engine.newPatch();
+        setCurrentFile ({});
+        setMessage ("New patch (muted) - press MUTED to fade in");
+        updateStatus();
+    });
+}
+
+void MainComponent::setCurrentFile (const juce::File& file)
+{
+    currentFile = file;
+    if (file != juce::File())
+        rememberRecentFile (file);
+    updateWindowTitle();
+}
+
+void MainComponent::rememberRecentFile (const juce::File& file)
+{
+    recentFiles.addFile (file);
+    if (settings != nullptr)
+    {
+        settings->setValue ("recentFiles", recentFiles.toString());
+        settings->saveIfNeeded();
+    }
+}
+
+void MainComponent::updateWindowTitle()
+{
+    auto title = currentFile == juce::File() ? juce::String ("Untitled") : currentFile.getFileNameWithoutExtension();
+    if (engine.hasUnsavedChanges())
+        title += " *";
+    title += " - SignalPatch";
+    if (title == lastWindowTitle)
+        return;
+    lastWindowTitle = title;
+    if (auto* window = findParentComponentOfClass<juce::ResizableWindow>())
+        window->setName (title);
+}
+
+void MainComponent::confirmDiscardChanges (std::function<void()> proceed)
+{
+    if (! engine.hasUnsavedChanges())
+    {
+        proceed();
+        return;
+    }
+    const auto name = currentFile == juce::File() ? juce::String ("this patch") : currentFile.getFileName();
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    juce::AlertWindow::showYesNoCancelBox (juce::MessageBoxIconType::QuestionIcon,
+                                          "Unsaved changes",
+                                          "Save the changes to " + name + " first?",
+                                          "Save", "Don't save", "Cancel", this,
+                                          juce::ModalCallbackFunction::create ([safeThis, proceed] (int choice)
+    {
+        if (safeThis == nullptr || choice == 0)
+            return; // cancelled
+        if (choice == 2)
+        {
+            proceed();
+            return;
+        }
+        // Save first; a Save As dialog means we cannot chain synchronously,
+        // so proceed only when a file already exists.
+        if (safeThis->currentFile == juce::File())
+        {
+            safeThis->showSaveDialog();
+            safeThis->setMessage ("Saved? Then repeat the action.");
+            return;
+        }
+        if (safeThis->engine.savePatch (safeThis->currentFile).wasOk())
+            proceed();
+    }));
+}
+
+void MainComponent::duplicateSelected()
+{
+    const auto id = canvas.selectedNode();
+    if (id == 0)
+    {
+        setMessage ("Select a module to duplicate");
+        return;
+    }
+    const auto copy = engine.duplicateNode (id);
+    if (copy != 0)
+    {
+        canvas.setSelectedNode (copy);
+        setMessage ("Duplicated");
+    }
+}
+
+void MainComponent::renameSelected()
+{
+    const auto id = canvas.selectedNode();
+    const auto* node = engine.getDocument().findNode (id);
+    if (node == nullptr || node->hardware)
+    {
+        setMessage ("Select a module to rename");
+        return;
+    }
+    NodeComponent::showRenameDialog (this, engine, id);
+}
+
+juce::StringArray MainComponent::getMenuBarNames()
+{
+    return { "File", "Edit", "View", "Help" };
+}
+
+juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
+{
+    juce::PopupMenu menu;
+    auto item = [] (int id, const juce::String& text, const juce::String& shortcut, bool enabled = true)
+    {
+        juce::PopupMenu::Item entry (text);
+        entry.itemID = id;
+        entry.shortcutKeyDescription = shortcut;
+        entry.isEnabled = enabled;
+        return entry;
+    };
+    if (index == 0)
+    {
+        menu.addItem (item (menuNew, "New", "Ctrl+N"));
+        menu.addItem (item (menuOpen, "Open...", "Ctrl+O"));
+        juce::PopupMenu recent;
+        recentFiles.createPopupMenuItems (recent, menuRecentBase, true, true);
+        menu.addSubMenu ("Open Recent", recent, recentFiles.getNumFiles() > 0);
+        menu.addSeparator();
+        menu.addItem (item (menuSave, "Save", "Ctrl+S"));
+        menu.addItem (item (menuSaveAs, "Save As...", "Ctrl+Shift+S"));
+        menu.addSeparator();
+        menu.addItem (item (menuImport, "Import Patch into this one...", ""));
+        menu.addItem (item (menuExportBundle, "Export Portable Project (.zip)...", ""));
+        menu.addSeparator();
+        menu.addItem (item (menuAudioSetup, "Audio Setup...", ""));
+        menu.addSeparator();
+        menu.addItem (item (menuQuit, "Quit", "Ctrl+Q"));
+    }
+    else if (index == 1)
+    {
+        const auto undoText = engine.canUndo() ? "Undo " + engine.getUndoDescription() : juce::String ("Undo");
+        const auto redoText = engine.canRedo() ? "Redo " + engine.getRedoDescription() : juce::String ("Redo");
+        menu.addItem (item (menuUndo, undoText, "Ctrl+Z", engine.canUndo()));
+        menu.addItem (item (menuRedo, redoText, "Ctrl+Shift+Z", engine.canRedo()));
+        menu.addSeparator();
+        const bool hasSelection = canvas.selectedNode() != 0;
+        menu.addItem (item (menuDuplicate, "Duplicate module", "Ctrl+D", hasSelection));
+        menu.addItem (item (menuRename, "Rename module...", "F2", hasSelection));
+        menu.addItem (item (menuDelete, "Delete", "Del", hasSelection));
+        menu.addSeparator();
+        menu.addItem (item (menuPanic, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute", "Esc / Ctrl+M"));
+    }
+    else if (index == 2)
+    {
+        menu.addItem (item (menuZoomIn, "Zoom in", "Ctrl++"));
+        menu.addItem (item (menuZoomOut, "Zoom out", "Ctrl+-"));
+        menu.addItem (item (menuZoomReset, "Actual size", "Ctrl+0"));
+    }
+    else if (index == 3)
+    {
+        menu.addItem (item (menuOpenModelsFolder, "Open NAM models folder", ""));
+        menu.addItem (item (menuOpenIrFolder, "Open cab IR folder", ""));
+        menu.addSeparator();
+        menu.addItem (item (menuWebsite, "SignalPatch on GitHub", ""));
+        menu.addItem (item (menuAbout, "About SignalPatch", ""));
+    }
+    return menu;
+}
+
+void MainComponent::menuItemSelected (int itemId, int)
+{
+    if (itemId >= menuRecentBase)
+    {
+        const auto file = recentFiles.getFile (itemId - menuRecentBase);
+        confirmDiscardChanges ([this, file] { loadPatchFile (file); });
+        return;
+    }
+    switch (itemId)
+    {
+        case menuNew:        newPatch(); break;
+        case menuOpen:       confirmDiscardChanges ([this] { showLoadDialog(); }); break;
+        case menuSave:       saveCurrent(); break;
+        case menuSaveAs:     showSaveDialog(); break;
+        case menuImport:     showImportDialog(); break;
+        case menuExportBundle: showExportBundleDialog(); break;
+        case menuAudioSetup: showAudioSetup(); break;
+        case menuQuit:       confirmDiscardChanges ([] { juce::JUCEApplication::getInstance()->quit(); }); break;
+        case menuUndo:       { const auto text = engine.getUndoDescription(); setMessage (engine.undo() ? "Undo: " + text : "Nothing to undo"); break; }
+        case menuRedo:       { const auto text = engine.getRedoDescription(); setMessage (engine.redo() ? "Redo: " + text : "Nothing to redo"); break; }
+        case menuDelete:     canvas.deleteSelection(); break;
+        case menuDuplicate:  duplicateSelected(); break;
+        case menuRename:     renameSelected(); break;
+        case menuPanic:      engine.togglePanic(); updateStatus(); break;
+        case menuZoomIn:     setCanvasZoom (canvasZoom + 0.1f); break;
+        case menuZoomOut:    setCanvasZoom (canvasZoom - 0.1f); break;
+        case menuZoomReset:  setCanvasZoom (1.0f); break;
+        case menuOpenModelsFolder:
+        {
+            auto folder = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("SignalPatch").getChildFile ("models");
+            folder.createDirectory();
+            folder.revealToUser();
+            break;
+        }
+        case menuOpenIrFolder:
+        {
+            auto folder = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("SignalPatch").getChildFile ("irs");
+            folder.createDirectory();
+            folder.revealToUser();
+            break;
+        }
+        case menuWebsite:    juce::URL ("https://github.com/willbearfruits/signalpatch").launchInDefaultBrowser(); break;
+        case menuAbout:
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "SignalPatch",
+                "SignalPatch " + juce::String (ProjectInfo::versionString)
+                + "\nReal-time modular rack for guitar, voice and synthesis.\n"
+                  "Neural Amp Modeler and cab impulses inside.\n\nAGPL-3.0 - willbearfruits", "OK", this);
+            break;
+        default: break;
+    }
 }
 
 void MainComponent::fadeInNow()
@@ -296,19 +565,92 @@ void MainComponent::fadeInNow()
     updateStatus();
 }
 
-void MainComponent::loadPatchFile (const juce::File& file)
+juce::File MainComponent::projectsFolder()
 {
+    return juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+        .getChildFile ("SignalPatch").getChildFile ("projects");
+}
+
+void MainComponent::showImportDialog()
+{
+    fileChooser = std::make_unique<juce::FileChooser> ("Import a patch into the current one",
+                                                       juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+                                                       "*.signalpatch;*.zip");
+    fileChooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                              [this] (const juce::FileChooser& chooser)
+    {
+        auto file = chooser.getResult();
+        if (file == juce::File())
+            return;
+        if (file.hasFileExtension ("zip"))
+        {
+            juce::File extracted;
+            const auto unzip = PatchEngine::extractBundle (file, projectsFolder().getChildFile (file.getFileNameWithoutExtension()), extracted);
+            if (unzip.failed())
+            {
+                setMessage (unzip.getErrorMessage(), true);
+                return;
+            }
+            file = extracted;
+        }
+        const auto result = engine.importPatch (file);
+        setMessage (result.wasOk() ? "Imported " + file.getFileName() + " (Ctrl+Z removes it)" : result.getErrorMessage(),
+                    result.failed());
+    });
+}
+
+void MainComponent::showExportBundleDialog()
+{
+    const auto baseName = currentFile == juce::File() ? juce::String ("untitled") : currentFile.getFileNameWithoutExtension();
+    fileChooser = std::make_unique<juce::FileChooser> ("Export portable project",
+                                                       juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+                                                           .getChildFile (baseName + ".zip"),
+                                                       "*.zip");
+    fileChooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                              | juce::FileBrowserComponent::warnAboutOverwriting,
+                              [this] (const juce::FileChooser& chooser)
+    {
+        auto file = chooser.getResult();
+        if (file == juce::File())
+            return;
+        if (! file.hasFileExtension ("zip"))
+            file = file.withFileExtension ("zip");
+        const auto result = engine.exportBundle (file);
+        setMessage (result.wasOk() ? "Exported " + file.getFileName() + " - patch + models + IRs, opens anywhere"
+                                   : result.getErrorMessage(), result.failed());
+    });
+}
+
+void MainComponent::loadPatchFile (const juce::File& fileToLoad)
+{
+    auto file = fileToLoad;
+    if (file.hasFileExtension ("zip"))
+    {
+        // A portable project: unpack next to the other projects, then open the
+        // patch inside it so later saves land in that folder.
+        juce::File extracted;
+        const auto unzip = PatchEngine::extractBundle (file, projectsFolder().getChildFile (file.getFileNameWithoutExtension()), extracted);
+        if (unzip.failed())
+        {
+            setMessage (unzip.getErrorMessage(), true);
+            return;
+        }
+        file = extracted;
+    }
     const auto result = engine.loadPatch (file);
+    if (result.wasOk())
+        setCurrentFile (file);
     setMessage (result.wasOk() ? "Loaded muted: " + file.getFileName() + " - press MUTED to fade in"
                                : result.getErrorMessage(), result.failed());
+    updateStatus();
 }
 
 void MainComponent::showLoadDialog()
 {
     fileChooser = std::make_unique<juce::FileChooser> (
-        "Load SignalPatch patch",
+        "Load SignalPatch patch or portable project",
         juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
-        "*.signalpatch");
+        "*.signalpatch;*.zip");
     fileChooser->launchAsync (juce::FileBrowserComponent::openMode
                               | juce::FileBrowserComponent::canSelectFiles,
                               [this] (const juce::FileChooser& chooser)
@@ -316,21 +658,22 @@ void MainComponent::showLoadDialog()
         const auto file = chooser.getResult();
         if (file == juce::File())
             return;
-        const auto result = engine.loadPatch (file);
-        setMessage (result.wasOk() ? "Loaded muted: " + file.getFileName() + " - press MUTED to fade in"
-                                   : result.getErrorMessage(), result.failed());
+        loadPatchFile (file);
     });
 }
 
 void MainComponent::paint (juce::Graphics& graphics)
 {
+    ++paintStats::mainPaints;
     graphics.fillAll (colours::workspace);
 
-    // Header bar.
-    graphics.setGradientFill (juce::ColourGradient (colours::panelRaised.brighter (0.02f), 0.0f, 0.0f,
+    // Menu strip, then the header bar.
+    graphics.setColour (colours::panel.darker (0.15f));
+    graphics.fillRect (0, 0, getWidth(), menuHeight);
+    graphics.setGradientFill (juce::ColourGradient (colours::panelRaised.brighter (0.02f), 0.0f, static_cast<float> (menuHeight),
                                                     colours::panel, 0.0f, static_cast<float> (headerHeight),
                                                     false));
-    graphics.fillRect (0, 0, getWidth(), headerHeight);
+    graphics.fillRect (0, menuHeight, getWidth(), headerBarHeight);
 
     // Side panels and footer.
     graphics.setColour (colours::panel);
@@ -355,17 +698,17 @@ void MainComponent::paint (juce::Graphics& graphics)
     strip.addColour (0.35, colours::okay);
     strip.addColour (0.65, colours::feedback);
     graphics.setGradientFill (strip);
-    graphics.fillRect (0, 0, getWidth(), 3);
+    graphics.fillRect (0, menuHeight, getWidth(), 3);
 
     // Wordmark.
     graphics.setColour (colours::audio);
-    graphics.fillRoundedRectangle (18.0f, 12.0f, 4.0f, 38.0f, 2.0f);
+    graphics.fillRoundedRectangle (18.0f, menuHeight + 12.0f, 4.0f, 38.0f, 2.0f);
     graphics.setColour (colours::text);
     graphics.setFont (juce::FontOptions (20.0f, juce::Font::bold).withKerningFactor (0.06f));
-    graphics.drawText ("SIGNALPATCH", 32, 8, 190, 25, juce::Justification::centredLeft);
+    graphics.drawText ("SIGNALPATCH", 32, menuHeight + 8, 190, 25, juce::Justification::centredLeft);
     graphics.setColour (colours::mutedText);
     graphics.setFont (juce::FontOptions (9.5f).withKerningFactor (0.12f));
-    graphics.drawText ("REAL-TIME MODULAR PROCESSOR", 33, 34, 190, 16, juce::Justification::centredLeft);
+    graphics.drawText ("REAL-TIME MODULAR PROCESSOR", 33, menuHeight + 34, 190, 16, juce::Justification::centredLeft);
 
     // Engine state lamp next to the device readout.
     const auto lampColour = engineRunning ? colours::okay : colours::warning;
@@ -548,7 +891,8 @@ void MainComponent::layoutPalette()
 
 void MainComponent::resized()
 {
-    auto top = juce::Rectangle<int> (0, 0, getWidth(), headerHeight);
+    menuBar.setBounds (0, 0, getWidth(), menuHeight);
+    auto top = juce::Rectangle<int> (0, menuHeight, getWidth(), headerBarHeight);
     audioSetupButton.setBounds (top.removeFromRight (122).reduced (7, 14));
     panicButton.setBounds (top.removeFromRight (126).reduced (7, 14));
     loadButton.setBounds (top.removeFromRight (78).reduced (7, 14));
@@ -584,12 +928,60 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     }
     if (key.getModifiers().isCommandDown() && key.getKeyCode() == 'S')
     {
-        showSaveDialog();
+        if (key.getModifiers().isShiftDown())
+            showSaveDialog();
+        else
+            saveCurrent();
+        return true;
+    }
+    if (key.getModifiers().isCommandDown() && key.getKeyCode() == 'N')
+    {
+        newPatch();
+        return true;
+    }
+    if (key.getModifiers().isCommandDown() && key.getKeyCode() == 'D')
+    {
+        duplicateSelected();
+        return true;
+    }
+    if (key.getModifiers().isCommandDown() && key.getKeyCode() == 'Q')
+    {
+        confirmDiscardChanges ([] { juce::JUCEApplication::getInstance()->quit(); });
+        return true;
+    }
+    if (key.getModifiers().isCommandDown() && key.getKeyCode() == 'M')
+    {
+        engine.togglePanic();
+        updateStatus();
+        return true;
+    }
+    if (key == juce::KeyPress::F2Key)
+    {
+        renameSelected();
+        return true;
+    }
+    if (key.getModifiers().isCommandDown()
+        && ((key.getKeyCode() == 'Z' && key.getModifiers().isShiftDown()) || key.getKeyCode() == 'Y'))
+    {
+        const auto description = engine.getRedoDescription();
+        if (engine.redo())
+            setMessage ("Redo: " + description);
+        else
+            setMessage ("Nothing to redo");
+        return true;
+    }
+    if (key.getModifiers().isCommandDown() && key.getKeyCode() == 'Z')
+    {
+        const auto description = engine.getUndoDescription();
+        if (engine.undo())
+            setMessage ("Undo: " + description);
+        else
+            setMessage ("Nothing to undo");
         return true;
     }
     if (key.getModifiers().isCommandDown() && key.getKeyCode() == 'O')
     {
-        showLoadDialog();
+        confirmDiscardChanges ([this] { showLoadDialog(); });
         return true;
     }
     if (key.getModifiers().isCommandDown()

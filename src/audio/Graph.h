@@ -94,13 +94,18 @@ public:
     [[nodiscard]] WaveformSnapshot snapshot() const noexcept;
     [[nodiscard]] float getRms() const noexcept;
     [[nodiscard]] float getPeak() const noexcept;
+    /** Bumps on every block that carries (or just stopped carrying) signal,
+        so a UI can skip repainting meters/scopes that cannot have changed. */
+    [[nodiscard]] juce::uint32 getVersion() const noexcept { return version.load (std::memory_order_relaxed); }
 
 private:
     std::array<std::atomic<float>, WaveformSnapshot::bucketCount> lows;
     std::array<std::atomic<float>, WaveformSnapshot::bucketCount> highs;
     std::atomic<float> rms { 0.0f };
     std::atomic<float> peak { 0.0f };
+    std::atomic<juce::uint32> version { 0 };
     int blocksUntilWaveformRefresh = 0;
+    bool wasAudible = false;
 };
 
 class DspParameter
@@ -128,6 +133,7 @@ public:
     const juce::String name;
     const juce::String unit;
     const juce::NormalisableRange<float> range;
+    const float defaultValue;
     int inputPortIndex = -1;
 
 private:
@@ -199,6 +205,10 @@ public:
     [[nodiscard]] WaveformSnapshot outputWaveform (int port = 0) const noexcept;
     [[nodiscard]] float outputRms (int port = 0) const noexcept;
     [[nodiscard]] float outputPeak (int port = 0) const noexcept;
+    /** Monotonic counter over all of this node's meters; unchanged means no
+        meter, LED, scope or cable glow fed by this node needs repainting. */
+    [[nodiscard]] juce::uint32 telemetryVersion() const noexcept;
+    [[nodiscard]] juce::uint32 outputTelemetryVersion (int port) const noexcept;
 
     [[nodiscard]] virtual int currentStep() const noexcept { return -1; }
     [[nodiscard]] virtual float gainReductionDb() const noexcept { return 0.0f; }
@@ -281,6 +291,9 @@ public:
 
     NodeId addNode (NodeKind kind, juce::Point<float> position, std::optional<NodeId> requestedId = std::nullopt);
     bool removeNode (NodeId id);
+    // Re-inserts a previously removed node (undo/redo). The processor is
+    // re-prepared only if the document's rate/block changed since it left.
+    bool insertNode (NodeModel model, double preparedSampleRate, int preparedMaximumBlockSize);
     juce::Result addConnection (Connection connection);
     bool removeConnection (const Connection& connection);
     void clearUserPatch();
@@ -292,10 +305,14 @@ public:
     [[nodiscard]] const std::vector<Connection>& getConnections() const noexcept { return connections; }
 
     [[nodiscard]] juce::var toJson() const;
-    // Re-inserts a previously removed node (undo/redo). The processor is
-    // re-prepared only if the document's rate/block changed since it left.
-    bool insertNode (NodeModel model, double preparedSampleRate, int preparedMaximumBlockSize);
     juce::Result loadJson (const juce::var& value);
+    /** Adds another patch's user nodes and cables to this one (fresh ids,
+        positions offset). Cables to hardware map by port index. */
+    juce::Result mergeJson (const juce::var& value, juce::Point<float> offset,
+                            std::vector<NodeId>& addedNodes, std::vector<Connection>& addedCables);
+
+    [[nodiscard]] double getSampleRate() const noexcept { return currentSampleRate; }
+    [[nodiscard]] int getMaximumBlockSize() const noexcept { return currentMaximumBlockSize; }
 
 private:
     std::vector<NodeModel> nodes;
@@ -306,13 +323,6 @@ private:
     bool hardwareLayoutConfigured = false;
 };
 
-    /** Adds another patch's user nodes and cables to this one (fresh ids,
-        positions offset). Cables to hardware map by port index. */
-    juce::Result mergeJson (const juce::var& value, juce::Point<float> offset,
-                            std::vector<NodeId>& addedNodes, std::vector<Connection>& addedCables);
-
-    [[nodiscard]] double getSampleRate() const noexcept { return currentSampleRate; }
-    [[nodiscard]] int getMaximumBlockSize() const noexcept { return currentMaximumBlockSize; }
 class RenderPlan
 {
 public:

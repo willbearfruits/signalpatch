@@ -17,6 +17,7 @@ public:
     void addNodeAtVisibleCentre (NodeKind kind, juce::Rectangle<int> visibleArea);
     void deleteSelection();
     [[nodiscard]] NodeId selectedNode() const noexcept { return selectedNodeId; }
+    void setSelectedNode (NodeId id) { selectNode (id); }
 
     std::function<void (const juce::String&)> onStatus;
     std::function<void (NodeId)> onSelectionChanged;
@@ -45,6 +46,7 @@ private:
     void showAddNodeMenu (juce::Point<float> position);
     void syncNodeComponents();
     void selectNode (NodeId id);
+    void insertNodeOnCable (const Connection& cable, NodeKind kind, juce::Point<float> position);
     [[nodiscard]] NodeComponent* componentForNode (NodeId id) const noexcept;
     [[nodiscard]] juce::Path cablePath (juce::Point<float> start, juce::Point<float> end) const;
     [[nodiscard]] std::optional<Connection> cableNear (juce::Point<float> point) const;
@@ -59,6 +61,29 @@ private:
     NodeId selectedNodeId = 0;
     std::optional<Connection> selectedConnection;
     std::optional<CableDrag> cableDrag;
+    std::vector<std::pair<Connection, juce::uint32>> cableVersions;
+
+    // Per-cable cache: geometry flattened once (comets and dirty regions
+    // walk the polyline instead of re-flattening the curve), and the
+    // shadow+core / full-level glow rasterised once and blitted.
+    struct CableCache
+    {
+        Connection connection;
+        juce::Point<float> start, end;
+        juce::Colour colour;
+        SignalType type = SignalType::audio;
+        bool feedback = false;
+        juce::Path path;
+        std::vector<juce::Point<float>> points;
+        std::vector<float> distances; // cumulative, same size as points
+        float length = 0.0f;
+        juce::Rectangle<int> bounds;
+        juce::Image core, glow;
+
+        [[nodiscard]] juce::Point<float> pointAlong (float distance) const noexcept;
+    };
+    std::vector<CableCache> cableCaches;
+    const CableCache* cableCacheFor (const Connection& connection); // last-painted source telemetry per cable
     float animationPhase = 0.0f;
     bool panning = false;
     juce::Point<int> panMouseDown;

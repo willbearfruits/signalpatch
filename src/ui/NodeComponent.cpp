@@ -1,12 +1,35 @@
 #include "NodeComponent.h"
 
+#include <optional>
+
 #include <cmath>
 
 namespace signalpatch::ui
 {
+// Transparent overlay holding everything that changes at signal rate. The
+// parent face plate is buffered to an image, so a live repaint composites a
+// cached bitmap plus this small paint instead of re-rasterising the module.
+class NodeComponent::LiveLayer final : public juce::Component
+{
+public:
+    explicit LiveLayer (NodeComponent& ownerToUse) : owner (ownerToUse)
+    {
+        setInterceptsMouseClicks (false, false);
+        setOpaque (false);
+        setPaintingIsUnclipped (true);
+    }
+
+    void paint (juce::Graphics& graphics) override { owner.paintLive (graphics); }
+
+private:
+    NodeComponent& owner;
+};
+
 NodeComponent::NodeComponent (PatchEngine& engineToUse, NodeId nodeId)
     : engine (engineToUse), id (nodeId)
 {
+    liveLayer = std::make_unique<LiveLayer> (*this);
+
     setRepaintsOnMouseActivity (true);
     if (const auto* node = model())
     {
@@ -32,7 +55,9 @@ NodeComponent::NodeComponent (PatchEngine& engineToUse, NodeId nodeId)
                 widgets.value->setSkewFactor (parameter.range.skew);
             widgets.value->setNumDecimalPlacesToDisplay (2);
             widgets.value->setValue (parameter.getValue(), juce::dontSendNotification);
-            widgets.value->setDoubleClickReturnValue (true, parameter.range.convertFrom0to1 (0.5f));
+            widgets.value->setDoubleClickReturnValue (true, parameter.defaultValue);
+            widgets.value->addMouseListener (this, false); // right-click menu on the knob
+            
             const auto unit = parameter.unit;
             widgets.value->textFromValueFunction = [unit] (double value)
             {
@@ -66,6 +91,7 @@ NodeComponent::NodeComponent (PatchEngine& engineToUse, NodeId nodeId)
             {
                 engine.setParameter (id, parameterIndex, static_cast<float> (valueSlider->getValue()));
             };
+            valueSlider->onDragEnd = [this] { engine.closeEditGesture(); }; // one drag = one undo step
             addAndMakeVisible (*widgets.value);
 
             widgets.depth = std::make_unique<juce::Slider>();
@@ -79,6 +105,8 @@ NodeComponent::NodeComponent (PatchEngine& engineToUse, NodeId nodeId)
             {
                 engine.setModulationDepth (id, parameterIndex, static_cast<float> (depthSlider->getValue()));
             };
+            depthSlider->onDragEnd = [this] { engine.closeEditGesture(); };
+            depthSlider->addMouseListener (this, false);
             addAndMakeVisible (*widgets.depth);
             parameterWidgets.push_back (std::move (widgets));
         }
@@ -91,7 +119,6 @@ NodeComponent::NodeComponent (PatchEngine& engineToUse, NodeId nodeId)
             safetyResetButton->onClick = [this] { engine.resetNodeSafety (id); };
             addAndMakeVisible (*safetyResetButton);
         }
-            valueSlider->onDragEnd = [this] { engine.closeEditGesture(); }; // one drag = one undo step
 
         const auto kind = node->processor->getKind();
         auto addCommand = [this] (const juce::String& label, const juce::String& command,
@@ -139,6 +166,24 @@ NodeComponent::NodeComponent (PatchEngine& engineToUse, NodeId nodeId)
             commandButtons.push_back (std::move (entry));
             addCommand (">", "next-model", colours::panelRaised);
         }
+        else if (kind == NodeKind::cabinet)
+        {
+            addCommand ("<", "prev-ir", colours::panelRaised);
+            for (int slot = 0; slot < 2; ++slot)
+            {
+                CommandButton entry;
+                entry.button = std::make_unique<juce::TextButton> (slot == 0 ? "IR A" : "IR B");
+                entry.command = slot == 0 ? "load-a" : "load-b";
+                entry.activeColour = colours::panelRaised;
+                entry.button->setColour (juce::TextButton::buttonColourId, colours::panelRaised);
+                entry.button->setTooltip (slot == 0 ? "Choose the main cab impulse (.wav); the arrows step through its folder"
+                                                    : "Choose a second impulse to blend in with the A <-> B knob");
+                entry.button->onClick = [this, slot] { chooseImpulse (slot); };
+                addAndMakeVisible (*entry.button);
+                commandButtons.push_back (std::move (entry));
+            }
+            addCommand (">", "next-ir", colours::panelRaised);
+        }
         else if (kind == NodeKind::script)
         {
             scriptEditor = std::make_unique<juce::TextEditor>();
@@ -166,24 +211,6 @@ void NodeComponent::applyScriptText()
     if (scriptEditor == nullptr)
         return;
     auto object = std::make_unique<juce::DynamicObject>();
-        else if (kind == NodeKind::cabinet)
-        {
-            addCommand ("<", "prev-ir", colours::panelRaised);
-            for (int slot = 0; slot < 2; ++slot)
-            {
-                CommandButton entry;
-                entry.button = std::make_unique<juce::TextButton> (slot == 0 ? "IR A" : "IR B");
-                entry.command = slot == 0 ? "load-a" : "load-b";
-                entry.activeColour = colours::panelRaised;
-                entry.button->setColour (juce::TextButton::buttonColourId, colours::panelRaised);
-                entry.button->setTooltip (slot == 0 ? "Choose the main cab impulse (.wav); the arrows step through its folder"
-                                                    : "Choose a second impulse to blend in with the A <-> B knob");
-                entry.button->onClick = [this, slot] { chooseImpulse (slot); };
-                addAndMakeVisible (*entry.button);
-                commandButtons.push_back (std::move (entry));
-            }
-            addCommand (">", "next-ir", colours::panelRaised);
-        }
     object->setProperty ("expr", scriptEditor->getText());
     engine.applyNodeExtraState (id, juce::var (object.release()));
     repaint();
@@ -208,33 +235,6 @@ void NodeComponent::chooseNamModel()
         engine.applyNodeExtraState (id, juce::var (object.release()));
         repaint();
     });
-}
-
-bool NodeComponent::hasStompSwitch() const noexcept
-{
-    const auto* node = model();
-    return node != nullptr && node->processor->isBypassable();
-}
-
-juce::Point<float> NodeComponent::stompCentre() const noexcept
-{
-    return { static_cast<float> (getWidth()) * 0.5f,
-             static_cast<float> (getHeight()) - railHeight - stompZoneHeight * 0.5f - 2.0f };
-}
-
-void NodeComponent::refreshCommandButtons()
-{
-    const auto* node = model();
-    if (node == nullptr)
-        return;
-    for (auto& entry : commandButtons)
-    {
-        if (entry.command == "load")
-            continue;
-        const auto active = node->processor->uiToggleState (entry.command);
-        entry.button->setColour (juce::TextButton::buttonColourId,
-                                 active ? entry.activeColour.darker (0.2f) : colours::panelRaised);
-    }
 }
 
 void NodeComponent::chooseImpulse (int slot)
@@ -275,18 +275,89 @@ void NodeComponent::chooseImpulse (int slot)
     });
 }
 
+bool NodeComponent::hasStompSwitch() const noexcept
+{
+    const auto* node = model();
+    return node != nullptr && node->processor->isBypassable();
+}
+
+juce::Point<float> NodeComponent::stompCentre() const noexcept
+{
+    return { static_cast<float> (getWidth()) * 0.5f,
+             static_cast<float> (getHeight()) - railHeight - stompZoneHeight * 0.5f - 2.0f };
+}
+
+void NodeComponent::refreshCommandButtons()
+{
+    const auto* node = model();
+    if (node == nullptr)
+        return;
+    for (auto& entry : commandButtons)
+    {
+        if (entry.command == "load")
+            continue;
+        const auto active = node->processor->uiToggleState (entry.command);
+        entry.button->setColour (juce::TextButton::buttonColourId,
+                                 active ? entry.activeColour.darker (0.2f) : colours::panelRaised);
+    }
+}
+
 void NodeComponent::showNodeMenu()
 {
     const auto* node = model();
     if (node == nullptr)
         return;
+    const auto kind = node->processor->getKind();
+    int cableCount = 0;
+    for (const auto& connection : engine.getDocument().getConnections())
+        if (connection.sourceNode == id || connection.destinationNode == id)
+            ++cableCount;
+
+    enum { bypass = 1, rename, duplicate, resetKnobs, disconnectAll, remove,
+           loadModel, prevModel, nextModel, loadIrA, loadIrB, clearIrB, prevIr, nextIr };
     juce::PopupMenu menu;
+    auto item = [] (int itemId, const juce::String& text, const juce::String& shortcut = {}, bool enabled = true)
+    {
+        juce::PopupMenu::Item entry (text);
+        entry.itemID = itemId;
+        entry.shortcutKeyDescription = shortcut;
+        entry.isEnabled = enabled;
+        return entry;
+    };
     if (node->processor->isBypassable())
-        menu.addItem (1, node->processor->isBypassed() ? "Enable (unbypass)" : "Bypass");
+        menu.addItem (item (bypass, node->processor->isBypassed() ? "Enable (unbypass)" : "Bypass", "stomp"));
     if (! node->hardware)
-        menu.addItem (2, "Delete node");
+    {
+        menu.addItem (item (rename, "Rename...", "F2"));
+        menu.addItem (item (duplicate, "Duplicate", "Ctrl+D"));
+        menu.addItem (item (resetKnobs, "Reset knobs to defaults", {}, node->processor->getNumParameters() > 0));
+    }
+    menu.addItem (item (disconnectAll, "Disconnect all cables (" + juce::String (cableCount) + ")", {}, cableCount > 0));
+    if (kind == NodeKind::neuralAmpPlaceholder || kind == NodeKind::neuralPedal)
+    {
+        menu.addSeparator();
+        menu.addItem (item (loadModel, "Load NAM model..."));
+        menu.addItem (item (prevModel, "Previous model in folder"));
+        menu.addItem (item (nextModel, "Next model in folder"));
+    }
+    else if (kind == NodeKind::cabinet)
+    {
+        const auto state = node->processor->getExtraState();
+        menu.addSeparator();
+        menu.addItem (item (loadIrA, "Load impulse A..."));
+        menu.addItem (item (loadIrB, "Load impulse B..."));
+        menu.addItem (item (clearIrB, "Clear impulse B", {}, state.hasProperty ("irB")));
+        menu.addItem (item (prevIr, "Previous impulse in folder"));
+        menu.addItem (item (nextIr, "Next impulse in folder"));
+    }
+    if (! node->hardware)
+    {
+        menu.addSeparator();
+        menu.addItem (item (remove, "Delete", "Del"));
+    }
     if (menu.getNumItems() == 0)
         return;
+
     // Node components are rebuilt whenever the engine broadcasts a change, so
     // the async menu callback must survive this component being deleted.
     juce::Component::SafePointer<NodeComponent> safeThis (this);
@@ -299,10 +370,208 @@ void NodeComponent::showNodeMenu()
         const auto* current = self->model();
         if (current == nullptr)
             return;
+        auto& engine = self->engine;
+        const auto nodeId = self->id;
+        switch (result)
+        {
+            case bypass:    engine.setNodeBypassed (nodeId, ! current->processor->isBypassed()); break;
+            case rename:    showRenameDialog (self, engine, nodeId); break;
+            case duplicate:
+            {
+                const auto copy = engine.duplicateNode (nodeId);
+                if (copy != 0 && self->onSelected)
+                    self->onSelected (copy);
+                break;
+            }
+            case resetKnobs:
+                for (int index = 0; index < current->processor->getNumParameters(); ++index)
+                    engine.setParameter (nodeId, index, current->processor->getParameter (index).defaultValue);
+                engine.closeEditGesture();
+                self->repaint();
+                break;
+            case disconnectAll:
+            {
+                const auto cables = engine.getDocument().getConnections(); // copy: disconnect mutates
+                for (const auto& connection : cables)
+                    if (connection.sourceNode == nodeId || connection.destinationNode == nodeId)
+                        engine.disconnect (connection);
+                break;
+            }
+            case remove:
+                if (self->onRemoveRequested)
+                    self->onRemoveRequested (nodeId);
+                break;
+            case loadModel: self->chooseNamModel(); break;
+            case prevModel: engine.sendNodeCommand (nodeId, "prev-model"); break;
+            case nextModel: engine.sendNodeCommand (nodeId, "next-model"); break;
+            case loadIrA:   self->chooseImpulse (0); break;
+            case loadIrB:   self->chooseImpulse (1); break;
+            case clearIrB:
+            {
+                auto state = current->processor->getExtraState();
+                if (auto* object = state.getDynamicObject())
+                {
+                    object->removeProperty ("irB");
+                    engine.applyNodeExtraState (nodeId, state);
+                }
+                break;
+            }
+            case prevIr:    engine.sendNodeCommand (nodeId, "prev-ir"); break;
+            case nextIr:    engine.sendNodeCommand (nodeId, "next-ir"); break;
+            default: break;
+        }
+    });
+}
+
+void NodeComponent::showRenameDialog (juce::Component* parent, PatchEngine& engine, NodeId id)
+{
+    const auto* node = engine.getDocument().findNode (id);
+    if (node == nullptr || node->hardware)
+        return;
+    auto* window = new juce::AlertWindow ("Rename module", "", juce::MessageBoxIconType::NoIcon, parent);
+    window->addTextEditor ("name", node->processor->getName(), "Name");
+    window->addButton ("Rename", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    window->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    window->enterModalState (true, juce::ModalCallbackFunction::create ([&engine, window, id] (int result)
+    {
         if (result == 1)
-            self->engine.setNodeBypassed (self->id, ! current->processor->isBypassed());
-        else if (result == 2 && self->onRemoveRequested)
-            self->onRemoveRequested (self->id);
+            engine.renameNode (id, window->getTextEditorContents ("name"));
+    }), true);
+}
+
+void NodeComponent::showSetValueDialog (int parameterIndex)
+{
+    const auto* node = model();
+    if (node == nullptr || ! juce::isPositiveAndBelow (parameterIndex, node->processor->getNumParameters()))
+        return;
+    const auto& parameter = node->processor->getParameter (parameterIndex);
+    auto* window = new juce::AlertWindow ("Set " + parameter.name,
+                                          juce::String (parameter.range.start, 2) + " to " + juce::String (parameter.range.end, 2)
+                                              + (parameter.unit.isNotEmpty() ? " " + parameter.unit : juce::String()),
+                                          juce::MessageBoxIconType::NoIcon, this);
+    window->addTextEditor ("value", juce::String (parameter.getValue(), 3), "Value");
+    window->addButton ("Set", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    window->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<NodeComponent> safeThis (this);
+    window->enterModalState (true, juce::ModalCallbackFunction::create ([safeThis, window, parameterIndex] (int result)
+    {
+        if (safeThis == nullptr || result != 1)
+            return;
+        const auto* current = safeThis->model();
+        if (current == nullptr)
+            return;
+        const auto& range = current->processor->getParameter (parameterIndex).range;
+        const auto value = juce::jlimit (range.start, range.end, window->getTextEditorContents ("value").getFloatValue());
+        safeThis->engine.setParameter (safeThis->id, parameterIndex, value);
+        safeThis->engine.closeEditGesture();
+        safeThis->repaint();
+    }), true);
+}
+
+void NodeComponent::showParameterMenu (int parameterIndex)
+{
+    const auto* node = model();
+    if (node == nullptr || ! juce::isPositiveAndBelow (parameterIndex, node->processor->getNumParameters()))
+        return;
+    const auto& parameter = node->processor->getParameter (parameterIndex);
+    std::optional<Connection> modulationCable;
+    if (parameter.inputPortIndex >= 0)
+        for (const auto& connection : engine.getDocument().getConnections())
+            if (connection.destinationNode == id && connection.destinationPort == parameter.inputPortIndex)
+                modulationCable = connection;
+
+    enum { reset = 1, setValue, zeroDepth, fullDepth, removeModulation };
+    juce::PopupMenu menu;
+    menu.addSectionHeader (parameter.name.toUpperCase());
+    menu.addItem (reset, "Reset to default (" + juce::String (parameter.defaultValue, 2) + ")");
+    menu.addItem (setValue, "Set value...");
+    if (parameter.inputPortIndex >= 0)
+    {
+        menu.addSeparator();
+        menu.addItem (zeroDepth, "Mod depth 0", parameter.getModulationDepth() > 0.0f);
+        menu.addItem (fullDepth, "Mod depth 100%", parameter.getModulationDepth() < 1.0f);
+        menu.addItem (removeModulation, "Disconnect modulation cable", modulationCable.has_value());
+    }
+    juce::Component::SafePointer<NodeComponent> safeThis (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+                        [safeThis, parameterIndex, modulationCable] (int result)
+    {
+        auto* self = safeThis.getComponent();
+        if (self == nullptr)
+            return;
+        const auto* current = self->model();
+        if (current == nullptr)
+            return;
+        const auto& parameter = current->processor->getParameter (parameterIndex);
+        switch (result)
+        {
+            case reset:     self->engine.setParameter (self->id, parameterIndex, parameter.defaultValue); break;
+            case setValue:  self->showSetValueDialog (parameterIndex); return;
+            case zeroDepth: self->engine.setModulationDepth (self->id, parameterIndex, 0.0f); break;
+            case fullDepth: self->engine.setModulationDepth (self->id, parameterIndex, 1.0f); break;
+            case removeModulation:
+                if (modulationCable.has_value())
+                    self->engine.disconnect (*modulationCable);
+                break;
+            default: return;
+        }
+        self->engine.closeEditGesture();
+        // Knob widgets mirror the parameter; refresh them.
+        for (auto& widgets : self->parameterWidgets)
+            if (widgets.parameterIndex == parameterIndex)
+            {
+                widgets.value->setValue (parameter.getValue(), juce::dontSendNotification);
+                widgets.depth->setValue (parameter.getModulationDepth(), juce::dontSendNotification);
+            }
+        self->repaint();
+    });
+}
+
+void NodeComponent::showPortMenu (bool output, int port)
+{
+    const auto* node = model();
+    if (node == nullptr)
+        return;
+    std::vector<Connection> cables;
+    for (const auto& connection : engine.getDocument().getConnections())
+        if ((output && connection.sourceNode == id && connection.sourcePort == port)
+            || (! output && connection.destinationNode == id && connection.destinationPort == port))
+            cables.push_back (connection);
+    const auto& info = output ? node->processor->getOutputPort (port) : node->processor->getInputPort (port);
+
+    juce::PopupMenu menu;
+    menu.addSectionHeader ((output ? "OUT  " : "IN  ") + info.name.toUpperCase());
+    if (cables.empty())
+        menu.addItem (1, "No cables - drag from a glowing port to connect", false);
+    else
+    {
+        menu.addItem (1, "Disconnect all (" + juce::String (cables.size()) + ")");
+        menu.addSeparator();
+        for (std::size_t index = 0; index < cables.size(); ++index)
+        {
+            const auto& cable = cables[index];
+            const auto otherId = output ? cable.destinationNode : cable.sourceNode;
+            const auto* other = engine.getDocument().findNode (otherId);
+            const auto otherName = other != nullptr ? other->processor->getName() : juce::String ("?");
+            const auto otherPort = other == nullptr ? juce::String()
+                : (output ? other->processor->getInputPort (cable.destinationPort).name
+                          : other->processor->getOutputPort (cable.sourcePort).name);
+            menu.addItem (100 + static_cast<int> (index),
+                          juce::String (output ? "Remove cable to " : "Remove cable from ") + otherName + " / " + otherPort);
+        }
+    }
+    juce::Component::SafePointer<NodeComponent> safeThis (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+                        [safeThis, cables] (int result)
+    {
+        auto* self = safeThis.getComponent();
+        if (self == nullptr || result == 0)
+            return;
+        if (result == 1)
+            for (const auto& cable : cables)
+                self->engine.disconnect (cable);
+        else if (result >= 100 && juce::isPositiveAndBelow (result - 100, static_cast<int> (cables.size())))
+            self->engine.disconnect (cables[static_cast<std::size_t> (result - 100)]);
     });
 }
 
@@ -361,6 +630,7 @@ void NodeComponent::setSelected (bool shouldBeSelected)
     if (selected != shouldBeSelected)
     {
         selected = shouldBeSelected;
+        plateDirty = true;
         repaint();
     }
 }
@@ -502,19 +772,15 @@ void NodeComponent::drawWaveform (juce::Graphics& graphics,
                                                     colour.withAlpha (alpha * 0.15f),
                                                     area.getCentreX(), area.getBottom(), false));
     graphics.fillPath (shape);
-    graphics.setColour (colour.withAlpha (juce::jmin (1.0f, alpha + 0.2f) * 0.35f));
-    graphics.strokePath (shape, juce::PathStrokeType (2.6f));
     graphics.setColour (colour.withAlpha (juce::jmin (1.0f, alpha + 0.35f)));
-    graphics.strokePath (shape, juce::PathStrokeType (1.1f));
+    graphics.strokePath (shape, juce::PathStrokeType (1.2f));
 }
 
-void NodeComponent::drawPreview (juce::Graphics& graphics, const NodeModel& node)
+void NodeComponent::drawPreviewWell (juce::Graphics& graphics)
 {
-    const auto kind = node.processor->getKind();
-    const auto accent = kindAccent (kind);
-    auto area = previewBounds();
-
     // Inset instrument window: dark well, faint reference lines, inner shadow.
+    // Static, so it lives on the cached plate under the live preview.
+    const auto area = previewBounds();
     graphics.setColour (colours::nodeDark);
     graphics.fillRoundedRectangle (area, 5.0f);
     graphics.setColour (colours::grid.withAlpha (0.7f));
@@ -528,6 +794,13 @@ void NodeComponent::drawPreview (juce::Graphics& graphics, const NodeModel& node
     graphics.drawRoundedRectangle (area.reduced (0.5f), 5.0f, 1.0f);
     graphics.setColour (juce::Colours::white.withAlpha (0.05f));
     graphics.drawHorizontalLine (juce::roundToInt (area.getBottom()), area.getX() + 4.0f, area.getRight() - 4.0f);
+}
+
+void NodeComponent::drawPreview (juce::Graphics& graphics, const NodeModel& node)
+{
+    const auto kind = node.processor->getKind();
+    const auto accent = kindAccent (kind);
+    auto area = previewBounds();
 
     if (kind == NodeKind::stepSequencer)
     {
@@ -670,6 +943,22 @@ void NodeComponent::drawPreview (juce::Graphics& graphics, const NodeModel& node
 
 void NodeComponent::paint (juce::Graphics& graphics)
 {
+    ++paintStats::platePaints;
+    const auto width = juce::jmax (1, getWidth());
+    const auto height = juce::jmax (1, getHeight());
+    if (plateDirty || plateCache.getWidth() != width || plateCache.getHeight() != height)
+    {
+        plateCache = juce::Image (juce::Image::ARGB, width, height, true);
+        juce::Graphics plate (plateCache);
+        ++paintStats::plateRasters;
+        paintPlate (plate);
+        plateDirty = false;
+    }
+    graphics.drawImageAt (plateCache, 0, 0);
+}
+
+void NodeComponent::paintPlate (juce::Graphics& graphics)
+{
     const auto* node = model();
     if (node == nullptr)
         return;
@@ -764,27 +1053,7 @@ void NodeComponent::paint (juce::Graphics& graphics)
                        chip.translated (-chip.getWidth() - 4.0f, 0.0f).toNearestInt(),
                        juce::Justification::centredRight);
 
-    if (node->processor->getNumOutputPorts() > 0)
-    {
-        float activity = 0.0f;
-        for (int port = 0; port < node->processor->getNumOutputPorts(); ++port)
-            activity = juce::jmax (activity, node->processor->outputRms (port));
-        activity = juce::jlimit (0.0f, 1.0f, std::sqrt (activity));
-        const auto ledX = chip.getX() - 56.0f;
-        const auto ledY = header.getCentreY();
-        graphics.setColour (juce::Colours::black.withAlpha (0.45f));
-        graphics.fillEllipse (ledX - 4.0f, ledY - 4.0f, 8.0f, 8.0f);
-        if (activity > 0.01f)
-        {
-            graphics.setColour (colours::okay.withAlpha (0.35f * activity));
-            graphics.fillEllipse (ledX - 6.5f, ledY - 6.5f, 13.0f, 13.0f);
-        }
-        graphics.setColour (activity > 0.01f ? colours::okay.withAlpha (0.35f + 0.65f * activity)
-                                             : colours::nodeDark.brighter (0.2f));
-        graphics.fillEllipse (ledX - 2.6f, ledY - 2.6f, 5.2f, 5.2f);
-    }
-
-    drawPreview (graphics, *node);
+    drawPreviewWell (graphics);
 
     const bool denseInputList = node->processor->getNumInputPorts() > 6;
     for (int port = 0; port < node->processor->getNumInputPorts(); ++port)
@@ -793,10 +1062,6 @@ void NodeComponent::paint (juce::Graphics& graphics)
         drawPort (graphics, localInputPortCentre (port), inputPort, false,
                   ! (denseInputList && inputPort.type == SignalType::control));
     }
-    for (int port = 0; port < node->processor->getNumOutputPorts(); ++port)
-        drawPort (graphics, localOutputPortCentre (port), node->processor->getOutputPort (port), true, true,
-                  std::sqrt (juce::jmax (0.0f, node->processor->outputRms (port))));
-
     for (int widgetIndex = 0; widgetIndex < static_cast<int> (parameterWidgets.size()); ++widgetIndex)
     {
         const auto parameterIndex = parameterWidgets[static_cast<std::size_t> (widgetIndex)].parameterIndex;
@@ -815,18 +1080,6 @@ void NodeComponent::paint (juce::Graphics& graphics)
                            juce::Justification::centredLeft);
     }
 
-    const auto status = node->processor->statusText();
-    if (status.isNotEmpty() && safetyResetButton == nullptr)
-    {
-        graphics.setColour (node->processor->safetyTripped() ? colours::warning : colours::mutedText);
-        graphics.setFont (9.0f);
-        graphics.drawFittedText (status,
-                                 juce::Rectangle<int> (70, static_cast<int> (railHeight + headerHeight + 90.0f),
-                                                       getWidth() - 140, 17),
-                                 juce::Justification::centred, 1);
-    }
-
-    refreshCommandButtons();
     if (hasStompSwitch())
     {
         const auto centre = stompCentre();
@@ -871,17 +1124,9 @@ void NodeComponent::paint (juce::Graphics& graphics)
                            juce::Justification::centredLeft);
     }
 
-    // Border: selection halo, tripped-safety pulse, or a quiet hairline.
-    if (node->processor->safetyTripped())
-    {
-        const auto pulse = 0.5f + 0.5f * std::sin (static_cast<float> (juce::Time::getMillisecondCounter() % 900)
-                                                   / 900.0f * juce::MathConstants<float>::twoPi);
-        graphics.setColour (colours::warning.withAlpha (0.35f + 0.3f * pulse));
-        graphics.drawRoundedRectangle (bounds.expanded (2.0f), corner + 2.0f, 3.5f);
-        graphics.setColour (colours::warning);
-        graphics.drawRoundedRectangle (bounds, corner, 2.0f);
-    }
-    else if (selected)
+    // Border: selection halo or a quiet hairline (the tripped-safety pulse
+    // is animated, so it lives in paintLive).
+    if (selected)
     {
         graphics.setColour (colours::selection.withAlpha (0.25f));
         graphics.drawRoundedRectangle (bounds.expanded (2.5f), corner + 2.5f, 4.0f);
@@ -895,8 +1140,125 @@ void NodeComponent::paint (juce::Graphics& graphics)
     }
 }
 
+
+void NodeComponent::paintLive (juce::Graphics& graphics)
+{
+    ++paintStats::livePaints;
+    const auto* node = model();
+    if (node == nullptr)
+        return;
+
+    const auto accent = kindAccent (node->processor->getKind());
+    const auto bounds = getLocalBounds().toFloat().reduced (2.0f);
+    constexpr auto corner = 6.0f;
+    const auto header = bounds.withTop (bounds.getY() + railHeight).withHeight (headerHeight);
+    const auto chip = juce::Rectangle<float> (header.getRight() - 44.0f, header.getCentreY() - 8.0f, 34.0f, 16.0f);
+
+    // Output-activity LED in the header.
+    if (node->processor->getNumOutputPorts() > 0)
+    {
+        float activity = 0.0f;
+        for (int port = 0; port < node->processor->getNumOutputPorts(); ++port)
+            activity = juce::jmax (activity, node->processor->outputRms (port));
+        activity = juce::jlimit (0.0f, 1.0f, std::sqrt (activity));
+        const auto ledX = chip.getX() - 56.0f;
+        const auto ledY = header.getCentreY();
+        graphics.setColour (juce::Colours::black.withAlpha (0.45f));
+        graphics.fillEllipse (ledX - 4.0f, ledY - 4.0f, 8.0f, 8.0f);
+        if (activity > 0.01f)
+        {
+            graphics.setColour (colours::okay.withAlpha (0.35f * activity));
+            graphics.fillEllipse (ledX - 6.5f, ledY - 6.5f, 13.0f, 13.0f);
+        }
+        graphics.setColour (activity > 0.01f ? colours::okay.withAlpha (0.35f + 0.65f * activity)
+                                             : colours::nodeDark.brighter (0.2f));
+        graphics.fillEllipse (ledX - 2.6f, ledY - 2.6f, 5.2f, 5.2f);
+    }
+
+    drawPreview (graphics, *node);
+
+    for (int port = 0; port < node->processor->getNumOutputPorts(); ++port)
+        drawPort (graphics, localOutputPortCentre (port), node->processor->getOutputPort (port), true, true,
+                  std::sqrt (juce::jmax (0.0f, node->processor->outputRms (port))));
+
+    const auto status = node->processor->statusText();
+    if (status.isNotEmpty() && safetyResetButton == nullptr)
+    {
+        graphics.setColour (node->processor->safetyTripped() ? colours::warning : colours::mutedText);
+        graphics.setFont (9.0f);
+        graphics.drawFittedText (status,
+                                 juce::Rectangle<int> (70, static_cast<int> (railHeight + headerHeight + 90.0f),
+                                                       getWidth() - 140, 17),
+                                 juce::Justification::centred, 1);
+    }
+
+    refreshCommandButtons();
+
+    if (node->processor->safetyTripped())
+    {
+        const auto pulse = 0.5f + 0.5f * std::sin (static_cast<float> (juce::Time::getMillisecondCounter() % 900)
+                                                   / 900.0f * juce::MathConstants<float>::twoPi);
+        graphics.setColour (colours::warning.withAlpha (0.35f + 0.3f * pulse));
+        graphics.drawRoundedRectangle (bounds.expanded (2.0f), corner + 2.0f, 3.5f);
+        graphics.setColour (colours::warning);
+        graphics.drawRoundedRectangle (bounds, corner, 2.0f);
+    }
+    juce::ignoreUnused (accent);
+}
+
+NodeComponent::~NodeComponent() = default;
+
+void NodeComponent::repaintLive()
+{
+    const auto* node = model();
+    if (liveLayer == nullptr || node == nullptr)
+        return;
+
+    // Skip the repaint when nothing visible moved: no new meter/scope data,
+    // same status line, same sequencer step, and no safety pulse to animate.
+    const auto version = node->processor->telemetryVersion();
+    auto status = node->processor->statusText();
+    const auto step = node->processor->currentStep();
+    const auto tripped = node->processor->safetyTripped();
+    if (version == lastLiveVersion && status == lastLiveStatus && step == lastLiveStep
+        && ! tripped && ! lastLiveTripped)
+        return;
+    lastLiveVersion = version;
+    lastLiveStatus = std::move (status);
+    lastLiveStep = step;
+    lastLiveTripped = tripped;
+
+    // Dirty only what paintLive draws. A whole-node repaint would also
+    // re-render every knob and button underneath, which is where the time went.
+    if (tripped || lastLiveTripped)
+    {
+        liveLayer->repaint();
+        return;
+    }
+    const auto bounds = getLocalBounds().toFloat().reduced (2.0f);
+    const auto header = bounds.withTop (bounds.getY() + railHeight).withHeight (headerHeight);
+    const auto ledX = header.getRight() - 44.0f - 56.0f;
+    liveLayer->repaint (juce::Rectangle<float> (ledX - 8.0f, header.getCentreY() - 8.0f, 16.0f, 16.0f).toNearestInt());
+    liveLayer->repaint (previewBounds().expanded (3.0f).toNearestInt());
+    for (int port = 0; port < node->processor->getNumOutputPorts(); ++port)
+    {
+        const auto centre = localOutputPortCentre (port);
+        liveLayer->repaint (juce::Rectangle<float> (centre.x - 16.0f, centre.y - 11.0f, 32.0f, 22.0f).toNearestInt());
+    }
+    if (safetyResetButton == nullptr)
+        liveLayer->repaint (70, static_cast<int> (railHeight + headerHeight + 90.0f), getWidth() - 140, 17);
+}
+
 void NodeComponent::resized()
 {
+    plateDirty = true;
+    if (liveLayer != nullptr)
+    {
+        if (liveLayer->getParentComponent() != this)
+            addAndMakeVisible (*liveLayer);
+        liveLayer->setBounds (getLocalBounds());
+        liveLayer->toFront (false);
+    }
     const auto columnWidth = (getWidth() - 28) / 2;
     for (int widgetIndex = 0; widgetIndex < static_cast<int> (parameterWidgets.size()); ++widgetIndex)
     {
@@ -967,9 +1329,28 @@ void NodeComponent::mouseDown (const juce::MouseEvent& event)
     if (onSelected)
         onSelected (id);
 
+    // Events forwarded from the knob sliders (mouse listener): right-click
+    // opens the parameter menu; everything else is the slider's own business.
+    if (event.eventComponent != this)
+    {
+        if (event.mods.isPopupMenu())
+            for (const auto& widgets : parameterWidgets)
+                if (event.eventComponent == widgets.value.get() || event.eventComponent == widgets.depth.get())
+                {
+                    showParameterMenu (widgets.parameterIndex);
+                    return;
+                }
+        return;
+    }
+
     if (event.mods.isPopupMenu())
     {
-        showNodeMenu();
+        if (const auto port = outputPortNear (event.position, 13.0f))
+            showPortMenu (true, *port);
+        else if (const auto inputPort = inputPortNear (getPosition().toFloat() + event.position, 13.0f))
+            showPortMenu (false, *inputPort);
+        else
+            showNodeMenu();
         return;
     }
 
@@ -1007,8 +1388,16 @@ void NodeComponent::mouseDown (const juce::MouseEvent& event)
     }
 }
 
+void NodeComponent::mouseDoubleClick (const juce::MouseEvent& event)
+{
+    if (event.eventComponent == this && event.position.y <= railHeight + headerHeight)
+        showRenameDialog (this, engine, id); // double-click the name plate to rename
+}
+
 void NodeComponent::mouseDrag (const juce::MouseEvent& event)
 {
+    if (event.eventComponent != this)
+        return;
     if (editingSequencerStep)
     {
         editSequencerStepAt (event.position);
@@ -1036,8 +1425,12 @@ void NodeComponent::mouseDrag (const juce::MouseEvent& event)
 
 void NodeComponent::mouseUp (const juce::MouseEvent& event)
 {
+    if (event.eventComponent != this)
+        return;
     if (draggingCable && onCableDragEnded)
         onCableDragEnded (getPosition().toFloat() + event.position);
+    if (draggingNode)
+        engine.closeEditGesture();
     draggingCable = false;
     draggingOutputPort = -1;
     draggingNode = false;
@@ -1078,5 +1471,3 @@ bool NodeComponent::editDrumCellAt (juce::Point<float> localPoint)
     return true;
 }
 } // namespace signalpatch::ui
-    if (draggingNode)
-        engine.closeEditGesture();

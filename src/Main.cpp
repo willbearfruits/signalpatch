@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <JuceHeader.h>
 
 #include "ui/MainComponent.h"
@@ -21,6 +22,8 @@ public:
         {
             if (argument == "--kiosk")
                 options.kiosk = true;
+            else if (argument == "--gl")
+                options.openGL = true;
             else if (argument == "--unmute")
                 options.unmute = true;
             else if (! argument.startsWith ("-"))
@@ -36,7 +39,10 @@ public:
 
     void systemRequestedQuit() override
     {
-        quit();
+        if (mainWindow != nullptr && mainWindow->content != nullptr)
+            mainWindow->content->confirmDiscardChanges ([] { juce::JUCEApplication::quit(); });
+        else
+            quit();
     }
 
 private:
@@ -45,6 +51,7 @@ private:
         juce::String patchPath;
         bool kiosk = false;
         bool unmute = false;
+        bool openGL = false; // --gl: route painting through juce::OpenGLContext (measured slower here; opt-in)
     };
 
     class MainWindow final : public juce::DocumentWindow
@@ -59,8 +66,22 @@ private:
             setUsingNativeTitleBar (true);
             setResizable (true, true);
             setResizeLimits (1080, 680, 3840, 2160);
-            auto* content = new ui::MainComponent();
+            content = new ui::MainComponent();
             setContentOwned (content, true);
+            // Optional GPU compositing (--gl or SIGNALPATCH_GL=1). JUCE's GL
+            // renderer still builds path geometry on the CPU and adds a
+            // full-frame sync, so on the reference desktop (RTX 3060, XWayland)
+            // it measured ~2.5x the CPU of the software renderer; kept for
+            // machines where the trade-off differs.
+            if (options.openGL || std::getenv ("SIGNALPATCH_GL") != nullptr)
+            {
+                openGLContext.setContinuousRepainting (false);
+                // No vsync: the NVIDIA GLX swap busy-waits for vblank, which
+                // turns a 30 Hz repaint into a spinning core. Repaints are
+                // already timer-paced, so tearing is not a concern.
+                openGLContext.setSwapInterval (0);
+                openGLContext.attachTo (*content);
+            }
             if (options.patchPath.isNotEmpty())
                 content->loadPatchFile (juce::File::getCurrentWorkingDirectory()
                                             .getChildFile (options.patchPath));
@@ -76,10 +97,20 @@ private:
             }
         }
 
+        ~MainWindow() override
+        {
+            openGLContext.detach(); // before the content component goes away
+        }
+
         void closeButtonPressed() override
         {
             juce::JUCEApplication::getInstance()->systemRequestedQuit();
         }
+
+        ui::MainComponent* content = nullptr; // owned by the window's content
+
+    private:
+        juce::OpenGLContext openGLContext;
     };
 
     std::unique_ptr<MainWindow> mainWindow;

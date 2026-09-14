@@ -76,9 +76,9 @@ juce::String nodeKindName (NodeKind kind)
         case NodeKind::script:              return "Script";
         case NodeKind::neuralAmpPlaceholder:return "Neural Amp";
         case NodeKind::neuralPedal:         return "Neural Pedal";
+        case NodeKind::cabinet:             return "Cabinet";
     }
 
-        case NodeKind::cabinet:             return "Cabinet";
     return "Unknown";
 }
 
@@ -124,9 +124,9 @@ juce::String nodeKindKey (NodeKind kind)
         case NodeKind::script:               return "script-expr";
         case NodeKind::neuralAmpPlaceholder: return "neural-amp";
         case NodeKind::neuralPedal:          return "neural-pedal";
+        case NodeKind::cabinet:              return "cabinet-ir";
     }
 
-        case NodeKind::cabinet:              return "cabinet-ir";
     return "unknown";
 }
 
@@ -168,6 +168,11 @@ void SignalMeter::capture (const float* samples, int numSamples) noexcept
     {
         rms.store (0.0f, std::memory_order_relaxed);
         peak.store (0.0f, std::memory_order_relaxed);
+        if (wasAudible)
+        {
+            wasAudible = false;
+            version.fetch_add (1, std::memory_order_relaxed);
+        }
         return;
     }
 
@@ -184,6 +189,14 @@ void SignalMeter::capture (const float* samples, int numSamples) noexcept
     rms.store (static_cast<float> (std::sqrt (sumSquares / static_cast<double> (numSamples))),
                std::memory_order_relaxed);
     peak.store (blockPeak, std::memory_order_relaxed);
+
+    // One more bump when a signal falls silent so the UI draws the zero state,
+    // then nothing until it returns: an idle patch costs the UI nothing.
+    constexpr float audibleThreshold = 1.0e-3f; // -60 dBFS: below this no meter, LED or scope shows anything
+    const bool audible = blockPeak > audibleThreshold;
+    if (audible || wasAudible)
+        version.fetch_add (1, std::memory_order_relaxed);
+    wasAudible = audible;
 
     if (blocksUntilWaveformRefresh > 0)
     {
@@ -246,7 +259,8 @@ DspParameter::DspParameter (juce::String stableId,
     : id (std::move (stableId)),
       name (std::move (displayName)),
       unit (std::move (unitToUse)),
-      range (std::move (valueRange))
+      range (std::move (valueRange)),
+      defaultValue (defaultValue)
 {
     setValue (defaultValue);
     setModulationDepth (defaultModulationDepth);
@@ -400,6 +414,21 @@ void DspNode::renderFeedbackWrite (const juce::AudioBuffer<float>& inputs, int n
     if (inputPort >= 0 && inputPort < inputs.getNumChannels())
         primaryInputMeter.capture (inputs.getReadPointer (inputPort), numSamples);
     processFeedbackWriteDsp (inputs, numSamples);
+}
+
+juce::uint32 DspNode::telemetryVersion() const noexcept
+{
+    auto total = primaryInputMeter.getVersion();
+    for (const auto& meter : outputMeters)
+        total += meter->getVersion();
+    return total;
+}
+
+juce::uint32 DspNode::outputTelemetryVersion (int port) const noexcept
+{
+    if (! juce::isPositiveAndBelow (port, static_cast<int> (outputMeters.size())))
+        return 0;
+    return outputMeters[static_cast<std::size_t> (port)]->getVersion();
 }
 
 WaveformSnapshot DspNode::inputWaveform() const noexcept
@@ -587,6 +616,19 @@ bool PatchDocument::removeNode (NodeId id)
     return true;
 }
 
+bool PatchDocument::insertNode (NodeModel model, double preparedSampleRate, int preparedMaximumBlockSize)
+{
+    if (model.hardware || model.processor == nullptr || model.id == hardwareInputId
+        || model.id == hardwareOutputId || findNode (model.id) != nullptr)
+        return false;
+
+    if (preparedSampleRate != currentSampleRate || preparedMaximumBlockSize != currentMaximumBlockSize)
+        model.processor->prepare (currentSampleRate, currentMaximumBlockSize);
+    nextNodeId = juce::jmax (nextNodeId, model.id + 1);
+    nodes.push_back (std::move (model));
+    return true;
+}
+
 juce::Result PatchDocument::addConnection (Connection connection)
 {
     auto* source = findNode (connection.sourceNode);
@@ -621,19 +663,6 @@ void PatchDocument::clearUserPatch()
 }
 
 NodeModel* PatchDocument::findNode (NodeId id) noexcept
-bool PatchDocument::insertNode (NodeModel model, double preparedSampleRate, int preparedMaximumBlockSize)
-{
-    if (model.hardware || model.processor == nullptr || model.id == hardwareInputId
-        || model.id == hardwareOutputId || findNode (model.id) != nullptr)
-        return false;
-
-    if (preparedSampleRate != currentSampleRate || preparedMaximumBlockSize != currentMaximumBlockSize)
-        model.processor->prepare (currentSampleRate, currentMaximumBlockSize);
-    nextNodeId = juce::jmax (nextNodeId, model.id + 1);
-    nodes.push_back (std::move (model));
-    return true;
-}
-
 {
     const auto found = std::find_if (nodes.begin(), nodes.end(), [id] (const NodeModel& node) { return node.id == id; });
     return found == nodes.end() ? nullptr : &*found;
@@ -714,35 +743,6 @@ juce::var PatchDocument::toJson() const
     return juce::var (root.release());
 }
 
-juce::Result PatchDocument::loadJson (const juce::var& value)
-{
-    const auto* root = value.getDynamicObject();
-    if (root == nullptr || root->getProperty ("format").toString() != "signalpatch")
-        return juce::Result::fail ("This is not a SignalPatch document.");
-    if (static_cast<int> (root->getProperty ("schema")) > 1)
-        return juce::Result::fail ("This patch was made by a newer SignalPatch version.");
-
-    constexpr int maximumSavedHardwareChannels = 256;
-    if (const auto* savedNodes = root->getProperty ("nodes").getArray())
-        for (const auto& savedNode : *savedNodes)
-            if (const auto* object = savedNode.getDynamicObject())
-                if (const auto* savedPorts = object->getProperty ("hardwarePorts").getArray())
-                    for (const auto& savedPort : *savedPorts)
-                        if (const auto* portObject = savedPort.getDynamicObject())
-                        {
-                            const auto physicalIndex = static_cast<int> (portObject->getProperty ("index"));
-                            if (physicalIndex < 0 || physicalIndex >= maximumSavedHardwareChannels)
-                                return juce::Result::fail ("Patch contains an invalid hardware channel index.");
-                        }
-
-    clearUserPatch();
-
-    juce::StringArray retainedInputNames;
-    juce::StringArray retainedOutputNames;
-    std::vector<int> retainedInputCallbacks;
-    std::vector<int> retainedOutputCallbacks;
-    if (const auto* input = findNode (hardwareInputId))
-        for (int port = 0; port < input->processor->getNumOutputPorts(); ++port)
 juce::Result PatchDocument::mergeJson (const juce::var& value, juce::Point<float> offset,
                                        std::vector<NodeId>& addedNodes, std::vector<Connection>& addedCables)
 {
@@ -811,6 +811,35 @@ juce::Result PatchDocument::mergeJson (const juce::var& value, juce::Point<float
     return juce::Result::ok();
 }
 
+juce::Result PatchDocument::loadJson (const juce::var& value)
+{
+    const auto* root = value.getDynamicObject();
+    if (root == nullptr || root->getProperty ("format").toString() != "signalpatch")
+        return juce::Result::fail ("This is not a SignalPatch document.");
+    if (static_cast<int> (root->getProperty ("schema")) > 1)
+        return juce::Result::fail ("This patch was made by a newer SignalPatch version.");
+
+    constexpr int maximumSavedHardwareChannels = 256;
+    if (const auto* savedNodes = root->getProperty ("nodes").getArray())
+        for (const auto& savedNode : *savedNodes)
+            if (const auto* object = savedNode.getDynamicObject())
+                if (const auto* savedPorts = object->getProperty ("hardwarePorts").getArray())
+                    for (const auto& savedPort : *savedPorts)
+                        if (const auto* portObject = savedPort.getDynamicObject())
+                        {
+                            const auto physicalIndex = static_cast<int> (portObject->getProperty ("index"));
+                            if (physicalIndex < 0 || physicalIndex >= maximumSavedHardwareChannels)
+                                return juce::Result::fail ("Patch contains an invalid hardware channel index.");
+                        }
+
+    clearUserPatch();
+
+    juce::StringArray retainedInputNames;
+    juce::StringArray retainedOutputNames;
+    std::vector<int> retainedInputCallbacks;
+    std::vector<int> retainedOutputCallbacks;
+    if (const auto* input = findNode (hardwareInputId))
+        for (int port = 0; port < input->processor->getNumOutputPorts(); ++port)
         {
             const auto& info = input->processor->getOutputPort (port);
             retainedInputNames.add (info.name);

@@ -85,3 +85,8 @@ public:
     juce::Font getTextButtonFont (juce::TextButton& button, int buttonHeight) override;
 };
 } // namespace signalpatch::ui
+
+namespace signalpatch::ui::paintStats
+{
+inline std::atomic<int> mainPaints { 0 }, canvasPaints { 0 }, platePaints { 0 }, plateRasters { 0 }, livePaints { 0 };
+}

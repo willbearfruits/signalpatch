@@ -141,6 +141,7 @@ target_link_libraries(signalpatch
         juce::juce_audio_processors
         juce::juce_dsp
         juce::juce_gui_extra
+        juce::juce_opengl
         juce::juce_data_structures
         juce::juce_osc
     PUBLIC
@@ -157,9 +158,9 @@ juce_generate_juce_header(signalpatch_tests)
 target_sources(signalpatch_tests PRIVATE
     tests/EngineTests.cpp
     src/audio/Graph.cpp
-    src/audio/Graph.h
     src/audio/PatchHistory.cpp
     src/audio/PatchBundle.cpp
+    src/audio/Graph.h
     src/audio/Processors.cpp
     src/audio/Processors.h)
 

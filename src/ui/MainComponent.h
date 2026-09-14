@@ -3,9 +3,12 @@
 #include "PatchCanvas.h"
 #include "Theme.h"
 
+#include <functional>
+
 namespace signalpatch::ui
 {
 class MainComponent final : public juce::Component,
+                            public juce::MenuBarModel,
                             private juce::Timer,
                             private juce::ChangeListener
 {
@@ -23,6 +26,24 @@ public:
 
     /** --unmute: skip the restore-muted safety pause (appliance opt-in). */
     void fadeInNow();
+
+    /** Runs `proceed` now if nothing is unsaved, otherwise after the user
+        chooses Save / Don't save (Cancel drops it). Used by New, Open, Quit. */
+    void confirmDiscardChanges (std::function<void()> proceed);
+
+    // juce::MenuBarModel
+    juce::StringArray getMenuBarNames() override;
+    juce::PopupMenu getMenuForIndex (int index, const juce::String& name) override;
+    void menuItemSelected (int itemId, int index) override;
+
+    enum MenuItem
+    {
+        menuNew = 1, menuOpen, menuSave, menuSaveAs, menuImport, menuExportBundle, menuAudioSetup, menuQuit,
+        menuUndo, menuRedo, menuDelete, menuDuplicate, menuRename, menuPanic,
+        menuZoomIn, menuZoomOut, menuZoomReset,
+        menuOpenModelsFolder, menuOpenIrFolder, menuAbout, menuWebsite,
+        menuRecentBase = 1000
+    };
 
 private:
     class PaletteButton final : public juce::Button
@@ -43,6 +64,16 @@ private:
     void showAudioSetup();
     void showSaveDialog();
     void showLoadDialog();
+    void saveCurrent();
+    void showImportDialog();
+    void showExportBundleDialog();
+    [[nodiscard]] static juce::File projectsFolder();
+    void newPatch();
+    void setCurrentFile (const juce::File& file);
+    void rememberRecentFile (const juce::File& file);
+    void updateWindowTitle();
+    void duplicateSelected();
+    void renameSelected();
     void setMessage (juce::String message, bool error = false);
     void setCanvasZoom (float newZoom);
     void layoutPalette();
@@ -71,6 +102,12 @@ private:
     juce::Label messageLabel;
     juce::TooltipWindow tooltipWindow { this, 450 };
 
+    juce::MenuBarComponent menuBar;
+    std::unique_ptr<juce::PropertiesFile> settings;
+    juce::RecentlyOpenedFilesList recentFiles;
+    juce::File currentFile;
+    juce::String lastWindowTitle;
+
     std::unique_ptr<juce::FileChooser> fileChooser;
     NodeId inspectorNodeId = 0;
     std::optional<Connection> inspectorConnection;
@@ -78,7 +115,9 @@ private:
     bool engineRunning = false;
     float canvasZoom = 1.0f;
 
-    static constexpr int headerHeight = 62;
+    static constexpr int menuHeight = 26;
+    static constexpr int headerBarHeight = 62;
+    static constexpr int headerHeight = menuHeight + headerBarHeight; // top of the content area
     static constexpr int paletteWidth = 194;
     static constexpr int inspectorWidth = 264;
     static constexpr int footerHeight = 30;
