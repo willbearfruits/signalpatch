@@ -748,7 +748,8 @@ void testAllNodeKindsRenderFiniteOutput()
         NodeKind::noiseSource, NodeKind::pluck, NodeKind::drumMachine, NodeKind::sampler,
         NodeKind::fourTrack, NodeKind::lfo, NodeKind::randomLfo, NodeKind::envelopeFollower,
         NodeKind::stepSequencer, NodeKind::macro, NodeKind::spectralFollower,
-        NodeKind::script, NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal
+        NodeKind::script, NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal,
+        NodeKind::cabinet
     };
 
     for (const auto kind : kinds)
@@ -869,7 +870,7 @@ PatchDocument buildKitchenSinkDocument()
         NodeKind::bitcrusher, NodeKind::ringMod, NodeKind::vowelFilter,
         NodeKind::pitchShifter, NodeKind::pitchCorrector, NodeKind::granular,
         NodeKind::compressor, NodeKind::gate, NodeKind::limiter,
-        NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal, NodeKind::script
+        NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal, NodeKind::cabinet, NodeKind::script
     };
     NodeId previous = 0;
     for (const auto kind : chainKinds)

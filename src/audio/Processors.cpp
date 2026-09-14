@@ -1,5 +1,6 @@
 #include "Processors.h"
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 
@@ -3452,6 +3453,353 @@ private:
 };
 } // namespace
 
+// Speaker cabinet: zero-latency partitioned convolution of one or two impulse
+// responses (A <-> B blend), then low/high cut. Impulse files are read on a
+// worker thread and handed to juce::dsp::Convolution, whose own background
+// thread builds the engine and swaps it in wait-free on a later block, so the
+// callback never touches a file or allocates. With no impulse loaded the node
+// passes the dry signal so a rig keeps sounding while a cab is chosen.
+class CabinetNode final : public DspNode
+{
+public:
+    static constexpr double maximumImpulseSeconds = 1.0;
+
+    CabinetNode()
+        : DspNode (NodeKind::cabinet, nodeKindName (NodeKind::cabinet))
+    {
+        addInputPort ("In", SignalType::audio);
+        addOutputPort ("Audio", SignalType::audio);
+        addParameter ("level", "Level", "dB", juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, 0.25f);
+        addParameter ("blend", "A <-> B", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 0.0f, 0.5f);
+        addParameter ("low-cut", "Low cut", "Hz", juce::NormalisableRange<float> (20.0f, 500.0f, 1.0f, 0.5f), 60.0f, 0.25f);
+        addParameter ("high-cut", "High cut", "Hz", juce::NormalisableRange<float> (2000.0f, 20000.0f, 1.0f, 0.5f), 12000.0f, 0.25f);
+    }
+
+    /** Where impulse cycling looks when slot A is empty. */
+    static juce::File defaultImpulsesDirectory()
+    {
+        if (const auto* env = std::getenv ("SIGNALPATCH_IRS_DIR"))
+        {
+            const juce::File dir { juce::String (env) };
+            if (dir.isDirectory())
+                return dir;
+        }
+        const auto documents = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+            .getChildFile ("SignalPatch").getChildFile ("irs");
+        if (documents.isDirectory())
+            return documents;
+        const juce::File guitarix { "/usr/share/gx_head/sounds/amps" };
+        if (guitarix.isDirectory())
+            return guitarix;
+        return juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+    }
+
+    bool handleUiCommand (const juce::String& command) override
+    {
+        if (command == "prev-ir")
+            return cycleImpulse (-1);
+        if (command == "next-ir")
+            return cycleImpulse (1);
+        return false;
+    }
+
+    juce::var getExtraState() const override
+    {
+        if (slots[0].path.isEmpty() && slots[1].path.isEmpty())
+            return {};
+        auto object = std::make_unique<juce::DynamicObject>();
+        if (slots[0].path.isNotEmpty())
+            object->setProperty ("ir", slots[0].path);
+        if (slots[1].path.isNotEmpty())
+            object->setProperty ("irB", slots[1].path);
+        return juce::var (object.release());
+    }
+
+    // Message thread. Both slots are set from one state object so undo can
+    // restore "no cab" as well as any pair of impulses.
+    void setExtraState (const juce::var& state) override
+    {
+        setSlotPath (0, state.getProperty ("ir", juce::String()).toString());
+        setSlotPath (1, state.getProperty ("irB", juce::String()).toString());
+    }
+
+    juce::String statusText() const override
+    {
+        juce::StringArray parts;
+        for (int index = 0; index < 2; ++index)
+        {
+            const auto& slot = slots[static_cast<std::size_t> (index)];
+            const juce::String label = index == 0 ? "A: " : "B: ";
+            if (slot.loading.load (std::memory_order_relaxed))
+                parts.add (label + "loading " + juce::File (slot.path).getFileName() + "...");
+            else if (slot.error.isNotEmpty())
+                parts.add (label + "LOAD FAILED: " + slot.error);
+            else if (slot.path.isNotEmpty())
+                parts.add (label + juce::File (slot.path).getFileNameWithoutExtension());
+        }
+        if (parts.isEmpty())
+            return "no IR - LOAD or step with the arrows";
+        return parts.joinIntoString ("  |  ");
+    }
+
+private:
+    struct Slot
+    {
+        explicit Slot (juce::dsp::ConvolutionMessageQueue& queue) : convolver (queue) {}
+
+        juce::String path;
+        juce::String error;
+        std::atomic<bool> loading { false };
+        std::atomic<bool> active { false }; // an impulse has been handed to the convolver
+        juce::dsp::Convolution convolver;
+        std::vector<float> scratch;
+    };
+
+    // RBJ biquad with fixed Q; coefficients refreshed once per block.
+    struct Biquad
+    {
+        float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f, z1 = 0.0f, z2 = 0.0f;
+
+        void set (double sampleRate, double frequency, bool highpass) noexcept
+        {
+            const auto w0 = juce::MathConstants<double>::twoPi * juce::jlimit (10.0, sampleRate * 0.45, frequency) / sampleRate;
+            const auto cosW = std::cos (w0);
+            const auto alpha = std::sin (w0) / (2.0 * juce::MathConstants<double>::sqrt2 * 0.5);
+            const auto a0 = 1.0 + alpha;
+            const auto sign = highpass ? 1.0 : -1.0;
+            b0 = static_cast<float> ((1.0 + sign * cosW) * 0.5 / a0);
+            b1 = static_cast<float> (-sign * (1.0 + sign * cosW) / a0);
+            b2 = b0;
+            a1 = static_cast<float> (-2.0 * cosW / a0);
+            a2 = static_cast<float> ((1.0 - alpha) / a0);
+        }
+
+        float process (float x) noexcept
+        {
+            const auto y = b0 * x + z1;
+            z1 = b1 * x - a1 * y + z2;
+            z2 = b2 * x - a2 * y;
+            return y;
+        }
+
+        void reset() noexcept { z1 = z2 = 0.0f; }
+    };
+
+    static std::unique_ptr<juce::AudioBuffer<float>> readImpulse (const juce::String& path,
+                                                                  double& sampleRateOut,
+                                                                  juce::String& error)
+    {
+        juce::AudioFormatManager manager;
+        manager.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader (manager.createReaderFor (juce::File (path)));
+        if (reader == nullptr)
+        {
+            error = "unsupported or missing audio file";
+            return nullptr;
+        }
+        const auto maximumSamples = static_cast<juce::int64> (reader->sampleRate * maximumImpulseSeconds);
+        const auto length = static_cast<int> (juce::jmin (reader->lengthInSamples, maximumSamples));
+        if (length <= 0)
+        {
+            error = "empty impulse";
+            return nullptr;
+        }
+        auto buffer = std::make_unique<juce::AudioBuffer<float>> (1, length);
+        reader->read (buffer.get(), 0, length, 0, true, false); // first channel only: cabs are mono here
+        sampleRateOut = reader->sampleRate;
+        return buffer;
+    }
+
+    // Message thread. Steps slot A to the neighbouring impulse in its folder.
+    bool cycleImpulse (int delta)
+    {
+        const auto& current = slots[0].path;
+        const auto currentFile = juce::File (current);
+        const auto directory = current.isNotEmpty() && currentFile.getParentDirectory().isDirectory()
+            ? currentFile.getParentDirectory()
+            : defaultImpulsesDirectory();
+        auto candidates = directory.findChildFiles (juce::File::findFiles, false, "*.wav;*.aif;*.aiff;*.flac");
+        if (candidates.isEmpty())
+            return false;
+        candidates.sort();
+        int index = 0;
+        for (int i = 0; i < candidates.size(); ++i)
+            if (candidates.getReference (i) == currentFile)
+            {
+                index = i + delta;
+                break;
+            }
+        index = (index % candidates.size() + candidates.size()) % candidates.size();
+        setSlotPath (0, candidates.getReference (index).getFullPathName());
+        return true;
+    }
+
+    void setSlotPath (int index, const juce::String& path)
+    {
+        auto& slot = slots[static_cast<std::size_t> (index)];
+        if (path == slot.path)
+            return;
+        slot.path = path;
+        slot.error.clear();
+        if (path.isEmpty())
+        {
+            slot.active.store (false, std::memory_order_release);
+            slot.loading.store (false, std::memory_order_relaxed);
+            return;
+        }
+
+        // Headless (tests): no message loop, read synchronously.
+        if (juce::MessageManager::getInstanceWithoutCreating() == nullptr)
+        {
+            double rate = 0.0;
+            juce::String error;
+            auto buffer = readImpulse (path, rate, error); // sequenced: rate/error are outputs
+            finishImpulseLoad (index, path, std::move (buffer), rate, error);
+            return;
+        }
+
+        slot.loading.store (true, std::memory_order_relaxed);
+        std::weak_ptr<DspNode> weakSelf = weak_from_this();
+        juce::Thread::launch ([weakSelf, index, path]
+        {
+            double rate = 0.0;
+            juce::String error;
+            auto loaded = std::make_shared<std::unique_ptr<juce::AudioBuffer<float>>> (readImpulse (path, rate, error));
+            juce::MessageManager::callAsync ([weakSelf, index, path, rate, error, loaded]
+            {
+                if (auto locked = weakSelf.lock())
+                    static_cast<CabinetNode&> (*locked).finishImpulseLoad (index, path, std::move (*loaded), rate, error);
+            });
+        });
+    }
+
+    // Message thread only. Hands the impulse to the convolver (wait-free; the
+    // engine is built on its background thread and adopted on a later block).
+    void finishImpulseLoad (int index, const juce::String& path,
+                            std::unique_ptr<juce::AudioBuffer<float>> buffer,
+                            double bufferSampleRate, const juce::String& error)
+    {
+        auto& slot = slots[static_cast<std::size_t> (index)];
+        if (path != slot.path)
+            return; // superseded by a newer request
+        slot.loading.store (false, std::memory_order_relaxed);
+        if (buffer == nullptr)
+        {
+            slot.error = error.isNotEmpty() ? error : "could not read the impulse";
+            slot.active.store (false, std::memory_order_release);
+            return;
+        }
+        slot.error.clear();
+        slot.convolver.loadImpulseResponse (std::move (*buffer), bufferSampleRate,
+                                            juce::dsp::Convolution::Stereo::no,
+                                            juce::dsp::Convolution::Trim::no,
+                                            juce::dsp::Convolution::Normalise::yes);
+        slot.active.store (true, std::memory_order_release);
+    }
+
+    void prepareDsp (double newSampleRate, int newMaximumBlockSize) override
+    {
+        sampleRate = newSampleRate;
+        maximumBlockSize = juce::jmax (16, newMaximumBlockSize);
+        const juce::dsp::ProcessSpec spec { sampleRate, static_cast<juce::uint32> (maximumBlockSize), 1 };
+        for (auto& slot : slots)
+        {
+            slot.convolver.prepare (spec);
+            slot.scratch.assign (static_cast<std::size_t> (maximumBlockSize), 0.0f);
+        }
+        resetDsp();
+    }
+
+    void resetDsp() noexcept override
+    {
+        for (auto& slot : slots)
+            slot.convolver.reset();
+        lowCut.reset();
+        highCut.reset();
+        lastLowCut = lastHighCut = -1.0f;
+    }
+
+    void processDsp (const juce::AudioBuffer<float>& inputs,
+                     juce::AudioBuffer<float>& outputs,
+                     int numSamples) noexcept override
+    {
+        const auto* input = inputs.getReadPointer (0);
+        auto* output = outputs.getWritePointer (0);
+        const auto frames = juce::jmin (numSamples, maximumBlockSize);
+        if (frames <= 0)
+        {
+            juce::FloatVectorOperations::clear (output, numSamples);
+            return;
+        }
+
+        const auto lowHz = parameterValue (2, inputs, 0);
+        const auto highHz = parameterValue (3, inputs, 0);
+        if (lowHz != lastLowCut)
+        {
+            lowCut.set (sampleRate, lowHz, true);
+            lastLowCut = lowHz;
+        }
+        if (highHz != lastHighCut)
+        {
+            highCut.set (sampleRate, highHz, false);
+            lastHighCut = highHz;
+        }
+
+        bool ready[2] { false, false };
+        for (std::size_t index = 0; index < 2; ++index)
+        {
+            auto& slot = slots[index];
+            // Once an impulse has been handed over, always run the convolver:
+            // it installs the pending engine inside process() and cross-fades
+            // from dry to wet itself, so the cab fades in rather than jumping.
+            ready[index] = slot.active.load (std::memory_order_acquire);
+            if (! ready[index])
+                continue;
+            for (int sample = 0; sample < frames; ++sample)
+            {
+                const auto raw = input[sample];
+                slot.scratch[static_cast<std::size_t> (sample)] = std::isfinite (raw) ? raw : 0.0f;
+            }
+            float* channels[1] { slot.scratch.data() };
+            juce::dsp::AudioBlock<float> block (channels, 1, static_cast<std::size_t> (frames));
+            juce::dsp::ProcessContextReplacing<float> context (block);
+            slot.convolver.process (context);
+        }
+
+        const auto* a = slots[0].scratch.data();
+        const auto* b = slots[1].scratch.data();
+        for (int sample = 0; sample < frames; ++sample)
+        {
+            const auto level = juce::Decibels::decibelsToGain (parameterValue (0, inputs, sample));
+            const auto blend = juce::jlimit (0.0f, 1.0f, parameterValue (1, inputs, sample) * 0.01f);
+            const auto index = static_cast<std::size_t> (sample);
+            float value;
+            if (ready[0] && ready[1])
+                value = a[index] + blend * (b[index] - a[index]);
+            else if (ready[0])
+                value = a[index];
+            else if (ready[1])
+                value = b[index];
+            else
+                value = std::isfinite (input[sample]) ? input[sample] : 0.0f;
+
+            value = highCut.process (lowCut.process (value)) * level;
+            if (! std::isfinite (value))
+                value = 0.0f;
+            output[sample] = juce::jlimit (-4.0f, 4.0f, value);
+        }
+        if (frames < numSamples)
+            juce::FloatVectorOperations::clear (output + frames, numSamples - frames);
+    }
+
+    double sampleRate = 48000.0;
+    int maximumBlockSize = 128;
+    juce::dsp::ConvolutionMessageQueue queue; // declared before the slots: they hold a reference
+    std::array<Slot, 2> slots { Slot { queue }, Slot { queue } };
+    Biquad lowCut, highCut;
+    float lastLowCut = -1.0f, lastHighCut = -1.0f;
+};
+
 std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
 {
     switch (kind)
@@ -3492,6 +3840,7 @@ std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
         case NodeKind::script:               return std::make_shared<ScriptNode>();
         case NodeKind::neuralAmpPlaceholder: return std::make_shared<NeuralAmpNode> (NodeKind::neuralAmpPlaceholder);
         case NodeKind::neuralPedal:          return std::make_shared<NeuralAmpNode> (NodeKind::neuralPedal);
+        case NodeKind::cabinet:              return std::make_shared<CabinetNode>();
         case NodeKind::hardwareInput:
         case NodeKind::hardwareOutput:       break;
     }

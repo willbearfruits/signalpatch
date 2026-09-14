@@ -44,6 +44,7 @@ juce::Colour kindAccent (NodeKind kind)
         case NodeKind::script:               return juce::Colour (0xff9be564);
         case NodeKind::neuralAmpPlaceholder: return juce::Colour (0xffb0889a);
         case NodeKind::neuralPedal:          return juce::Colour (0xffe879b8);
+        case NodeKind::cabinet:              return juce::Colour (0xffd9a066);
     }
 
     jassertfalse;
@@ -92,6 +93,7 @@ juce::String kindTag (NodeKind kind)
         case NodeKind::script:               return "CODE";
         case NodeKind::neuralAmpPlaceholder:
         case NodeKind::neuralPedal:          return "NAM";
+        case NodeKind::cabinet:              return "CAB";
     }
 
     jassertfalse;
@@ -448,6 +450,12 @@ void drawKindGlyph (juce::Graphics& graphics, NodeKind kind,
             graphics.fillEllipse (x + w * 0.5f - 1.5f, y + h * 0.18f - 1.5f, 3.0f, 3.0f);
             graphics.fillEllipse (x + w * 0.68f - 1.5f, y + h * 0.28f - 1.5f, 3.0f, 3.0f);
             return;
+        case NodeKind::cabinet:
+            // Speaker box: enclosure, cone, dust cap.
+            graphics.drawRoundedRectangle (x + w * 0.08f, y + h * 0.04f, w * 0.84f, h * 0.92f, 2.0f, 1.4f);
+            graphics.drawEllipse (x + w * 0.24f, y + h * 0.24f, w * 0.52f, h * 0.52f, 1.4f);
+            graphics.fillEllipse (x + w * 0.5f - 2.0f, y + h * 0.5f - 2.0f, 4.0f, 4.0f);
+            return;
         case NodeKind::neuralAmpPlaceholder:
             for (int column = 0; column < 3; ++column)
                 for (int row = 0; row < (column == 1 ? 3 : 2); ++row)
@@ -480,6 +488,7 @@ const std::vector<NodePaletteEntry>& nodePalette()
         { NodeKind::granular,             "GRANULAR",       "EFFECTS",     "Grain cloud over a live 4 s buffer" },
         { NodeKind::neuralAmpPlaceholder, "NEURAL AMP",     "NEURAL",      "Neural Amp Modeler head; load a .nam capture" },
         { NodeKind::neuralPedal,          "NEURAL PEDAL",   "NEURAL",      "NAM pedal capture with wet/dry mix; step models with the arrows" },
+        { NodeKind::cabinet,              "CABINET",        "NEURAL",      "Speaker cab impulse response: blend two IRs, low and high cut" },
         { NodeKind::vowelFilter,          "VOWEL FILTER",   "VOICE",       "Formant filter morphing A-E-I-O-U" },
         { NodeKind::vocoder,              "VOCODER",        "VOICE",       "12-band vocoder: voice shapes carrier" },
         { NodeKind::pitchCorrector,       "AUTOTUNE",       "VOICE",       "Pitch detection snapped to a scale" },

@@ -89,6 +89,7 @@ private:
     std::unique_ptr<juce::FileChooser> modelChooser;
     bool selected = false;
     bool draggingNode = false;
+    void chooseImpulse (int slot);
     bool draggingCable = false;
     bool editingSequencerStep = false;
     int draggingOutputPort = -1;

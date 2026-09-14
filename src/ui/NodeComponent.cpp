@@ -166,6 +166,24 @@ void NodeComponent::applyScriptText()
     if (scriptEditor == nullptr)
         return;
     auto object = std::make_unique<juce::DynamicObject>();
+        else if (kind == NodeKind::cabinet)
+        {
+            addCommand ("<", "prev-ir", colours::panelRaised);
+            for (int slot = 0; slot < 2; ++slot)
+            {
+                CommandButton entry;
+                entry.button = std::make_unique<juce::TextButton> (slot == 0 ? "IR A" : "IR B");
+                entry.command = slot == 0 ? "load-a" : "load-b";
+                entry.activeColour = colours::panelRaised;
+                entry.button->setColour (juce::TextButton::buttonColourId, colours::panelRaised);
+                entry.button->setTooltip (slot == 0 ? "Choose the main cab impulse (.wav); the arrows step through its folder"
+                                                    : "Choose a second impulse to blend in with the A <-> B knob");
+                entry.button->onClick = [this, slot] { chooseImpulse (slot); };
+                addAndMakeVisible (*entry.button);
+                commandButtons.push_back (std::move (entry));
+            }
+            addCommand (">", "next-ir", colours::panelRaised);
+        }
     object->setProperty ("expr", scriptEditor->getText());
     engine.applyNodeExtraState (id, juce::var (object.release()));
     repaint();
@@ -217,6 +235,44 @@ void NodeComponent::refreshCommandButtons()
         entry.button->setColour (juce::TextButton::buttonColourId,
                                  active ? entry.activeColour.darker (0.2f) : colours::panelRaised);
     }
+}
+
+void NodeComponent::chooseImpulse (int slot)
+{
+    const auto* node = model();
+    if (node == nullptr)
+        return;
+    const auto currentA = juce::File (node->processor->getExtraState().getProperty ("ir", juce::String()).toString());
+    auto initialDirectory = currentA.getParentDirectory();
+    if (! initialDirectory.isDirectory())
+        initialDirectory = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+            .getChildFile ("SignalPatch").getChildFile ("irs");
+    if (! initialDirectory.isDirectory())
+        initialDirectory = juce::File ("/usr/share/gx_head/sounds/amps");
+    if (! initialDirectory.isDirectory())
+        initialDirectory = juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+
+    modelChooser = std::make_unique<juce::FileChooser> (slot == 0 ? "Load cab impulse A" : "Load cab impulse B",
+                                                        initialDirectory, "*.wav;*.aif;*.aiff;*.flac");
+    juce::Component::SafePointer<NodeComponent> safeThis (this);
+    modelChooser->launchAsync (juce::FileBrowserComponent::openMode
+                               | juce::FileBrowserComponent::canSelectFiles,
+                               [safeThis, slot] (const juce::FileChooser& chooser)
+    {
+        const auto file = chooser.getResult();
+        if (safeThis == nullptr || file == juce::File())
+            return;
+        const auto* current = safeThis->model();
+        if (current == nullptr)
+            return;
+        // Keep the other slot: the node's state carries both impulses.
+        auto state = current->processor->getExtraState();
+        if (state.getDynamicObject() == nullptr)
+            state = juce::var (new juce::DynamicObject());
+        state.getDynamicObject()->setProperty (slot == 0 ? "ir" : "irB", file.getFullPathName());
+        safeThis->engine.applyNodeExtraState (safeThis->id, state);
+        safeThis->repaint();
+    });
 }
 
 void NodeComponent::showNodeMenu()
