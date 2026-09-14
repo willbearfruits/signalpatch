@@ -361,7 +361,7 @@ void NodeComponent::showNodeMenu()
     // Node components are rebuilt whenever the engine broadcasts a change, so
     // the async menu callback must survive this component being deleted.
     juce::Component::SafePointer<NodeComponent> safeThis (this);
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(),
                         [safeThis] (int result)
     {
         auto* self = safeThis.getComponent();
@@ -493,7 +493,7 @@ void NodeComponent::showParameterMenu (int parameterIndex)
         menu.addItem (removeModulation, "Disconnect modulation cable", modulationCable.has_value());
     }
     juce::Component::SafePointer<NodeComponent> safeThis (this);
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(),
                         [safeThis, parameterIndex, modulationCable] (int result)
     {
         auto* self = safeThis.getComponent();
@@ -561,7 +561,7 @@ void NodeComponent::showPortMenu (bool output, int port)
         }
     }
     juce::Component::SafePointer<NodeComponent> safeThis (this);
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(),
                         [safeThis, cables] (int result)
     {
         auto* self = safeThis.getComponent();

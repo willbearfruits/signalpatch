@@ -39,6 +39,11 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.0" date="2026-09-14">
+      <description>
+        <p>Undo/redo, Cabinet impulse-response node, File menu with recent files and portable project bundles (patch + models + IRs as a zip), context menus on modules, knobs, ports, cables and the canvas, and a much lighter rack UI.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-07-11">
       <description>
         <p>First public release: 35 modules, Neural Amp Modeler support,

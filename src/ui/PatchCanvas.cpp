@@ -684,7 +684,7 @@ void PatchCanvas::showAddNodeMenu (juce::Point<float> position)
     menu.addSeparator();
     menu.addItem (3, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute");
 
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(),
                         [this, position] (int result)
     {
         if (result == 1) { const auto text = engine.getUndoDescription(); if (engine.undo() && onStatus) onStatus ("Undo: " + text); return; }
@@ -745,7 +745,7 @@ void PatchCanvas::mouseDown (const juce::MouseEvent& event)
             }
             const auto cable = *connection;
             const auto position = event.position;
-            menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+            menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(),
                                 [this, cable, position] (int result)
             {
                 if (result == 1)
