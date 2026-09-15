@@ -201,3 +201,51 @@ if(UNIX AND NOT APPLE)
     install(FILES packaging/linux/io.github.willbearfruits.SignalPatch.svg
             DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps")
 endif()
+
+# --- SignalPatch 2: GLFW + OpenGL + NanoVG rack over the same engine ---------
+find_package(glfw3 3.3 QUIET)
+find_package(OpenGL QUIET)
+option(SIGNALPATCH_BUILD_V2 "Build the GLFW/OpenGL rack (signalpatch2)" ON)
+if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
+    include(FetchContent)
+    FetchContent_Declare(nanovg
+        GIT_REPOSITORY https://github.com/memononen/nanovg.git
+        GIT_TAG ce3bf745eb2d2dbc14a50bf2446783f691ac4353)
+    FetchContent_MakeAvailable(nanovg) # no CMakeLists upstream: populate only
+
+    file(GLOB SIGNALPATCH_V2_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/v2/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/v2/*.h")
+
+    juce_add_console_app(signalpatch2 PRODUCT_NAME "SignalPatch2")
+    juce_generate_juce_header(signalpatch2)
+    target_sources(signalpatch2 PRIVATE
+        ${SIGNALPATCH_V2_SOURCES}
+        ${SIGNALPATCH_AUDIO_SOURCES}
+        "${nanovg_SOURCE_DIR}/src/nanovg.c")
+    target_include_directories(signalpatch2 SYSTEM PRIVATE "${nanovg_SOURCE_DIR}/src")
+    target_compile_features(signalpatch2 PRIVATE cxx_std_20)
+    target_compile_definitions(signalpatch2 PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS} JUCE_ALSA=1 JUCE_JACK=1
+        JUCE_MODAL_LOOPS_PERMITTED=1) # runDispatchLoopUntil: JUCE pumped from the GLFW frame loop
+    set_source_files_properties("${nanovg_SOURCE_DIR}/src/nanovg.c" PROPERTIES COMPILE_OPTIONS "-w")
+    if(SIGNALPATCH_HAS_NAM)
+        target_compile_definitions(signalpatch2 PRIVATE SIGNALPATCH_HAS_NAM=1)
+        target_link_libraries(signalpatch2 PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,nam_core>")
+    endif()
+    target_link_libraries(signalpatch2
+        PRIVATE
+            juce::juce_audio_devices
+            juce::juce_audio_formats
+            juce::juce_dsp
+            juce::juce_graphics
+            juce::juce_data_structures
+            juce::juce_events
+            glfw
+            OpenGL::GL
+        PUBLIC
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags)
+    message(STATUS "SignalPatch: building signalpatch2 (GLFW ${glfw3_VERSION})")
+else()
+    message(STATUS "SignalPatch: signalpatch2 skipped (needs glfw3 and OpenGL)")
+endif()
