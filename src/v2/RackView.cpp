@@ -3449,11 +3449,20 @@ void RackView::drawPlateStatic (const Layout& layout, const NodeModel& model)
         nvgStrokeColor (vg, alpha (portColour, info.active ? 0.9f : 0.3f));
         nvgStrokeWidth (vg, 1.4f);
         nvgStroke (vg);
-        if (! (layout.inputs > 6 && info.type == SignalType::control))
         {
+            // Every port keeps its name; crowded plates use a smaller face and the
+            // label is clipped where the scope box begins (the port menu has it in full).
+            const bool crowded = layout.inputs > 6;
+            const auto preview = previewArea (layout, origin);
+            const bool besideScope = centre.y > preview.getY() - 8.0f && centre.y < preview.getBottom() + 8.0f;
+            const auto limit = besideScope ? preview.getX() - 3.0f : origin.x + layout.w * 0.5f - 6.0f; // below the scope the row is free
+            nvgSave (vg);
+            nvgScissor (vg, centre.x + 8.0f, centre.y - 8.0f, juce::jmax (8.0f, limit - centre.x - 8.0f), 16.0f);
+            nvgFontSize (vg, crowded ? 7.5f : 8.5f);
             nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-            nvgFillColor (vg, alpha (palette::mutedText, 0.9f));
+            nvgFillColor (vg, alpha (palette::mutedText, crowded ? 0.8f : 0.9f));
             nvgText (vg, centre.x + 9.0f, centre.y, info.name.toRawUTF8(), nullptr);
+            nvgRestore (vg);
         }
     }
     for (int port = 0; port < layout.outputs; ++port)
