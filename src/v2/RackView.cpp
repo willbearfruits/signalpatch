@@ -260,11 +260,19 @@ void RackView::rebuildLayouts()
         auto height = juce::jmax (layout.hardware ? 150.0f : 210.0f, portsHeight, controlsHeight);
         if (layout.kind == NodeKind::script)
             height += 92.0f;
-        if (layout.kind == NodeKind::sampler || layout.kind == NodeKind::neuralAmpPlaceholder || layout.kind == NodeKind::neuralPedal
-            || layout.kind == NodeKind::cabinet)
-            height += 32.0f; // room for the button row under the knobs
-        if (layout.kind == NodeKind::fourTrack || layout.kind == NodeKind::looper)
-            height += 62.0f;
+        // Button rows sit under the last knob row and above the footswitch zone
+        // (buttonBounds measures from the bottom), so the plate must be tall
+        // enough for knobs + rows + stomp, whatever the kind.
+        int buttonRows = 0;
+        for (const auto& button : layout.buttons)
+            buttonRows = juce::jmax (buttonRows, button.row + 1);
+        if (buttonRows > 0)
+            height = juce::jmax (height, controlsHeight - 12.0f + static_cast<float> (buttonRows) * 28.0f + 8.0f
+                                             + (layout.stomp ? stompZoneHeight : 0.0f) + railHeight + 6.0f);
+        // The footswitch shares the last knob row only when that row has a free
+        // column; with both columns taken it gets its own strip.
+        if (layout.stomp && buttonRows == 0 && ! layout.knobParameters.empty() && layout.knobParameters.size() % 2 == 0)
+            height = juce::jmax (height, controlsHeight + stompZoneHeight * 0.6f);
         layout.h = height;
         layouts.push_back (std::move (layout));
     }
@@ -3627,11 +3635,21 @@ void RackView::drawNode (const Layout& layout, double now)
     const auto status = layout.kind == NodeKind::tuner || layout.kind == NodeKind::looper ? juce::String() : model->processor->statusText();
     if (status.isNotEmpty())
     {
+        // A caption strip along the bottom of the scope box: never in the way of
+        // port labels or knobs however many of either the plate has.
+        const auto area = previewArea (layout, origin);
+        nvgBeginPath (vg);
+        nvgRect (vg, area.getX() + 1.0f, area.getBottom() - 13.0f, area.getWidth() - 2.0f, 12.0f);
+        nvgFillColor (vg, nvgRGBAf (0, 0, 0, 0.45f));
+        nvgFill (vg);
         nvgFontFaceId (vg, font);
-        nvgFontSize (vg, 9.0f);
+        nvgFontSize (vg, 8.5f);
         nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
         nvgFillColor (vg, model->processor->safetyTripped() ? palette::warning : palette::mutedText);
-        nvgText (vg, x + w * 0.5f, y + railHeight + headerHeight + 98.0f, status.toRawUTF8(), nullptr);
+        nvgSave (vg);
+        nvgScissor (vg, area.getX(), area.getY(), area.getWidth(), area.getHeight());
+        nvgText (vg, area.getCentreX(), area.getBottom() - 7.0f, status.toRawUTF8(), nullptr);
+        nvgRestore (vg);
     }
 
     if (layout.stomp)
@@ -3735,7 +3753,12 @@ void RackView::drawHud (int width, int height, double now)
                     + juce::String (plateRenders) + " plates rasterised";
     // The header's right side (file name, view / AUDIO / FILE buttons, mute) starts
     // about 400 px from the edge; drop the least useful stats when the window is narrow.
-    const auto rightEdge = static_cast<float> (width) - 410.0f;
+    float nameBounds[4] {};
+    nvgFontSize (vg, 10.5f);
+    nvgTextBounds (vg, static_cast<float> (width) - 402.0f, 17.0f,
+                   (currentFile == juce::File() ? juce::String ("untitled") : currentFile.getFileName()).toRawUTF8(), nullptr, nameBounds);
+    nvgFontSize (vg, 11.0f);
+    const auto rightEdge = static_cast<float> (width) - 402.0f - (nameBounds[2] - nameBounds[0]) - 24.0f;
     auto textRight = [&] (const juce::String& text)
     {
         float bounds[4] {};
