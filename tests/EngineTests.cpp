@@ -2105,10 +2105,12 @@ void testTone3000PiecesAreRight()
     expect (tone3000::codeFromCallback ("GET /cb?code=abc%2Fdef&state=" + pkce.state + " HTTP/1.1", pkce.state) == "abc/def", "callback code should be extracted and unescaped");
     expect (tone3000::codeFromCallback ("GET /cb?code=abc&state=wrong HTTP/1.1", pkce.state).isEmpty(), "a wrong state must be rejected");
 
-    const auto page = tone3000::parseTonePage (juce::JSON::parse (R"({"data":[{"id":12,"title":"Plexi 51","gear":"amp","models_count":3,"makes":[{"name":"Marshall"}],"user":{"username":"tim"}},{"id":13,"title":"Nano Rat","gear":"pedal","models_count":1}],"page":2,"page_size":25,"total":51,"total_pages":3})"));
+    const auto page = tone3000::parseTonePage (juce::JSON::parse (R"({"data":[{"id":12,"title":"Plexi 51","gear":"amp","models_count":3,"makes":[{"name":"Marshall"}],"user":{"username":"tim"},"images":["https://x/p.jpg"]},{"id":13,"title":"Nano Rat","gear":"pedal","models_count":1}],"page":2,"page_size":25,"total":51,"total_pages":3})"));
     expect (page.tones.size() == 2 && page.page == 2 && page.totalPages == 3 && page.total == 51, "tone page envelope");
     expect (page.tones[0].id == 12 && page.tones[0].title == "Plexi 51" && page.tones[0].make == "Marshall" && page.tones[0].user == "tim" && page.tones[0].modelsCount == 3, "tone fields");
     expect (page.tones[1].make.isEmpty() && page.tones[1].gear == "pedal", "missing make should stay empty");
+    expect (page.tones[0].image == "https://x/p.jpg" && page.tones[1].image.isEmpty(), "first photo URL should be kept");
+    expect (tone3000::modelFileName (page.tones[0], tone3000::Model { 1, "V30 57", "https://x/i.wav", "", 0 }, "wav") == "Plexi 51 - V30 57.wav", "impulse file name");
 
     const auto models = tone3000::parseModels (juce::JSON::parse (R"({"data":[{"id":7,"tone_id":12,"name":"Plexi 51 DI#03","model_url":"https://x/y.nam","size":"standard","architecture_version":2},{"id":8,"name":"no url"}]})"));
     expect (models.size() == 1 && models[0].id == 7 && models[0].size == "standard" && models[0].architecture == 2 && models[0].url == "https://x/y.nam", "model fields; entries without a url dropped");

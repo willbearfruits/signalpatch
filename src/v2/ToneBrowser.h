@@ -6,7 +6,9 @@
 
 #include <atomic>
 #include <functional>
+#include <map>
 #include <memory>
+#include <set>
 #include <vector>
 
 namespace signalpatch::v2
@@ -23,7 +25,9 @@ public:
     ToneBrowser (NVGcontext* vg, int font);
     ~ToneBrowser();
 
-    void open (const juce::File& modelsFolder, std::function<void (const juce::File&)> onModelReady, std::function<void (const juce::String&)> say);
+    enum class Mode { captures, impulses };
+    void open (const juce::File& modelsFolder, std::function<void (const juce::File&)> onModelReady, std::function<void (const juce::String&)> say,
+               Mode mode = Mode::captures);
     [[nodiscard]] bool isOpen() const noexcept { return active; }
     void close();
 
@@ -51,12 +55,22 @@ private:
     [[nodiscard]] int rowAt (float x, float y) const noexcept;
     void pick (int row);
     void ensureVisible (int row) noexcept;
+    void requestImage (const tone3000::Tone& tone);
+    [[nodiscard]] juce::StringArray gearChoices() const;
+    [[nodiscard]] juce::Rectangle<float> chipBounds (int row, int index, int count) const noexcept;
+    struct Chip { int row = -1, index = -1; };
+    [[nodiscard]] Chip chipAt (float x, float y) const noexcept;
 
     NVGcontext* vg;
     int font;
     bool active = false;
     View view = View::login;
     juce::String query, status;
+    Mode mode = Mode::captures;
+    tone3000::SearchOptions options;
+    int gearIndex = 0, sortIndex = 0;
+    std::map<juce::int64, int> images;   // tone id -> NanoVG image (0 = failed)
+    std::set<juce::int64> imagesPending;
     tone3000::TonePage page;
     std::vector<tone3000::Model> models;
     tone3000::Tone currentTone;
@@ -78,7 +92,8 @@ private:
     std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>> (true);
     int generation = 0;
 
-    static constexpr float rowHeight = 26.0f;
-    static constexpr float headerHeight = 96.0f;
+    static constexpr float rowHeight = 34.0f;
+    static constexpr float headerHeight = 124.0f;
+    static constexpr float thumbWidth = 46.0f;
 };
 } // namespace signalpatch::v2

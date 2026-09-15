@@ -638,18 +638,19 @@ void RackView::showFileMenu (double x, double y)
     dirty = true;
 }
 
-void RackView::openToneBrowser (NodeId id)
+void RackView::openToneBrowser (NodeId id, bool impulses, bool slotB)
 {
-    toneBrowser.open (documentsFolder ("models"), [this, id] (const juce::File& file)
+    const auto key = impulses ? (slotB ? "irB" : "ir") : "model";
+    toneBrowser.open (documentsFolder (impulses ? "impulses" : "models"), [this, id, key] (const juce::File& file)
     {
         if (engine.getDocument().findNode (id) == nullptr)
             return;
         auto* object = new juce::DynamicObject();
-        object->setProperty ("model", file.getFullPathName());
+        object->setProperty (key, file.getFullPathName());
         engine.applyNodeExtraState (id, juce::var (object));
         say ("Loading " + file.getFileName());
     },
-    [this] (const juce::String& text) { say (text); });
+    [this] (const juce::String& text) { say (text); }, impulses ? ToneBrowser::Mode::impulses : ToneBrowser::Mode::captures);
     dirty = true;
 }
 
@@ -765,7 +766,7 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
     for (const auto& connection : engine.getDocument().getConnections())
         if (connection.sourceNode == layout.id || connection.destinationNode == layout.id)
             ++cableCount;
-    enum { bypass = 1, rename, duplicate, resetKnobs, disconnectAll, remove, prevModel, nextModel, prevIr, nextIr, clearIrB, browseTone3000,
+    enum { bypass = 1, rename, duplicate, resetKnobs, disconnectAll, remove, prevModel, nextModel, prevIr, nextIr, clearIrB, browseTone3000, browseImpulsesA, browseImpulsesB,
            midiLearnStomp, midiRemoveStomp, midiLearnButtonBase = 3000, midiRemoveButtonBase = 3500 };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (model->processor->getName().toUpperCase()));
@@ -819,6 +820,8 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
     else if (layout.kind == NodeKind::cabinet)
     {
         items.push_back (MenuItem::line());
+        items.push_back (MenuItem::item (browseImpulsesA, "Browse TONE3000 impulses into IR A..."));
+        items.push_back (MenuItem::item (browseImpulsesB, "Browse TONE3000 impulses into IR B..."));
         items.push_back (MenuItem::item (prevIr, "Previous impulse in folder"));
         items.push_back (MenuItem::item (nextIr, "Next impulse in folder"));
         items.push_back (MenuItem::item (clearIrB, "Clear impulse B", {}, model->processor->getExtraState().hasProperty ("irB")));
@@ -867,7 +870,9 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
             case remove:
                 if (engine.removeNode (id)) { selectedNode = 0; say ("Module removed"); }
                 break;
-            case browseTone3000: openToneBrowser (id); break;
+            case browseTone3000: openToneBrowser (id, false, false); break;
+            case browseImpulsesA: openToneBrowser (id, true, false); break;
+            case browseImpulsesB: openToneBrowser (id, true, true); break;
             case prevModel: engine.sendNodeCommand (id, "prev-model"); break;
             case nextModel: engine.sendNodeCommand (id, "next-model"); break;
             case prevIr:    engine.sendNodeCommand (id, "prev-ir"); break;
@@ -4745,10 +4750,12 @@ void RackView::key (int keyCode, bool pressed, int mods)
         else
             for (const auto& node : engine.getDocument().getNodes())
                 if (isNeural (node)) { target = node.id; break; }
-        if (target != 0)
-            openToneBrowser (target);
+        if (const auto* current = engine.getDocument().findNode (selectedNode); current != nullptr && current->processor->getKind() == NodeKind::cabinet)
+            openToneBrowser (selectedNode, true, false);
+        else if (target != 0)
+            openToneBrowser (target, false, false);
         else
-            say ("Add a Neural Amp or Neural Pedal first (Ctrl+T browses TONE3000 for it)");
+            say ("Add a Neural Amp or Neural Pedal first (Ctrl+T browses TONE3000 for it; on a Cabinet it browses impulses)");
     }
     else if (ctrl && keyCode == GLFW_KEY_A && mode == Mode::rack)
     {

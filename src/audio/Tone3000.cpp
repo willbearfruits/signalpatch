@@ -1,5 +1,7 @@
 #include "Tone3000.h"
 
+#include <cstring>
+
 #if JUCE_LINUX || JUCE_MAC
  #include <sys/stat.h>
 #endif
@@ -142,6 +144,8 @@ TonePage parseTonePage (const juce::var& value)
             else
                 tone.make = firstString (entry, { "make" });
             tone.user = firstString (object->getProperty ("user"), { "username", "name", "display_name" });
+            if (const auto* images = object->getProperty ("images").getArray(); images != nullptr && ! images->isEmpty())
+                tone.image = images->getFirst().toString();
             if (tone.id != 0)
                 page.tones.push_back (std::move (tone));
         }
@@ -169,14 +173,14 @@ std::vector<Model> parseModels (const juce::var& value)
     return models;
 }
 
-juce::String modelFileName (const Tone& tone, const Model& model)
+juce::String modelFileName (const Tone& tone, const Model& model, const juce::String& extension)
 {
     auto name = tone.title.trim();
     if (model.name.trim().isNotEmpty() && model.name.trim() != tone.title.trim())
         name += " - " + model.name.trim();
     if (model.size.isNotEmpty())
         name += " (" + model.size + ")";
-    return juce::File::createLegalFileName (name).substring (0, 120) + ".nam";
+    return juce::File::createLegalFileName (name).substring (0, 120) + "." + extension;
 }
 
 juce::File keysFile()
@@ -291,16 +295,18 @@ juce::Result Client::refreshIfNeeded()
     return tokens.present() ? juce::Result::ok() : juce::Result::fail ("TONE3000 refresh returned no token");
 }
 
-juce::Result Client::search (const juce::String& query, int page, TonePage& out)
+juce::Result Client::search (const juce::String& query, int page, const SearchOptions& options, TonePage& out)
 {
     juce::StringPairArray params;
     if (query.trim().isNotEmpty())
         params.set ("query", query.trim());
-    params.set ("format", "nam");
+    params.set ("format", options.format.isEmpty() ? "nam" : options.format);
+    if (options.gear.isNotEmpty())
+        params.set ("gear", options.gear);
     params.set ("page", juce::String (juce::jmax (1, page)));
-    params.set ("page_size", "25");
-    if (query.trim().isEmpty())
-        params.set ("sort", "trending");
+    params.set ("page_size", juce::String (juce::jlimit (1, 100, options.pageSize)));
+    if (options.sort.isNotEmpty())
+        params.set ("sort", options.sort);
     juce::var response;
     const auto result = get ("/tones/search", params, response);
     if (result.failed())
@@ -336,10 +342,25 @@ juce::Result Client::download (const Model& model, const juce::File& destination
     stream->readIntoMemoryBlock (data);
     if (status < 200 || status >= 300)
         return juce::Result::fail ("Model download failed (" + juce::String (status) + ")");
-    if (data.getSize() < 32 || data[0] != '{')
-        return juce::Result::fail ("The download is not a .nam file");
+    const bool json = data.getSize() >= 32 && data[0] == '{';
+    const bool riff = data.getSize() >= 44 && std::memcmp (data.getData(), "RIFF", 4) == 0;
+    if (! json && ! riff)
+        return juce::Result::fail ("The download is neither a .nam nor a .wav");
     destination.getParentDirectory().createDirectory();
     return destination.replaceWithData (data.getData(), data.getSize()) ? juce::Result::ok() : juce::Result::fail ("Could not write " + destination.getFullPathName());
+}
+
+juce::Result Client::fetchBytes (const juce::String& url, juce::MemoryBlock& out)
+{
+    int status = 0;
+    auto stream = juce::URL (url).createInputStream (juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+                                                         .withConnectionTimeoutMs (10000)
+                                                         .withNumRedirectsToFollow (5)
+                                                         .withStatusCode (&status));
+    if (stream == nullptr)
+        return juce::Result::fail ("no connection");
+    stream->readIntoMemoryBlock (out);
+    return status >= 200 && status < 300 ? juce::Result::ok() : juce::Result::fail ("http " + juce::String (status));
 }
 
 // ---------------------------------------------------------------- CallbackServer

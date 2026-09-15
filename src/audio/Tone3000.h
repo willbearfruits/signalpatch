@@ -43,8 +43,19 @@ struct Tokens
 struct Tone
 {
     juce::int64 id = 0;
-    juce::String title, make, gear, user;
+    juce::String title, make, gear, user, image; // image: first photo URL, public
     int modelsCount = 0;
+};
+
+// What to search: NAM captures or impulse responses, a gear type, a sort.
+// Values are the API's own words (sort: trending, newest, oldest,
+// downloads-all-time; gear: amp, amp-cab, pedal, outboard, cab, space).
+struct SearchOptions
+{
+    juce::String format = "nam";
+    juce::String gear;
+    juce::String sort = "trending";
+    int pageSize = 40;
 };
 
 struct TonePage
@@ -63,8 +74,8 @@ struct Model
 
 TonePage parseTonePage (const juce::var& value);
 std::vector<Model> parseModels (const juce::var& value);
-/** "Title - Model name (size).nam", safe for a file system. */
-juce::String modelFileName (const Tone& tone, const Model& model);
+/** "Title - Model name (size).nam" (or .wav for impulses), safe for a file system. */
+juce::String modelFileName (const Tone& tone, const Model& model, const juce::String& extension = "nam");
 
 juce::File keysFile();
 juce::File tokensFile();
@@ -82,9 +93,12 @@ public:
     Tokens tokens;
     juce::Result exchangeCode (const juce::String& code, const juce::String& verifier, const juce::String& redirect);
     juce::Result refreshIfNeeded();
-    juce::Result search (const juce::String& query, int page, TonePage& out);
+    juce::Result search (const juce::String& query, int page, const SearchOptions& options, TonePage& out);
     juce::Result models (juce::int64 toneId, std::vector<Model>& out);
+    /** Saves the model file; accepts a .nam (JSON) or an impulse (RIFF WAV). */
     juce::Result download (const Model& model, const juce::File& destination);
+    /** Public bytes (a tone photo), no auth. */
+    static juce::Result fetchBytes (const juce::String& url, juce::MemoryBlock& out);
 
 private:
     juce::Result get (const juce::String& path, const juce::StringPairArray& params, juce::var& out);

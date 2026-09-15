@@ -155,7 +155,7 @@ private:
     TextPrompt prompt;
     FileBrowser browser;
     ToneBrowser toneBrowser;
-    void openToneBrowser (NodeId id);
+    void openToneBrowser (NodeId id, bool impulses, bool slotB);
     juce::File currentFile;
     int controllerSlotSent = -2;
     juce::String controllerRigSent;

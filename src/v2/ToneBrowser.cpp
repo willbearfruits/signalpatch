@@ -17,9 +17,24 @@ ToneBrowser::~ToneBrowser()
     *alive = false;
     server.stop();
     pool.removeAllJobs (true, 4000);
+    for (const auto& [id, image] : images)
+        if (image > 0)
+            nvgDeleteImage (vg, image);
 }
 
-void ToneBrowser::open (const juce::File& modelsFolder, std::function<void (const juce::File&)> onModelReady, std::function<void (const juce::String&)> say)
+namespace
+{
+    const juce::StringArray sortLabels { "TRENDING", "NEWEST", "MOST DOWNLOADED", "OLDEST" };
+    const juce::StringArray sortValues { "trending", "newest", "downloads-all-time", "oldest" };
+}
+
+juce::StringArray ToneBrowser::gearChoices() const
+{
+    return mode == Mode::impulses ? juce::StringArray { "ALL", "CAB", "SPACE" }
+                                  : juce::StringArray { "ALL", "AMP", "AMP+CAB", "PEDAL", "OUTBOARD" };
+}
+
+void ToneBrowser::open (const juce::File& modelsFolder, std::function<void (const juce::File&)> onModelReady, std::function<void (const juce::String&)> say, Mode newMode)
 {
     folder = modelsFolder;
     modelReady = std::move (onModelReady);
@@ -28,6 +43,16 @@ void ToneBrowser::open (const juce::File& modelsFolder, std::function<void (cons
     selected = -1;
     hover = -1;
     scrollOffset = 0.0f;
+    const bool modeChanged = mode != newMode;
+    mode = newMode;
+    options.format = mode == Mode::impulses ? "ir" : "nam";
+    if (modeChanged)
+    {
+        gearIndex = 0;
+        options.gear.clear();
+        page = {};
+        models.clear();
+    }
     if (client.tokens.present())
     {
         view = View::tones;
@@ -132,12 +157,14 @@ void ToneBrowser::search (int pageNumber)
 {
     setStatus ("Searching...");
     const auto text = query;
-    runAsync ([this, text, pageNumber]
+    auto wanted = options;
+    wanted.sort = text.trim().isNotEmpty() && sortIndex == 0 ? juce::String() : sortValues[sortIndex]; // a query sorts by match unless asked
+    runAsync ([this, text, pageNumber, wanted]
     {
         if (auto refreshed = client.refreshIfNeeded(); refreshed.failed())
             return refreshed;
         tone3000::TonePage result;
-        const auto outcome = client.search (text, pageNumber, result);
+        const auto outcome = client.search (text, pageNumber, wanted, result);
         if (outcome.wasOk())
             page = result; // written from the worker, read after the hop: the generation guard keeps it single-writer per request
         return outcome;
@@ -160,7 +187,8 @@ void ToneBrowser::search (int pageNumber)
         selected = page.tones.empty() ? -1 : 0;
         scrollOffset = 0.0f;
         setStatus (page.tones.empty() ? juce::String ("Nothing found")
-                                      : juce::String (page.total) + " tones, page " + juce::String (page.page) + "/" + juce::String (page.totalPages) + "   (Left / Right: pages)");
+                                      : juce::String (page.total) + (mode == Mode::impulses ? " impulse packs, page " : " tones, page ")
+                                        + juce::String (page.page) + "/" + juce::String (page.totalPages) + "   (Left / Right: pages)");
     });
 }
 
@@ -189,18 +217,19 @@ void ToneBrowser::openTone (const tone3000::Tone& tone)
         view = View::models;
         selected = models.empty() ? -1 : 0;
         scrollOffset = 0.0f;
-        setStatus (models.empty() ? "This tone has no downloadable NAM models" : juce::String (models.size()) + " models - Enter downloads   (Esc back)");
+        setStatus (models.empty() ? (mode == Mode::impulses ? "This pack has no downloadable impulses" : "This tone has no downloadable NAM models")
+                                  : juce::String (models.size()) + (mode == Mode::impulses ? " impulses - Enter loads one into the cabinet, keep trying others   (Esc back)"
+                                                                                           : " models - Enter loads one and you play it, try the next   (Esc back)"));
     });
 }
 
 void ToneBrowser::download (const tone3000::Model& model)
 {
-    const auto destination = folder.getChildFile (tone3000::modelFileName (currentTone, model));
+    const auto destination = folder.getChildFile (tone3000::modelFileName (currentTone, model, mode == Mode::impulses ? "wav" : "nam"));
     if (destination.existsAsFile())
     {
-        if (announce) announce ("Already here: " + destination.getFileName());
         if (modelReady) modelReady (destination);
-        close();
+        setStatus ("Loaded " + destination.getFileName() + " - play it; Enter on another to compare, Esc when happy");
         return;
     }
     setStatus ("Downloading " + model.name + "...");
@@ -217,10 +246,55 @@ void ToneBrowser::download (const tone3000::Model& model)
             setStatus (result.getErrorMessage());
             return;
         }
-        if (announce) announce ("Downloaded " + destination.getFileName());
         if (modelReady) modelReady (destination);
-        close();
+        setStatus ("Loaded " + destination.getFileName() + " - play it; Enter on another to compare, Esc when happy");
     });
+}
+
+void ToneBrowser::requestImage (const tone3000::Tone& tone)
+{
+    if (tone.image.isEmpty() || images.count (tone.id) != 0 || imagesPending.count (tone.id) != 0 || images.size() > 400)
+        return;
+    imagesPending.insert (tone.id);
+    auto keepAlive = alive;
+    const auto id = tone.id;
+    const auto url = tone.image;
+    pool.addJob (std::function<juce::ThreadPoolJob::JobStatus()> ([this, keepAlive, id, url]
+    {
+        auto bytes = std::make_shared<juce::MemoryBlock>();
+        const auto result = tone3000::Client::fetchBytes (url, *bytes);
+        juce::MessageManager::callAsync ([this, keepAlive, id, bytes, ok = result.wasOk()]
+        {
+            if (! *keepAlive)
+                return;
+            imagesPending.erase (id);
+            int handle = 0;
+            if (ok && bytes->getSize() > 0)
+                handle = nvgCreateImageMem (vg, 0, static_cast<unsigned char*> (bytes->getData()), static_cast<int> (bytes->getSize()));
+            images[id] = handle; // 0 remembers the failure so it is not fetched again
+            dirty = true;
+        });
+        return juce::ThreadPoolJob::jobHasFinished;
+    }));
+}
+
+juce::Rectangle<float> ToneBrowser::chipBounds (int row, int index, int count) const noexcept
+{
+    const auto x = lastPanel.getX() + 14.0f;
+    const auto width = (lastPanel.getWidth() - 28.0f - 4.0f * static_cast<float> (count - 1)) / static_cast<float> (juce::jmax (1, count));
+    return { x + static_cast<float> (index) * (width + 4.0f), lastPanel.getY() + 72.0f + static_cast<float> (row) * 22.0f, width, 18.0f };
+}
+
+ToneBrowser::Chip ToneBrowser::chipAt (float x, float y) const noexcept
+{
+    const auto gears = gearChoices();
+    for (int i = 0; i < gears.size(); ++i)
+        if (chipBounds (0, i, gears.size()).contains (x, y))
+            return { 0, i };
+    for (int i = 0; i < sortLabels.size(); ++i)
+        if (chipBounds (1, i, sortLabels.size()).contains (x, y))
+            return { 1, i };
+    return {};
 }
 
 int ToneBrowser::rowCount() const noexcept
@@ -297,6 +371,18 @@ bool ToneBrowser::key (int keyCode, int mods)
             ensureVisible (selected);
         }
     }
+    else if (keyCode == GLFW_KEY_TAB && view == View::tones && ! busy)
+    {
+        const auto gears = gearChoices();
+        if ((mods & GLFW_MOD_SHIFT) != 0)
+            sortIndex = (sortIndex + 1) % sortLabels.size();
+        else
+        {
+            gearIndex = (gearIndex + 1) % gears.size();
+            options.gear = gearIndex == 0 ? juce::String() : gears[gearIndex].toLowerCase().replace ("+", "-");
+        }
+        search (1);
+    }
     else if ((keyCode == GLFW_KEY_RIGHT || keyCode == GLFW_KEY_LEFT) && view == View::tones && ! busy)
     {
         const auto next = page.page + (keyCode == GLFW_KEY_RIGHT ? 1 : -1);
@@ -365,6 +451,22 @@ bool ToneBrowser::mouseButton (int button, bool pressed, float x, float y, doubl
     {
         if (view == View::login && y < lastPanel.getY() + headerHeight)
             beginLogin();
+        else if (view == View::tones && ! busy)
+        {
+            const auto chip = chipAt (x, y);
+            if (chip.row == 0)
+            {
+                gearIndex = chip.index;
+                const auto gears = gearChoices();
+                options.gear = gearIndex == 0 ? juce::String() : gears[gearIndex].toLowerCase().replace ("+", "-");
+                search (1);
+            }
+            else if (chip.row == 1)
+            {
+                sortIndex = chip.index;
+                search (1);
+            }
+        }
         return true;
     }
     const bool doubleClick = row == lastClickRow && now - lastClickTime < 0.4;
@@ -410,7 +512,8 @@ void ToneBrowser::draw (int windowWidth, int windowHeight, double now)
     nvgFontSize (vg, 11.0f);
     nvgTextLetterSpacing (vg, 0.8f);
     nvgFillColor (vg, palette::mutedText);
-    const auto title = view == View::models ? "TONE3000  /  " + currentTone.title.toUpperCase() : juce::String ("TONE3000");
+    const auto title = (mode == Mode::impulses ? juce::String ("TONE3000 IMPULSES") : juce::String ("TONE3000"))
+                     + (view == View::models ? "  /  " + currentTone.title.toUpperCase() : juce::String());
     nvgText (vg, x + 16.0f, y + 20.0f, title.toRawUTF8(), nullptr);
     nvgTextLetterSpacing (vg, 0.0f);
 
@@ -444,9 +547,31 @@ void ToneBrowser::draw (int windowWidth, int windowHeight, double now)
         nvgText (vg, x + 24.0f, y + 51.0f, view == View::models ? currentTone.title.toRawUTF8()
                                               : view == View::login ? "Log in with TONE3000  (Enter)" : "Finish the login in your browser...", nullptr);
     }
+    if (view == View::tones)
+    {
+        const auto gears = gearChoices();
+        auto drawChips = [&] (int row, const juce::StringArray& labels, int current)
+        {
+            for (int i = 0; i < labels.size(); ++i)
+            {
+                const auto chip = chipBounds (row, i, labels.size());
+                nvgBeginPath (vg);
+                nvgRoundedRect (vg, chip.getX(), chip.getY(), chip.getWidth(), chip.getHeight(), 9.0f);
+                nvgFillColor (vg, i == current ? alpha (palette::control, 0.85f) : nvgRGBAf (1, 1, 1, 0.06f));
+                nvgFill (vg);
+                nvgFontSize (vg, 8.5f);
+                nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                nvgFillColor (vg, i == current ? palette::nodeDark : alpha (palette::mutedText, 0.9f));
+                nvgText (vg, chip.getCentreX(), chip.getCentreY(), labels[i].toRawUTF8(), nullptr);
+            }
+        };
+        drawChips (0, gears, gearIndex);
+        drawChips (1, sortLabels, sortIndex);
+    }
     nvgFontSize (vg, 10.5f);
+    nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
     nvgFillColor (vg, busy ? palette::control : alpha (palette::mutedText, 0.85f));
-    nvgText (vg, x + 16.0f, y + 80.0f, status.toRawUTF8(), nullptr);
+    nvgText (vg, x + 16.0f, y + headerHeight - 10.0f, status.toRawUTF8(), nullptr);
 
     // Rows.
     const auto listTop = y + headerHeight;
@@ -467,9 +592,28 @@ void ToneBrowser::draw (int windowWidth, int windowHeight, double now)
             nvgFill (vg);
         }
         juce::String left, right;
+        auto textX = x + 20.0f;
         if (view == View::tones)
         {
             const auto& tone = page.tones[static_cast<std::size_t> (row)];
+            // Photo thumbnail (fetched on first sight, cached for the session).
+            requestImage (tone);
+            const juce::Rectangle<float> thumb (x + 16.0f, top + 3.0f, thumbWidth, rowHeight - 6.0f);
+            nvgBeginPath (vg);
+            nvgRoundedRect (vg, thumb.getX(), thumb.getY(), thumb.getWidth(), thumb.getHeight(), 3.0f);
+            if (const auto found = images.find (tone.id); found != images.end() && found->second > 0)
+            {
+                int iw = 0, ih = 0;
+                nvgImageSize (vg, found->second, &iw, &ih);
+                // Cover: scale the photo so it fills the thumb, centred.
+                const auto scale = juce::jmax (thumb.getWidth() / static_cast<float> (juce::jmax (1, iw)), thumb.getHeight() / static_cast<float> (juce::jmax (1, ih)));
+                const auto pw = static_cast<float> (iw) * scale, ph = static_cast<float> (ih) * scale;
+                nvgFillPaint (vg, nvgImagePattern (vg, thumb.getCentreX() - pw * 0.5f, thumb.getCentreY() - ph * 0.5f, pw, ph, 0.0f, found->second, 1.0f));
+            }
+            else
+                nvgFillColor (vg, nvgRGBAf (1, 1, 1, 0.05f));
+            nvgFill (vg);
+            textX = thumb.getRight() + 10.0f;
             left = tone.title;
             right = (tone.make.isNotEmpty() ? tone.make + "  ·  " : juce::String()) + tone.gear
                   + (tone.modelsCount > 0 ? "  ·  " + juce::String (tone.modelsCount) + (tone.modelsCount == 1 ? " model" : " models") : juce::String())
@@ -484,7 +628,7 @@ void ToneBrowser::draw (int windowWidth, int windowHeight, double now)
         nvgFontSize (vg, 12.5f);
         nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
         nvgFillColor (vg, palette::text);
-        nvgText (vg, x + 20.0f, top + rowHeight * 0.5f, left.toRawUTF8(), nullptr);
+        nvgText (vg, textX, top + rowHeight * 0.5f, left.toRawUTF8(), nullptr);
         nvgFontSize (vg, 10.0f);
         nvgTextAlign (vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
         nvgFillColor (vg, alpha (palette::mutedText, 0.9f));
@@ -496,7 +640,7 @@ void ToneBrowser::draw (int windowWidth, int windowHeight, double now)
     nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
     nvgFillColor (vg, alpha (palette::mutedText, 0.7f));
     nvgText (vg, x + 16.0f, y + h - 14.0f,
-             view == View::models ? "Enter / double-click downloads into the models folder   Esc back"
-                                  : "type to search   Enter searches or opens the selected tone   Left / Right pages   Esc closes", nullptr);
+             view == View::models ? "Enter / double-click loads it into the module and keeps the panel open - compare, then Esc"
+                                  : "type to search   Enter searches or opens the selected tone   Tab gear   Shift+Tab sort   Left / Right pages   Esc closes", nullptr);
 }
 } // namespace signalpatch::v2
