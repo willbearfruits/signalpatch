@@ -81,9 +81,14 @@ int main (int argc, char** argv)
     if (result.failed())
         std::fprintf (stderr, "Audio offline: %s\n", result.getErrorMessage().toRawUTF8());
     signalpatch::v2::RackView rack (engine, vg, font);
+    bool startOnBoard = false;
     for (int index = 1; index < argc; ++index)
-        if (argv[index][0] != '-')
+    {
+        if (juce::String (argv[index]) == "--board")
+            startOnBoard = true;
+        else if (argv[index][0] != '-')
             rack.loadPatchFromCommandLine (juce::File::getCurrentWorkingDirectory().getChildFile (argv[index]));
+    }
     glfwSetWindowUserPointer (window, &rack);
     glfwSetCursorPosCallback (window, [] (GLFWwindow* w, double x, double y) { rackFor (w)->mouseMove (x, y); });
     glfwSetMouseButtonCallback (window, [] (GLFWwindow* w, int button, int action, int mods)
@@ -117,6 +122,8 @@ int main (int argc, char** argv)
         int width = 0, height = 0;
         glfwGetWindowSize (window, &width, &height);
         rack.fitToPatch (width, height);
+        if (startOnBoard)
+            rack.showBoard();
     }
 
     while (! glfwWindowShouldClose (window))

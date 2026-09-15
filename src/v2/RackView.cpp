@@ -14,6 +14,22 @@ namespace signalpatch::v2
 {
 namespace
 {
+    int firstAudioInputPort (const DspNode& node)
+    {
+        for (int i = 0; i < node.getNumInputPorts(); ++i)
+            if (node.getInputPort (i).type == SignalType::audio)
+                return i;
+        return -1;
+    }
+
+    int firstAudioOutputPort (const DspNode& node)
+    {
+        for (int i = 0; i < node.getNumOutputPorts(); ++i)
+            if (node.getOutputPort (i).type == SignalType::audio)
+                return i;
+        return -1;
+    }
+
     constexpr float railHeight = 10.0f;
     constexpr float headerHeight = 34.0f;
     constexpr float portSpacing = 19.0f;
@@ -66,6 +82,7 @@ RackView::~RackView()
 void RackView::changeListenerCallback (juce::ChangeBroadcaster*)
 {
     structureDirty = true;
+    boardDirty = true;
     invalidateAllPlates();
     dirty = true;
 }
@@ -1118,6 +1135,563 @@ void RackView::showAudioMenu (double x, double y)
     dirty = true;
 }
 
+// ---------------------------------------------------------------- board
+
+juce::File RackView::slotFile (int slot)
+{
+    return documentsFolder ("board").getChildFile ("slot-" + juce::String (slot + 1) + ".signalpatch");
+}
+
+void RackView::setMode (Mode newMode)
+{
+    if (mode == newMode)
+        return;
+    mode = newMode;
+    menu.close();
+    draggingNode.reset();
+    knobDrag.reset();
+    cableDrag.reset();
+    panning = false;
+    if (mode == Mode::board)
+    {
+        boardDirty = true;
+        rebuildBoard();
+        fitBoard();
+    }
+    dirty = true;
+}
+
+void RackView::rebuildBoard()
+{
+    // Depth = longest audio path from a source (hardware input or a module
+    // with no audio input), relaxed a bounded number of times so guarded
+    // feedback cannot loop forever. Modules off the audio path go to the tray.
+    pedals.clear();
+    const auto& document = engine.getDocument();
+    const auto& nodes = document.getNodes();
+    std::unordered_map<NodeId, int> depth;
+    std::unordered_map<NodeId, bool> hasAudioIn, hasAudioOut, audioFed;
+    for (const auto& node : nodes)
+    {
+        hasAudioIn[node.id] = firstAudioInputPort (*node.processor) >= 0;
+        hasAudioOut[node.id] = firstAudioOutputPort (*node.processor) >= 0;
+        audioFed[node.id] = false;
+    }
+    std::vector<std::pair<NodeId, NodeId>> edges;
+    for (const auto& connection : document.getConnections())
+    {
+        const auto* source = document.findNode (connection.sourceNode);
+        if (source == nullptr || source->processor->getOutputPort (connection.sourcePort).type != SignalType::audio)
+            continue;
+        const auto* destination = document.findNode (connection.destinationNode);
+        if (destination == nullptr || destination->processor->getInputPort (connection.destinationPort).type != SignalType::audio)
+            continue;
+        edges.emplace_back (connection.sourceNode, connection.destinationNode);
+        audioFed[connection.destinationNode] = true;
+    }
+    for (const auto& node : nodes)
+        if (node.id == PatchDocument::hardwareInputId || (! audioFed[node.id] && hasAudioOut[node.id] && ! hasAudioIn[node.id]))
+            depth[node.id] = 0;
+    for (int iteration = 0; iteration < 64; ++iteration)
+    {
+        bool changed = false;
+        for (const auto& [from, to] : edges)
+        {
+            const auto fromDepth = depth.find (from);
+            if (fromDepth == depth.end())
+                continue;
+            const auto wanted = juce::jmin (fromDepth->second + 1, 40);
+            auto toDepth = depth.find (to);
+            if (toDepth == depth.end() || toDepth->second < wanted)
+            {
+                if (toDepth != depth.end() && iteration > 40)
+                    continue; // a cycle: stop pushing depths around
+                depth[to] = wanted;
+                changed = true;
+            }
+        }
+        if (! changed)
+            break;
+    }
+    int maxDepth = 0;
+    for (const auto& entry : depth)
+        maxDepth = juce::jmax (maxDepth, entry.second);
+    if (depth.count (PatchDocument::hardwareOutputId) > 0)
+        depth[PatchDocument::hardwareOutputId] = maxDepth = juce::jmax (maxDepth, 1);
+    for (auto& entry : depth)
+        if (entry.first == PatchDocument::hardwareOutputId)
+            entry.second = maxDepth + (maxDepth == depth[PatchDocument::hardwareOutputId] ? 0 : 0);
+
+    // Sort into columns; within a column keep the rack's top-to-bottom order.
+    std::vector<std::vector<const NodeModel*>> columns (static_cast<std::size_t> (maxDepth) + 2);
+    std::vector<const NodeModel*> tray;
+    for (const auto& node : nodes)
+    {
+        const auto found = depth.find (node.id);
+        if (found == depth.end())
+            tray.push_back (&node);
+        else
+            columns[static_cast<std::size_t> (node.id == PatchDocument::hardwareOutputId ? maxDepth + 1 : found->second)].push_back (&node);
+    }
+    for (auto& column : columns)
+        std::sort (column.begin(), column.end(), [] (const NodeModel* a, const NodeModel* b) { return a->position.y < b->position.y; });
+
+    const float gapX = 46.0f, gapY = 26.0f;
+    float x = 0.0f;
+    for (std::size_t columnIndex = 0; columnIndex < columns.size(); ++columnIndex)
+    {
+        const auto& column = columns[columnIndex];
+        if (column.empty())
+            continue;
+        float y = 0.0f, columnWidth = 0.0f;
+        for (const auto* node : column)
+        {
+            Pedal pedal;
+            pedal.id = node->id;
+            pedal.kind = node->processor->getKind();
+            pedal.hardware = node->hardware;
+            pedal.stomp = node->processor->isBypassable();
+            pedal.column = static_cast<int> (columnIndex);
+            const bool wide = pedal.kind == NodeKind::neuralAmpPlaceholder || pedal.kind == NodeKind::neuralPedal || pedal.kind == NodeKind::cabinet;
+            pedal.w = node->hardware ? 96.0f : wide ? 230.0f : 156.0f;
+            for (int index = 0; index < node->processor->getNumParameters() && pedal.knobs.size() < 4; ++index)
+            {
+                if (pedal.kind == NodeKind::stepSequencer && index >= 2) continue;
+                if (pedal.kind == NodeKind::drumMachine && index >= 5) continue;
+                pedal.knobs.push_back (index);
+            }
+            const auto knobRows = (static_cast<int> (pedal.knobs.size()) + 1) / 2;
+            pedal.h = node->hardware ? 150.0f : 96.0f + static_cast<float> (juce::jmax (1, knobRows)) * 72.0f + (wide ? 18.0f : 0.0f);
+            pedal.x = x;
+            pedal.y = y;
+            y += pedal.h + gapY;
+            columnWidth = juce::jmax (columnWidth, pedal.w);
+            pedals.push_back (std::move (pedal));
+        }
+        x += columnWidth + gapX;
+    }
+    // Tray: everything that never touches audio, in one row below the board.
+    float trayX = 0.0f, boardBottom = 0.0f;
+    for (const auto& pedal : pedals)
+        boardBottom = juce::jmax (boardBottom, pedal.y + pedal.h);
+    for (const auto* node : tray)
+    {
+        Pedal chip;
+        chip.id = node->id;
+        chip.kind = node->processor->getKind();
+        chip.tray = true;
+        chip.stomp = false;
+        chip.w = 132.0f;
+        chip.h = 34.0f;
+        chip.x = trayX;
+        chip.y = boardBottom + 56.0f;
+        trayX += chip.w + 12.0f;
+        pedals.push_back (std::move (chip));
+    }
+    boardDirty = false;
+}
+
+void RackView::fitBoard()
+{
+    if (pedals.empty())
+        return;
+    float minX = 1.0e9f, minY = 1.0e9f, maxX = -1.0e9f, maxY = -1.0e9f;
+    for (const auto& pedal : pedals)
+    {
+        minX = juce::jmin (minX, pedal.x); minY = juce::jmin (minY, pedal.y);
+        maxX = juce::jmax (maxX, pedal.x + pedal.w); maxY = juce::jmax (maxY, pedal.y + pedal.h);
+    }
+    const auto left = 0.0f; // the palette is hidden on the board
+    const auto availW = static_cast<float> (windowW) - left - 60.0f;
+    const auto availH = static_cast<float> (windowH) - hudHeight - slotBarHeight - 60.0f;
+    boardScale = juce::jlimit (0.35f, 1.35f, juce::jmin (availW / (maxX - minX), availH / (maxY - minY)));
+    boardPanX = left + 30.0f + (availW - (maxX - minX) * boardScale) * 0.5 - minX * boardScale;
+    boardPanY = hudHeight + 30.0f + (availH - (maxY - minY) * boardScale) * 0.5 - minY * boardScale;
+    dirty = true;
+}
+
+juce::Point<float> RackView::toBoard (double x, double y) const noexcept
+{
+    return { static_cast<float> ((x - boardPanX) / boardScale), static_cast<float> ((y - boardPanY) / boardScale) };
+}
+
+const RackView::Pedal* RackView::pedalAt (juce::Point<float> board) const noexcept
+{
+    for (auto it = pedals.rbegin(); it != pedals.rend(); ++it)
+        if (juce::Rectangle<float> (it->x, it->y, it->w, it->h).contains (board))
+            return &*it;
+    return nullptr;
+}
+
+juce::Point<float> RackView::pedalKnobCentre (const Pedal& pedal, int knobIndex) const noexcept
+{
+    const auto columns = pedal.knobs.size() > 2 ? 2 : static_cast<int> (pedal.knobs.size());
+    const auto column = knobIndex % 2, row = knobIndex / 2;
+    const auto columnWidth = pedal.w / static_cast<float> (juce::jmax (1, columns));
+    const bool wide = pedal.kind == NodeKind::neuralAmpPlaceholder || pedal.kind == NodeKind::neuralPedal || pedal.kind == NodeKind::cabinet;
+    return { pedal.x + columnWidth * (static_cast<float> (column) + 0.5f), pedal.y + 80.0f + (wide ? 18.0f : 0.0f) + static_cast<float> (row) * 72.0f };
+}
+
+juce::Point<float> RackView::pedalStompCentre (const Pedal& pedal) const noexcept
+{
+    return { pedal.x + pedal.w * 0.5f, pedal.y + pedal.h - 24.0f };
+}
+
+void RackView::drawBoard (int width, int height, double now)
+{
+    if (boardDirty)
+        rebuildBoard();
+    const auto& document = engine.getDocument();
+    nvgSave (vg);
+    nvgTranslate (vg, static_cast<float> (boardPanX), static_cast<float> (boardPanY));
+    nvgScale (vg, boardScale, boardScale);
+
+    auto pedalFor = [this] (NodeId id) -> const Pedal*
+    {
+        for (const auto& pedal : pedals)
+            if (pedal.id == id)
+                return &pedal;
+        return nullptr;
+    };
+
+    // Flow lines between pedals (audio connections only).
+    for (const auto& connection : document.getConnections())
+    {
+        const auto* source = document.findNode (connection.sourceNode);
+        if (source == nullptr || source->processor->getOutputPort (connection.sourcePort).type != SignalType::audio)
+            continue;
+        const auto* from = pedalFor (connection.sourceNode);
+        const auto* to = pedalFor (connection.destinationNode);
+        if (from == nullptr || to == nullptr || from->tray || to->tray)
+            continue;
+        const juce::Point<float> a { from->x + from->w, from->y + from->h * 0.5f };
+        const juce::Point<float> b { to->x, to->y + to->h * 0.5f };
+        const auto reach = juce::jmax (30.0f, std::abs (b.x - a.x) * 0.5f);
+        const auto colour = accent (from->kind);
+        const auto energy = juce::jlimit (0.0f, 1.0f, std::sqrt (juce::jmax (0.0f, source->processor->outputRms (connection.sourcePort))));
+        nvgBeginPath (vg);
+        nvgMoveTo (vg, a.x, a.y);
+        nvgBezierTo (vg, a.x + reach, a.y, b.x - reach, b.y, b.x, b.y);
+        nvgStrokeColor (vg, alpha (colour, 0.08f + 0.3f * energy));
+        nvgStrokeWidth (vg, 8.0f);
+        nvgLineCap (vg, NVG_ROUND);
+        nvgStroke (vg);
+        nvgStrokeColor (vg, alpha (colour, 0.5f + 0.5f * energy));
+        nvgStrokeWidth (vg, 2.0f + 2.0f * energy);
+        nvgStroke (vg);
+        if (energy > 0.012f)
+        {
+            const auto t = static_cast<float> (std::fmod (now * 0.5, 1.0));
+            const auto u = 1.0f - t;
+            const juce::Point<float> c1 (a.x + reach, a.y), c2 (b.x - reach, b.y);
+            const auto point = a * (u * u * u) + c1 * (3.0f * u * u * t) + c2 * (3.0f * u * t * t) + b * (t * t * t);
+            nvgBeginPath (vg);
+            nvgCircle (vg, point.x, point.y, 2.5f + 2.0f * energy);
+            nvgFillColor (vg, alpha (lighter (colour, 0.6f), 0.9f));
+            nvgFill (vg);
+        }
+    }
+
+    for (const auto& pedal : pedals)
+    {
+        const auto* model = document.findNode (pedal.id);
+        if (model == nullptr)
+            continue;
+        const auto colour = accent (pedal.kind);
+        const bool bypassed = model->processor->isBypassed();
+        const bool selected = selectedNode == pedal.id;
+
+        if (pedal.tray)
+        {
+            nvgBeginPath (vg);
+            nvgRoundedRect (vg, pedal.x, pedal.y, pedal.w, pedal.h, 6.0f);
+            nvgFillColor (vg, mix (palette::panelRaised, colour, 0.15f));
+            nvgFill (vg);
+            nvgStrokeColor (vg, selected ? palette::selection : alpha (colour, 0.5f));
+            nvgStrokeWidth (vg, selected ? 2.0f : 1.0f);
+            nvgStroke (vg);
+            nvgFontFaceId (vg, font);
+            nvgFontSize (vg, 10.5f);
+            nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+            nvgFillColor (vg, palette::text);
+            nvgText (vg, pedal.x + 12.0f, pedal.y + pedal.h * 0.5f, model->processor->getName().toUpperCase().toRawUTF8(), nullptr);
+            continue;
+        }
+
+        // Enclosure.
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, pedal.x - 2.0f, pedal.y + 6.0f, pedal.w + 4.0f, pedal.h + 2.0f, 12.0f);
+        nvgFillColor (vg, nvgRGBAf (0, 0, 0, 0.4f));
+        nvgFill (vg);
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, pedal.x, pedal.y, pedal.w, pedal.h, 10.0f);
+        nvgFillPaint (vg, nvgLinearGradient (vg, pedal.x, pedal.y, pedal.x, pedal.y + pedal.h,
+                                              mix (palette::nodeTop, colour, bypassed ? 0.12f : 0.45f),
+                                              mix (palette::nodeDark, colour, bypassed ? 0.06f : 0.22f)));
+        nvgFill (vg);
+        nvgStrokeColor (vg, selected ? palette::selection : nvgRGBAf (1, 1, 1, 0.1f));
+        nvgStrokeWidth (vg, selected ? 2.5f : 1.0f);
+        nvgStroke (vg);
+
+        nvgFontFaceId (vg, font);
+        nvgFontSize (vg, pedal.hardware ? 11.0f : 13.0f);
+        nvgTextLetterSpacing (vg, 0.8f);
+        nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgFillColor (vg, alpha (palette::text, bypassed ? 0.55f : 1.0f));
+        const auto title = pedal.hardware ? juce::String (pedal.kind == NodeKind::hardwareInput ? "IN" : "OUT")
+                                          : model->processor->getName().toUpperCase();
+        nvgText (vg, pedal.x + pedal.w * 0.5f, pedal.y + 22.0f, title.toRawUTF8(), nullptr);
+        nvgTextLetterSpacing (vg, 0.0f);
+
+        // Level meter (hardware) or knobs.
+        if (pedal.hardware)
+        {
+            float level = 0.0f;
+            for (int port = 0; port < model->processor->getNumOutputPorts(); ++port)
+                level = juce::jmax (level, model->processor->outputRms (port));
+            if (pedal.kind == NodeKind::hardwareOutput)
+                level = model->processor->inputWaveform().rms;
+            level = juce::jlimit (0.0f, 1.0f, std::sqrt (level));
+            const juce::Rectangle<float> meter (pedal.x + 30.0f, pedal.y + 44.0f, pedal.w - 60.0f, pedal.h - 70.0f);
+            nvgBeginPath (vg);
+            nvgRoundedRect (vg, meter.getX(), meter.getY(), meter.getWidth(), meter.getHeight(), 4.0f);
+            nvgFillColor (vg, palette::nodeDark);
+            nvgFill (vg);
+            if (level > 0.005f)
+            {
+                nvgBeginPath (vg);
+                nvgRoundedRect (vg, meter.getX() + 2.0f, meter.getBottom() - 2.0f - (meter.getHeight() - 4.0f) * level,
+                                meter.getWidth() - 4.0f, (meter.getHeight() - 4.0f) * level, 3.0f);
+                nvgFillPaint (vg, nvgLinearGradient (vg, 0, meter.getBottom(), 0, meter.getY(), colour, palette::warning));
+                nvgFill (vg);
+            }
+        }
+        else
+        {
+            for (std::size_t knob = 0; knob < pedal.knobs.size(); ++knob)
+            {
+                const auto& parameter = model->processor->getParameter (pedal.knobs[knob]);
+                drawKnob (pedalKnobCentre (pedal, static_cast<int> (knob)), 19.0f, parameter.getNormalisedValue(), colour,
+                          parameter.name.toUpperCase(), formatValue (parameter));
+            }
+            const auto status = model->processor->statusText();
+            if (status.isNotEmpty() && (pedal.kind == NodeKind::neuralAmpPlaceholder || pedal.kind == NodeKind::neuralPedal || pedal.kind == NodeKind::cabinet))
+            {
+                nvgFontSize (vg, 8.5f);
+                nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                nvgFillColor (vg, alpha (palette::mutedText, 0.9f));
+                nvgText (vg, pedal.x + pedal.w * 0.5f, pedal.y + 42.0f, status.toRawUTF8(), nullptr);
+            }
+        }
+
+        // Footswitch with its LED.
+        if (pedal.stomp)
+        {
+            const auto centre = pedalStompCentre (pedal);
+            nvgBeginPath (vg);
+            nvgCircle (vg, centre.x, centre.y, 15.0f);
+            nvgFillColor (vg, nvgRGBAf (0, 0, 0, 0.5f));
+            nvgFill (vg);
+            nvgBeginPath (vg);
+            nvgCircle (vg, centre.x, centre.y, 13.0f);
+            nvgFillPaint (vg, nvgLinearGradient (vg, centre.x, centre.y - 13.0f, centre.x, centre.y + 13.0f,
+                                                  lighter (palette::nodeTop, 0.3f), lighter (palette::nodeDark, 0.1f)));
+            nvgFill (vg);
+            nvgBeginPath (vg);
+            nvgCircle (vg, centre.x, centre.y, 10.0f);
+            nvgStrokeColor (vg, nvgRGBAf (1, 1, 1, 0.14f));
+            nvgStrokeWidth (vg, 1.2f);
+            nvgStroke (vg);
+            const auto ledX = centre.x - 34.0f;
+            if (! bypassed)
+            {
+                nvgBeginPath (vg);
+                nvgCircle (vg, ledX, centre.y, 8.0f);
+                nvgFillColor (vg, alpha (palette::warning, 0.35f));
+                nvgFill (vg);
+            }
+            nvgBeginPath (vg);
+            nvgCircle (vg, ledX, centre.y, 4.0f);
+            nvgFillColor (vg, bypassed ? palette::nodeDark : palette::warning);
+            nvgFill (vg);
+        }
+    }
+    nvgRestore (vg);
+}
+
+void RackView::drawSlotBar (int width, int height)
+{
+    const auto top = static_cast<float> (height) - slotBarHeight;
+    nvgBeginPath (vg);
+    nvgRect (vg, 0, top, static_cast<float> (width), slotBarHeight);
+    nvgFillColor (vg, alpha (palette::panel, 0.96f));
+    nvgFill (vg);
+    const auto left = 0.0f;
+    const auto slotW = (static_cast<float> (width) - left - 24.0f - static_cast<float> (slotCount - 1) * 10.0f) / static_cast<float> (slotCount);
+    nvgFontFaceId (vg, font);
+    for (int slot = 0; slot < slotCount; ++slot)
+    {
+        const juce::Rectangle<float> box (left + 12.0f + static_cast<float> (slot) * (slotW + 10.0f), top + 10.0f, slotW, slotBarHeight - 20.0f);
+        const auto file = slotFile (slot);
+        const bool exists = file.existsAsFile();
+        const bool active = slot == activeSlot;
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, box.getX(), box.getY(), box.getWidth(), box.getHeight(), 6.0f);
+        nvgFillColor (vg, active ? mix (palette::panelRaised, palette::selection, 0.25f) : palette::panelRaised);
+        nvgFill (vg);
+        nvgStrokeColor (vg, active ? palette::selection : nvgRGBAf (1, 1, 1, exists ? 0.14f : 0.06f));
+        nvgStrokeWidth (vg, active ? 2.0f : 1.0f);
+        nvgStroke (vg);
+        nvgFontSize (vg, 16.0f);
+        nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvgFillColor (vg, active ? palette::selection : palette::mutedText);
+        nvgText (vg, box.getX() + 14.0f, box.getCentreY(), juce::String (slot + 1).toRawUTF8(), nullptr);
+        nvgFontSize (vg, 11.0f);
+        nvgFillColor (vg, exists ? palette::text : alpha (palette::mutedText, 0.5f));
+        nvgText (vg, box.getX() + 36.0f, box.getCentreY(), (exists ? file.getFileNameWithoutExtension() : juce::String ("empty - Shift+click to store")).toRawUTF8(), nullptr);
+    }
+}
+
+void RackView::loadSlot (int slot)
+{
+    const auto file = slotFile (slot);
+    if (! file.existsAsFile())
+    {
+        say ("Slot " + juce::String (slot + 1) + " is empty - Shift+click (or Shift+" + juce::String (slot + 1) + ") stores the current rig there");
+        return;
+    }
+    const auto result = engine.loadPatch (file);
+    if (result.failed())
+    {
+        say (result.getErrorMessage());
+        return;
+    }
+    currentFile = file;
+    activeSlot = slot;
+    selectedNode = 0;
+    selectedCable.reset();
+    structureDirty = true;
+    boardDirty = true;
+    engine.setPanicMuted (false); // a rig change on stage fades straight in
+    say ("Slot " + juce::String (slot + 1) + ": " + file.getFileNameWithoutExtension());
+    if (mode == Mode::board)
+    {
+        rebuildBoard();
+        fitBoard();
+    }
+    dirty = true;
+}
+
+void RackView::storeSlot (int slot)
+{
+    const auto file = slotFile (slot);
+    const auto result = engine.savePatch (file);
+    if (result.wasOk())
+    {
+        activeSlot = slot;
+        say ("Stored the current rig in slot " + juce::String (slot + 1));
+    }
+    else
+        say (result.getErrorMessage());
+}
+
+bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, double y)
+{
+    const bool shift = (mods & GLFW_MOD_SHIFT) != 0;
+    if (pressed && y >= windowH - slotBarHeight)
+    {
+        const auto left = 0.0f;
+        const auto slotW = (static_cast<float> (windowW) - left - 24.0f - static_cast<float> (slotCount - 1) * 10.0f) / static_cast<float> (slotCount);
+        const auto slot = static_cast<int> ((x - left - 12.0) / (slotW + 10.0f));
+        if (slot >= 0 && slot < slotCount)
+        {
+            if (shift) storeSlot (slot); else loadSlot (slot);
+        }
+        return true;
+    }
+    const auto board = toBoard (x, y);
+    if (! pressed)
+    {
+        if (knobDrag.has_value())
+            engine.closeEditGesture();
+        knobDrag.reset();
+        panning = false;
+        dirty = true;
+        return true;
+    }
+    if (button == GLFW_MOUSE_BUTTON_MIDDLE)
+    {
+        panning = true;
+        panStartX = x; panStartY = y; panOriginX = boardPanX; panOriginY = boardPanY;
+        return true;
+    }
+    const auto* pedal = pedalAt (board);
+    if (pedal == nullptr)
+    {
+        if (button == GLFW_MOUSE_BUTTON_LEFT)
+        {
+            selectedNode = 0;
+            panning = true;
+            panStartX = x; panStartY = y; panOriginX = boardPanX; panOriginY = boardPanY;
+        }
+        dirty = true;
+        return true;
+    }
+    const auto* model = engine.getDocument().findNode (pedal->id);
+    if (model == nullptr)
+        return true;
+    if (button == GLFW_MOUSE_BUTTON_RIGHT)
+    {
+        selectedNode = pedal->id;
+        if (const auto* layout = layoutFor (pedal->id))
+            showModuleMenu (*layout, x, y);
+        return true;
+    }
+    const bool doubleClick = lastTick - lastClickTime < 0.35 && juce::Point<double> (x, y).getDistanceFrom ({ lastClickX, lastClickY }) < 6.0;
+    lastClickTime = lastTick; lastClickX = x; lastClickY = y;
+    if (! pedal->tray)
+    {
+        for (std::size_t knob = 0; knob < pedal->knobs.size(); ++knob)
+            if (pedalKnobCentre (*pedal, static_cast<int> (knob)).getDistanceFrom (board) <= 24.0f)
+            {
+                const auto parameterIndex = pedal->knobs[knob];
+                if (doubleClick)
+                {
+                    engine.setParameter (pedal->id, parameterIndex, model->processor->getParameter (parameterIndex).defaultValue);
+                    engine.closeEditGesture();
+                    invalidatePlate (pedal->id);
+                }
+                else
+                    knobDrag = KnobDrag { pedal->id, parameterIndex, y, model->processor->getParameter (parameterIndex).getNormalisedValue() };
+                selectedNode = pedal->id;
+                dirty = true;
+                return true;
+            }
+        if (pedal->stomp && pedalStompCentre (*pedal).getDistanceFrom (board) <= 18.0f)
+        {
+            engine.setNodeBypassed (pedal->id, ! model->processor->isBypassed());
+            dirty = true;
+            return true;
+        }
+    }
+    selectedNode = pedal->id;
+    if (doubleClick)
+    {
+        // Jump to the module in the rack.
+        const auto id = pedal->id;
+        setMode (Mode::rack);
+        if (const auto* layout = layoutFor (id))
+        {
+            const auto origin = nodePosition (id);
+            targetZoom = zoom = 1.0;
+            panX = (windowW + (paletteVisible ? paletteWidth : 0.0f)) * 0.5 - (origin.x + layout->w * 0.5f);
+            panY = windowH * 0.5 - (origin.y + layout->h * 0.5f);
+        }
+    }
+    dirty = true;
+    return true;
+}
+
 // ---------------------------------------------------------------- palette
 
 float RackView::paletteRowTop (int row) const noexcept
@@ -1778,7 +2352,16 @@ void RackView::drawHud (int width, int height, double now)
                     + juce::String (plateRenders) + " plates rasterised";
     nvgText (vg, 150.0f, 17.0f, line.toRawUTF8(), nullptr);
 
-    // AUDIO and FILE buttons and the current patch name.
+    // View toggle, AUDIO and FILE buttons and the current patch name.
+    nvgBeginPath (vg);
+    nvgRoundedRect (vg, static_cast<float> (width) - 392.0f, 6.0f, 86.0f, 22.0f, 4.0f);
+    nvgFillColor (vg, mode == Mode::board ? mix (palette::panelRaised, palette::selection, 0.3f) : palette::panelRaised);
+    nvgFill (vg);
+    nvgFontSize (vg, 10.5f);
+    nvgTextLetterSpacing (vg, 0.8f);
+    nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    nvgFillColor (vg, palette::text);
+    nvgText (vg, static_cast<float> (width) - 349.0f, 17.0f, mode == Mode::board ? "RACK  (Tab)" : "BOARD  (Tab)", nullptr);
     nvgBeginPath (vg);
     nvgRoundedRect (vg, static_cast<float> (width) - 300.0f, 6.0f, 54.0f, 22.0f, 4.0f);
     nvgFillColor (vg, palette::panelRaised);
@@ -1800,7 +2383,7 @@ void RackView::drawHud (int width, int height, double now)
     nvgTextLetterSpacing (vg, 0.0f);
     nvgTextAlign (vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
     nvgFillColor (vg, palette::mutedText);
-    nvgText (vg, static_cast<float> (width) - 310.0f, 17.0f,
+    nvgText (vg, static_cast<float> (width) - 402.0f, 17.0f,
              (currentFile == juce::File() ? juce::String ("untitled") : currentFile.getFileName()).toRawUTF8(), nullptr);
 
     if (status.panicMuted)
@@ -1862,6 +2445,29 @@ void RackView::render (int width, int height, float ratio, double now)
     glViewport (0, 0, static_cast<int> (width * ratio), static_cast<int> (height * ratio));
 
     nvgBeginFrame (vg, static_cast<float> (width), static_cast<float> (height), ratio);
+    if (mode == Mode::board)
+    {
+        nvgBeginPath (vg);
+        nvgRect (vg, 0, 0, static_cast<float> (width), static_cast<float> (height));
+        nvgFillColor (vg, palette::workspace);
+        nvgFill (vg);
+        drawBoard (width, height, now);
+        drawSlotBar (width, height);
+        drawHud (width, height, now);
+        menu.draw (width, height);
+        browser.draw (width, height);
+        prompt.draw (width, height, now);
+        nvgEndFrame (vg);
+        lastFrameMs = juce::Time::getMillisecondCounterHiRes() - start;
+        if (lastRenderTime > 0.0)
+        {
+            const auto instantaneous = 1.0 / juce::jmax (1.0e-3, now - lastRenderTime);
+            fps = fps > 0.0 ? fps * 0.9 + instantaneous * 0.1 : instantaneous;
+        }
+        lastRenderTime = now;
+        dirty = false;
+        return;
+    }
     drawBackground (width, height);
 
     nvgSave (vg);
@@ -1950,7 +2556,7 @@ void RackView::mouseMove (double x, double y)
         return;
     }
     {
-        const auto hovered = paletteRowAt (x, y);
+        const auto hovered = mode == Mode::rack ? paletteRowAt (x, y) : -1;
         if (hovered != paletteHover)
         {
             paletteHover = hovered;
@@ -1994,8 +2600,16 @@ void RackView::mouseMove (double x, double y)
     }
     else if (panning)
     {
-        panX = panOriginX + (x - panStartX);
-        panY = panOriginY + (y - panStartY);
+        if (mode == Mode::board)
+        {
+            boardPanX = panOriginX + (x - panStartX);
+            boardPanY = panOriginY + (y - panStartY);
+        }
+        else
+        {
+            panX = panOriginX + (x - panStartX);
+            panY = panOriginY + (y - panStartY);
+        }
         dirty = true;
     }
 }
@@ -2052,15 +2666,27 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
         dirty = true;
         return;
     }
-    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && paletteVisible && x < paletteWidth && y >= hudHeight)
+    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && paletteVisible && mode == Mode::rack && x < paletteWidth && y >= hudHeight)
     {
         const auto row = paletteRowAt (x, y);
         if (row >= 0)
             paletteDrag = PaletteDrag { moduleCatalogue()[static_cast<std::size_t> (row)].kind, x, y, false };
         return;
     }
-    if (pressed && paletteVisible && x < paletteWidth && y >= hudHeight)
+    if (pressed && paletteVisible && mode == Mode::rack && x < paletteWidth && y >= hudHeight)
         return; // clicks on the panel never reach the canvas
+
+    // View toggle in the header strip.
+    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < hudHeight && x >= windowW - 392.0 && x < windowW - 306.0)
+    {
+        setMode (mode == Mode::rack ? Mode::board : Mode::rack);
+        return;
+    }
+    if (mode == Mode::board)
+    {
+        boardMouseButton (button, pressed, mods, x, y);
+        return;
+    }
 
     if (pressed && button == GLFW_MOUSE_BUTTON_RIGHT)
     {
@@ -2285,6 +2911,15 @@ void RackView::scroll (double dx, double dy, int mods, double x, double y)
         dirty = true;
         return;
     }
+    if (mode == Mode::board)
+    {
+        const auto before = toBoard (x, y);
+        boardScale = juce::jlimit (0.3f, 2.0f, boardScale * static_cast<float> (std::pow (1.12, dy)));
+        boardPanX = x - before.x * boardScale;
+        boardPanY = y - before.y * boardScale;
+        dirty = true;
+        return;
+    }
     targetZoom = juce::jlimit (0.25, 3.0, targetZoom * std::pow (1.12, dy));
     zoomAnchorX = x;
     zoomAnchorY = y;
@@ -2336,6 +2971,16 @@ void RackView::key (int keyCode, bool pressed, int mods)
     const bool shift = (mods & GLFW_MOD_SHIFT) != 0;
     auto say = [this] (const juce::String& text) { message = text; messageUntil = lastTick + 2.5; dirty = true; };
 
+    if (keyCode == GLFW_KEY_TAB)
+    {
+        setMode (mode == Mode::rack ? Mode::board : Mode::rack);
+        return;
+    }
+    if (keyCode >= GLFW_KEY_1 && keyCode <= GLFW_KEY_5 && ! ctrl)
+    {
+        if (shift) storeSlot (keyCode - GLFW_KEY_1); else loadSlot (keyCode - GLFW_KEY_1);
+        return;
+    }
     if (keyCode == GLFW_KEY_DELETE || keyCode == GLFW_KEY_BACKSPACE)
         deleteSelection();
     else if (ctrl && keyCode == GLFW_KEY_Z && shift)
@@ -2386,9 +3031,10 @@ void RackView::key (int keyCode, bool pressed, int mods)
     }
     else if (keyCode == GLFW_KEY_F)
     {
-        int width = 0, height = 0;
-        glfwGetWindowSize (glfwGetCurrentContext(), &width, &height);
-        fitToPatch (width, height);
+        if (mode == Mode::board)
+            fitBoard();
+        else
+            fitToPatch (windowW, windowH);
     }
     else if (keyCode == GLFW_KEY_0 && ctrl)
     {

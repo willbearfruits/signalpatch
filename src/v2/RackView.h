@@ -38,6 +38,8 @@ public:
 
     void fitToPatch (int width, int height);
     void loadPatchFromCommandLine (const juce::File& file) { openPatchFile (file); }
+    /** --board: open on the pedalboard instead of the rack. */
+    void showBoard() { setMode (Mode::board); }
     /** Close request from the window or Ctrl+Q: asks about unsaved changes first. */
     void requestQuit();
 
@@ -170,6 +172,40 @@ private:
     std::optional<KnobDrag> knobDrag;
     std::optional<CableDrag> cableDrag;
     std::optional<NodeId> sequencerDrag; // painting step values across the preview
+
+    // Board view: the same patch arranged by signal flow as pedals, with five
+    // rig slots along the bottom. Rack and board are two faces of one graph.
+    enum class Mode { rack, board };
+    struct Pedal
+    {
+        NodeId id = 0;
+        NodeKind kind = NodeKind::gain;
+        float x = 0.0f, y = 0.0f, w = 150.0f, h = 210.0f;
+        int column = 0;
+        std::vector<int> knobs; // up to four parameter indices
+        bool hardware = false, stomp = false, tray = false;
+    };
+    Mode mode = Mode::rack;
+    std::vector<Pedal> pedals;
+    float boardScale = 1.0f;
+    double boardPanX = 0.0, boardPanY = 0.0;
+    bool boardDirty = true;
+    int activeSlot = -1;
+    static constexpr int slotCount = 5;
+    static constexpr float slotBarHeight = 64.0f;
+    void rebuildBoard();
+    void fitBoard();
+    void drawBoard (int width, int height, double now);
+    void drawSlotBar (int width, int height);
+    [[nodiscard]] const Pedal* pedalAt (juce::Point<float> board) const noexcept;
+    [[nodiscard]] juce::Point<float> toBoard (double x, double y) const noexcept;
+    [[nodiscard]] juce::Point<float> pedalKnobCentre (const Pedal& pedal, int knobIndex) const noexcept;
+    [[nodiscard]] juce::Point<float> pedalStompCentre (const Pedal& pedal) const noexcept;
+    [[nodiscard]] static juce::File slotFile (int slot);
+    void loadSlot (int slot);
+    void storeSlot (int slot);
+    bool boardMouseButton (int button, bool pressed, int mods, double x, double y);
+    void setMode (Mode newMode);
 
     // Module palette down the left edge: click adds at the view centre, drag
     // drops the module where the pointer lands.
