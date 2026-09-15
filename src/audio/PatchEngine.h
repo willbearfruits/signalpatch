@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <unordered_map>
 
 namespace signalpatch
 {
@@ -159,6 +160,9 @@ private:
     juce::String deviceError;
     bool initialised = false;
     bool modifiedSinceSave = false;
+    std::unordered_map<NodeId, juce::uint32> savedAudioVersions;    // per explicit save target
+    std::unordered_map<NodeId, juce::uint32> autosavedAudioVersions; // per autosave
+    juce::File savedAudioTarget;
     bool audioCallbackRegistered = false;
     bool restoredAudioDeviceState = false;
     juce::String configuredDeviceSignature;

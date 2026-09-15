@@ -41,11 +41,14 @@ juce::Result PatchEngine::initialise()
         const auto autosave = autosaveFile();
         if (autosave.existsAsFile())
         {
-            const auto parsed = juce::JSON::parse (autosave);
+            auto parsed = juce::JSON::parse (autosave);
+            if (! parsed.isVoid())
+                bundle::rebaseAssetPaths (parsed, autosave.getParentDirectory(), false);
             if (! parsed.isVoid()
                 && document.loadJson (parsed).wasOk()
                 && ! document.getConnections().empty())
             {
+                bundle::loadAudioContent (document, parsed, autosave.getParentDirectory());
                 setPanicMuted (true);
                 restored = compileAndPublish (false, false);
                 if (restored)
@@ -510,8 +513,12 @@ juce::Result PatchEngine::savePatch (const juce::File& file)
         return juce::Result::fail ("No patch file selected.");
     if (! file.getParentDirectory().createDirectory())
         return juce::Result::fail ("Could not create the patch directory.");
-    auto json = document.toJson();
-    bundle::rebaseAssetPaths (json, file.getParentDirectory(), true);
+    if (file != savedAudioTarget)
+    {
+        savedAudioVersions.clear(); // a new target needs its own audio files
+        savedAudioTarget = file;
+    }
+    auto json = bundle::toJsonWithAudio (document, file, savedAudioVersions);
     if (! file.replaceWithText (juce::JSON::toString (json, true)))
         return juce::Result::fail ("Could not write " + file.getFullPathName());
     modifiedSinceSave = false;
@@ -677,9 +684,12 @@ juce::Result PatchEngine::loadPatch (const juce::File& file)
     const auto result = document.loadJson (parsed);
     if (result.failed())
         return result;
+    bundle::loadAudioContent (document, parsed, file.getParentDirectory());
     if (! compileAndPublish (false))
         return juce::Result::fail (graphMessage);
     modifiedSinceSave = false;
+    savedAudioVersions.clear();
+    savedAudioTarget = juce::File();
     graphMessage = "Patch loaded muted - press PANIC to fade audio back in";
     return juce::Result::ok();
 }
@@ -937,7 +947,10 @@ void PatchEngine::writeAutosaveIfDue()
 
     const auto file = autosaveFile();
     file.getParentDirectory().createDirectory();
-    if (file.replaceWithText (juce::JSON::toString (document.toJson(), true)))
+    // Audio files are rewritten only when a recording changed since the last
+    // autosave; the JSON is cheap and written every time.
+    const auto json = bundle::toJsonWithAudio (document, file, autosavedAudioVersions);
+    if (file.replaceWithText (juce::JSON::toString (json, true)))
         documentDirty = false;
 }
 } // namespace signalpatch

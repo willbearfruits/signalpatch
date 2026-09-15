@@ -217,6 +217,17 @@ public:
     virtual void resetSafety() noexcept {}
     [[nodiscard]] virtual juce::String statusText() const { return {}; }
 
+    /** Recorded audio that belongs to the patch (loops, tapes, samples).
+        Message thread only. exportAudioContent returns one channel per
+        lane, trimmed to what was recorded; importAudioContent installs it
+        into a freshly prepared node. audioContentVersion changes whenever a
+        recording starts, stops, is undone or cleared, so autosave knows when
+        the files on disk are stale. */
+    [[nodiscard]] virtual bool hasAudioContent() const noexcept { return false; }
+    [[nodiscard]] virtual juce::AudioBuffer<float> exportAudioContent() const { return {}; }
+    virtual void importAudioContent (const juce::AudioBuffer<float>&) {}
+    [[nodiscard]] virtual juce::uint32 audioContentVersion() const noexcept { return 0; }
+
 protected:
     PortInfo& addInputPort (juce::String name, SignalType type);
     PortInfo& addOutputPort (juce::String name, SignalType type);

@@ -14,6 +14,7 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #if defined(_WIN32)
@@ -1561,6 +1562,52 @@ void testLooperRecordsClosesOverdubsAndUndoes()
     expect (node->statusText().startsWith ("EMPTY"), "clear should empty the loop");
 }
 
+void testRecordedAudioSavesAndLoadsWithThePatch()
+{
+    const auto temp = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getChildFile ("signalpatch-audio-test-" + juce::Uuid().toString());
+    temp.createDirectory();
+    const auto patchFile = temp.getChildFile ("loops.signalpatch");
+
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    document.prepareAll (48000.0, 64);
+    const auto looper = document.addNode (NodeKind::looper, { 0.0f, 0.0f }, 700);
+    juce::AudioBuffer<float> loop (1, 4800);
+    for (int i = 0; i < 4800; ++i)
+        loop.setSample (0, i, std::sin (static_cast<float> (i) * 0.01f) * 0.5f);
+    document.findNode (looper)->processor->importAudioContent (loop);
+    expect (document.findNode (looper)->processor->hasAudioContent(), "looper should report content after import");
+
+    std::unordered_map<NodeId, juce::uint32> saved;
+    const auto json = bundle::toJsonWithAudio (document, patchFile, saved);
+    const auto audioFile = temp.getChildFile ("assets").getChildFile ("audio").getChildFile ("loops-700.wav");
+    expect (audioFile.existsAsFile(), "loop WAV not written next to the patch");
+    juce::String stored;
+    for (const auto& nodeValue : *json.getDynamicObject()->getProperty ("nodes").getArray())
+        if (auto* object = nodeValue.getDynamicObject(); object != nullptr && object->hasProperty ("audio"))
+            stored = object->getProperty ("audio").toString();
+    expect (stored == "assets/audio/loops-700.wav", "audio path should be relative: " + stored.toStdString());
+
+    // Unchanged content is not rewritten; changed content is.
+    const auto modified = audioFile.getLastModificationTime();
+    juce::Thread::sleep (20);
+    bundle::toJsonWithAudio (document, patchFile, saved);
+    expect (audioFile.getLastModificationTime() == modified, "unchanged loop was rewritten");
+
+    PatchDocument reloaded;
+    reloaded.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    reloaded.prepareAll (48000.0, 64);
+    expectOk (reloaded.loadJson (json), "reload");
+    bundle::loadAudioContent (reloaded, json, patchFile.getParentDirectory());
+    const auto* back = reloaded.findNode (looper);
+    expect (back != nullptr && back->processor->hasAudioContent(), "loop did not come back with the patch");
+    const auto audio = back->processor->exportAudioContent();
+    expect (audio.getNumSamples() == 4800, "loop length changed: " + std::to_string (audio.getNumSamples()));
+    expect (std::abs (audio.getSample (0, 100) - loop.getSample (0, 100)) < 1.0e-4f, "loop samples changed in the round trip");
+    temp.deleteRecursively();
+}
+
 int main()
 {
     // Flush every insertion so a crash on CI still shows which test was
@@ -1594,7 +1641,8 @@ int main()
         { "merge patch adds nodes with fresh ids", testMergeJsonAddsNodesWithFreshIds },
         { "portable bundle round trip", testBundleRoundTripKeepsAssetsRelative },
         { "board positions and groups round trip", testBoardPositionsAndGroupsRoundTrip },
-        { "looper records, closes, overdubs, undoes", testLooperRecordsClosesOverdubsAndUndoes }
+        { "looper records, closes, overdubs, undoes", testLooperRecordsClosesOverdubsAndUndoes },
+        { "recorded audio saves and loads with the patch", testRecordedAudioSavesAndLoadsWithThePatch }
     };
 
     int failures = 0;

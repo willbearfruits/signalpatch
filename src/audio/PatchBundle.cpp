@@ -25,27 +25,100 @@ void rebaseAssetPaths (juce::var& root, const juce::File& baseDirectory, bool to
         auto* node = nodeValue.getDynamicObject();
         if (node == nullptr)
             continue;
-        auto* extra = node->getProperty ("extra").getDynamicObject();
-        if (extra == nullptr)
-            continue;
-        for (const auto* key : assetKeys)
+        auto rebase = [&] (juce::DynamicObject* object, const char* key)
         {
-            if (! extra->hasProperty (key))
-                continue;
-            const auto path = extra->getProperty (key).toString();
+            if (object == nullptr || ! object->hasProperty (key))
+                return;
+            const auto path = object->getProperty (key).toString();
             if (path.isEmpty())
-                continue;
+                return;
             if (toRelative)
             {
                 const juce::File file (path);
                 if (juce::File::isAbsolutePath (path) && file.isAChildOf (baseDirectory))
-                    extra->setProperty (key, file.getRelativePathFrom (baseDirectory).replaceCharacter ('\\', '/'));
+                    object->setProperty (key, file.getRelativePathFrom (baseDirectory).replaceCharacter ('\\', '/'));
             }
             else if (! juce::File::isAbsolutePath (path))
-            {
-                extra->setProperty (key, baseDirectory.getChildFile (path).getFullPathName());
-            }
+                object->setProperty (key, baseDirectory.getChildFile (path).getFullPathName());
+        };
+        rebase (node, "audio");
+        auto* extra = node->getProperty ("extra").getDynamicObject();
+        for (const auto* key : assetKeys)
+            rebase (extra, key);
+    }
+}
+
+juce::var toJsonWithAudio (const PatchDocument& document, const juce::File& patchFile,
+                           std::unordered_map<NodeId, juce::uint32>& alreadySaved)
+{
+    auto json = document.toJson();
+    auto* root = json.getDynamicObject();
+    auto* nodes = root != nullptr ? root->getProperty ("nodes").getArray() : nullptr;
+    if (nodes == nullptr)
+        return json;
+    const auto folder = patchFile.getParentDirectory().getChildFile ("assets").getChildFile ("audio");
+    const auto stem = patchFile.getFileNameWithoutExtension();
+    for (auto& nodeValue : *nodes)
+    {
+        auto* object = nodeValue.getDynamicObject();
+        if (object == nullptr)
+            continue;
+        const auto id = static_cast<NodeId> (static_cast<juce::int64> (object->getProperty ("id")));
+        const auto* model = document.findNode (id);
+        if (model == nullptr || ! model->processor->hasAudioContent())
+            continue;
+        const auto file = folder.getChildFile (stem + "-" + juce::String (id) + ".wav");
+        const auto version = model->processor->audioContentVersion();
+        const auto saved = alreadySaved.find (id);
+        const bool fresh = saved == alreadySaved.end() || saved->second != version || ! file.existsAsFile();
+        if (fresh)
+        {
+            const auto audio = model->processor->exportAudioContent();
+            if (audio.getNumSamples() == 0)
+                continue;
+            folder.createDirectory();
+            file.deleteFile();
+            juce::WavAudioFormat format;
+            std::unique_ptr<juce::AudioFormatWriter> writer (format.createWriterFor (
+                new juce::FileOutputStream (file), document.getSampleRate(), static_cast<unsigned int> (audio.getNumChannels()), 32, {}, 0));
+            if (writer == nullptr)
+                continue;
+            writer->writeFromAudioSampleBuffer (audio, 0, audio.getNumSamples());
+            writer.reset();
+            alreadySaved[id] = version;
         }
+        object->setProperty ("audio", file.getFullPathName());
+    }
+    rebaseAssetPaths (json, patchFile.getParentDirectory(), true);
+    return json;
+}
+
+void loadAudioContent (PatchDocument& document, const juce::var& json, const juce::File& patchDirectory)
+{
+    const auto* root = json.getDynamicObject();
+    const auto* nodes = root != nullptr ? root->getProperty ("nodes").getArray() : nullptr;
+    if (nodes == nullptr)
+        return;
+    juce::AudioFormatManager manager;
+    manager.registerBasicFormats();
+    for (const auto& nodeValue : *nodes)
+    {
+        const auto* object = nodeValue.getDynamicObject();
+        if (object == nullptr || ! object->hasProperty ("audio"))
+            continue;
+        auto path = object->getProperty ("audio").toString();
+        if (! juce::File::isAbsolutePath (path))
+            path = patchDirectory.getChildFile (path).getFullPathName();
+        const auto id = static_cast<NodeId> (static_cast<juce::int64> (object->getProperty ("id")));
+        auto* model = document.findNode (id);
+        if (model == nullptr)
+            continue;
+        std::unique_ptr<juce::AudioFormatReader> reader (manager.createReaderFor (juce::File (path)));
+        if (reader == nullptr)
+            continue;
+        juce::AudioBuffer<float> audio (static_cast<int> (reader->numChannels), static_cast<int> (reader->lengthInSamples));
+        reader->read (&audio, 0, audio.getNumSamples(), 0, true, true);
+        model->processor->importAudioContent (audio);
     }
 }
 
@@ -67,19 +140,34 @@ juce::Result exportBundle (const PatchDocument& document, const juce::File& zipF
 
     // Copy every referenced asset into assets/<models|irs>/ and point the
     // saved patch at the copies with relative paths.
-    auto json = document.toJson();
+    std::unordered_map<NodeId, juce::uint32> savedVersions;
+    auto json = toJsonWithAudio (document, folder.getChildFile (name + ".signalpatch"), savedVersions);
+    rebaseAssetPaths (json, folder, false); // absolute again so the copy loop below sees real files
     juce::StringArray missing;
     if (auto* rootObject = json.getDynamicObject())
         if (auto* nodes = rootObject->getProperty ("nodes").getArray())
             for (auto& nodeValue : *nodes)
             {
                 auto* node = nodeValue.getDynamicObject();
-                auto* extra = node != nullptr ? node->getProperty ("extra").getDynamicObject() : nullptr;
-                if (extra == nullptr)
+                if (node == nullptr)
                     continue;
+                auto* extra = node->getProperty ("extra").getDynamicObject();
+                if (node->hasProperty ("audio"))
+                {
+                    const juce::File source (node->getProperty ("audio").toString());
+                    if (source.existsAsFile())
+                    {
+                        const auto assetDir = folder.getChildFile ("assets").getChildFile ("audio");
+                        assetDir.createDirectory();
+                        const auto target = assetDir.getChildFile (source.getFileName());
+                        if (! target.existsAsFile())
+                            source.copyFileTo (target);
+                        node->setProperty ("audio", target.getRelativePathFrom (folder).replaceCharacter ('\\', '/'));
+                    }
+                }
                 for (const auto* key : assetKeys)
                 {
-                    if (! extra->hasProperty (key))
+                    if (extra == nullptr || ! extra->hasProperty (key))
                         continue;
                     const juce::File source (extra->getProperty (key).toString());
                     if (! source.existsAsFile())

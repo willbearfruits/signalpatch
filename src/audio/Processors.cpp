@@ -2566,6 +2566,7 @@ public:
     {
         if (command == "rec")
         {
+            sampleContentVersion.fetch_add (1, std::memory_order_relaxed);
             if (recording.load (std::memory_order_relaxed))
                 stopRecordRequest.store (true, std::memory_order_release);
             else
@@ -2607,6 +2608,29 @@ public:
             return "empty - press REC";
         return juce::String (seconds, 1) + "s sample"
              + (playing.load (std::memory_order_relaxed) ? " - playing" : "");
+    }
+
+    bool hasAudioContent() const noexcept override { return recordedLength.load (std::memory_order_acquire) > 0; }
+    juce::uint32 audioContentVersion() const noexcept override { return sampleContentVersion.load (std::memory_order_relaxed); }
+
+    juce::AudioBuffer<float> exportAudioContent() const override
+    {
+        const auto len = juce::jmin (recordedLength.load (std::memory_order_acquire), static_cast<int> (buffer.size()));
+        juce::AudioBuffer<float> out (1, juce::jmax (0, len));
+        for (int i = 0; i < len; ++i)
+            out.setSample (0, i, buffer[static_cast<std::size_t> (i)]);
+        return out;
+    }
+
+    void importAudioContent (const juce::AudioBuffer<float>& audio) override
+    {
+        if (audio.getNumChannels() == 0)
+            return;
+        const auto len = juce::jmin (audio.getNumSamples(), static_cast<int> (buffer.size()));
+        for (int i = 0; i < len; ++i)
+            buffer[static_cast<std::size_t> (i)] = audio.getSample (0, i);
+        recordedLength.store (len, std::memory_order_release);
+        sampleContentVersion.fetch_add (1, std::memory_order_relaxed);
     }
 
 private:
@@ -2732,6 +2756,7 @@ private:
     bool playheadToStart = false;
     bool triggerWasHigh = false;
     std::atomic<int> recordedLength { 0 };
+    std::atomic<juce::uint32> sampleContentVersion { 0 };
     std::atomic<bool> recording { false };
     std::atomic<bool> playing { false };
     std::atomic<bool> startRecordRequest { false };
@@ -2765,6 +2790,7 @@ public:
         if (command == "rec")
         {
             recording.store (! recording.load (std::memory_order_relaxed), std::memory_order_relaxed);
+            recordedContentVersion.fetch_add (1, std::memory_order_relaxed); // a take started or ended
             return true;
         }
         if (command == "rtz")
@@ -2803,9 +2829,52 @@ public:
         return state + "  " + juce::String (seconds, 1) + "s / " + juce::String (tapeSeconds) + "s";
     }
 
+    // Recording persistence: the four tapes as four channels, trimmed to the
+    // last audible sample so an empty tape costs nothing on disk.
+    bool hasAudioContent() const noexcept override { return recordedContentVersion.load (std::memory_order_relaxed) > 0 && contentLength() > 0; }
+    juce::uint32 audioContentVersion() const noexcept override { return recordedContentVersion.load (std::memory_order_relaxed); }
+
+    juce::AudioBuffer<float> exportAudioContent() const override
+    {
+        const auto len = contentLength();
+        juce::AudioBuffer<float> out (trackCount, juce::jmax (0, len));
+        for (int track = 0; track < trackCount; ++track)
+            for (int i = 0; i < len; ++i)
+                out.setSample (track, i, tracks[static_cast<std::size_t> (track)][static_cast<std::size_t> (i)]);
+        return out;
+    }
+
+    void importAudioContent (const juce::AudioBuffer<float>& audio) override
+    {
+        for (int track = 0; track < trackCount; ++track)
+        {
+            auto& tape = tracks[static_cast<std::size_t> (track)];
+            std::fill (tape.begin(), tape.end(), 0.0f);
+            if (track >= audio.getNumChannels())
+                continue;
+            const auto len = juce::jmin (audio.getNumSamples(), static_cast<int> (tape.size()));
+            for (int i = 0; i < len; ++i)
+                tape[static_cast<std::size_t> (i)] = audio.getSample (track, i);
+        }
+        recordedContentVersion.fetch_add (1, std::memory_order_relaxed);
+    }
+
 private:
     static constexpr int trackCount = 4;
     static constexpr int tapeSeconds = 60;
+
+    int contentLength() const noexcept
+    {
+        int last = 0;
+        for (const auto& tape : tracks)
+            for (int i = static_cast<int> (tape.size()) - 1; i >= last; --i)
+                if (std::abs (tape[static_cast<std::size_t> (i)]) > 1.0e-6f)
+                {
+                    last = i + 1;
+                    break;
+                }
+        return last;
+    }
 
     void prepareDsp (double newSampleRate, int) override
     {
@@ -2906,6 +2975,7 @@ private:
     std::atomic<bool> recording { false };
     std::atomic<bool> returnToZero { false };
     std::array<std::atomic<bool>, trackCount> armed {};
+    std::atomic<juce::uint32> recordedContentVersion { 0 };
 };
 class SpectralFollowerNode final : public DspNode
 {
@@ -3863,9 +3933,12 @@ public:
         return {};
     }
 
-    // Recording persistence hooks (message thread; the callback is stopped by the caller? No: we copy through a snapshot).
-    /** Loop audio as a fresh buffer plus its length; empty when there is no loop. */
-    juce::AudioBuffer<float> copyLoopForSaving() const
+    // Recording persistence (message thread). Reading the loop while the
+    // callback plays it is a benign race on floats; the length is atomic.
+    bool hasAudioContent() const noexcept override { return lengthSamples.load (std::memory_order_acquire) > 0; }
+    juce::uint32 audioContentVersion() const noexcept override { return contentVersion.load (std::memory_order_relaxed); }
+
+    juce::AudioBuffer<float> exportAudioContent() const override
     {
         const auto len = lengthSamples.load (std::memory_order_acquire);
         juce::AudioBuffer<float> out (1, juce::jmax (0, len));
@@ -3874,15 +3947,17 @@ public:
         return out;
     }
 
-    /** Installs loop audio (message thread, called while the device is stopped or right after prepare). */
-    void installLoop (const juce::AudioBuffer<float>& audio)
+    void importAudioContent (const juce::AudioBuffer<float>& audio) override
     {
-        const auto len = juce::jmin (audio.getNumSamples(), static_cast<int> (loop.size()));
+        if (audio.getNumChannels() == 0)
+            return;
+        const auto len = juce::jmin (audio.getNumSamples(), static_cast<int> (loop.size()) - 4);
         for (int i = 0; i < len; ++i)
             loop[static_cast<std::size_t> (i)] = audio.getSample (0, i);
         lengthSamples.store (len, std::memory_order_release);
         layers.store (len > 0 ? 1 : 0, std::memory_order_relaxed);
         state.store (len > 0 ? stopped : empty, std::memory_order_release);
+        contentVersion.fetch_add (1, std::memory_order_relaxed);
     }
 
 private:
@@ -3934,7 +4009,10 @@ private:
                 else if (current == playing)
                     beginOverdub();
                 else if (current == overdubbing)
+                {
                     state.store (playing, std::memory_order_release);
+                    contentVersion.fetch_add (1, std::memory_order_relaxed);
+                }
                 break;
             case commandPlay:
                 if (current == playing || current == overdubbing)
@@ -3963,6 +4041,7 @@ private:
                     layers.store (juce::jmax (1, layers.load (std::memory_order_relaxed) - 1), std::memory_order_relaxed);
                     if (current == overdubbing)
                         state.store (playing, std::memory_order_release);
+                    contentVersion.fetch_add (1, std::memory_order_relaxed);
                 }
                 break;
             case commandClear:
@@ -3972,6 +4051,7 @@ private:
                 playhead = 0.0;
                 undoAvailable = false;
                 state.store (empty, std::memory_order_release);
+                contentVersion.fetch_add (1, std::memory_order_relaxed);
                 break;
             case commandNone: break;
         }
@@ -3985,6 +4065,7 @@ private:
         playhead = 0.0;
         undoAvailable = false;
         state.store (len > 0 ? playing : empty, std::memory_order_release);
+        contentVersion.fetch_add (1, std::memory_order_relaxed);
     }
 
     void beginOverdub() noexcept
@@ -4082,6 +4163,7 @@ private:
     std::atomic<double> playheadForUi { 0.0 };
     std::atomic<bool> halfSpeed { false };
     std::atomic<bool> reversed { false };
+    std::atomic<juce::uint32> contentVersion { 0 };
 };
 
 std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
