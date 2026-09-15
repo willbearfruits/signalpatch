@@ -120,4 +120,56 @@ private:
     juce::String title, text;
     std::function<void (const juce::String&)> accept;
 };
+// In-canvas file browser: directories first, files filtered by extension,
+// wheel to scroll, click to enter/select, double-click or Enter to pick,
+// Backspace goes up, typing filters by name. Used for models, impulses and
+// patches so nothing leaves the renderer.
+class FileBrowser
+{
+public:
+    explicit FileBrowser (NVGcontext* vg, int font) : vg (vg), font (font) {}
+
+    void open (juce::String title, const juce::File& directory, juce::StringArray extensions,
+               std::function<void (const juce::File&)> onPick);
+    [[nodiscard]] bool isOpen() const noexcept { return active; }
+    void close() noexcept { active = false; }
+
+    bool mouseMove (float x, float y);
+    bool mouseButton (int button, bool pressed, float x, float y, double now);
+    bool scroll (double dy);
+    bool key (int key, int mods);
+    bool character (juce::juce_wchar codepoint);
+    void draw (int windowWidth, int windowHeight);
+
+private:
+    struct Entry
+    {
+        juce::File file;
+        bool directory = false;
+    };
+
+    void refresh();
+    void enter (const juce::File& directory);
+    void pick (const juce::File& file);
+    [[nodiscard]] juce::Rectangle<float> panel (int windowWidth, int windowHeight) const noexcept;
+    [[nodiscard]] int rowAt (float x, float y) const noexcept;
+
+    NVGcontext* vg;
+    int font;
+    bool active = false;
+    juce::String title;
+    juce::File current;
+    juce::StringArray extensions;
+    juce::String filter;
+    std::vector<Entry> entries;
+    std::function<void (const juce::File&)> accept;
+    int hover = -1, selected = -1;
+    float scrollOffset = 0.0f;
+    juce::Rectangle<float> lastPanel;
+    double lastClickTime = -1.0;
+    int lastClickRow = -1;
+
+    static constexpr float rowHeight = 22.0f;
+    static constexpr float headerHeight = 58.0f;
+};
 } // namespace signalpatch::v2

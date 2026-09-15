@@ -326,4 +326,268 @@ void TextPrompt::draw (int windowWidth, int windowHeight, double now)
     nvgFillColor (vg, alpha (palette::mutedText, 0.7f));
     nvgText (vg, x + 16.0f, y + 78.0f, "Enter to apply   Esc to cancel", nullptr);
 }
+// ---------------------------------------------------------------- FileBrowser
+
+void FileBrowser::open (juce::String promptTitle, const juce::File& directory, juce::StringArray wantedExtensions,
+                        std::function<void (const juce::File&)> onPick)
+{
+    title = std::move (promptTitle);
+    extensions = std::move (wantedExtensions);
+    accept = std::move (onPick);
+    filter.clear();
+    active = true;
+    enter (directory.isDirectory() ? directory : juce::File::getSpecialLocation (juce::File::userHomeDirectory));
+}
+
+void FileBrowser::enter (const juce::File& directory)
+{
+    current = directory;
+    scrollOffset = 0.0f;
+    selected = -1;
+    hover = -1;
+    filter.clear();
+    refresh();
+}
+
+void FileBrowser::refresh()
+{
+    entries.clear();
+    auto children = current.findChildFiles (juce::File::findFilesAndDirectories, false);
+    children.sort();
+    for (const auto& child : children)
+    {
+        if (child.getFileName().startsWith ("."))
+            continue;
+        if (filter.isNotEmpty() && ! child.getFileName().containsIgnoreCase (filter))
+            continue;
+        if (child.isDirectory())
+            entries.push_back ({ child, true });
+    }
+    for (const auto& child : children)
+    {
+        if (child.isDirectory() || child.getFileName().startsWith ("."))
+            continue;
+        if (filter.isNotEmpty() && ! child.getFileName().containsIgnoreCase (filter))
+            continue;
+        bool wanted = extensions.isEmpty();
+        for (const auto& extension : extensions)
+            if (child.hasFileExtension (extension))
+                wanted = true;
+        if (wanted)
+            entries.push_back ({ child, false });
+    }
+}
+
+void FileBrowser::pick (const juce::File& file)
+{
+    active = false;
+    if (accept)
+        accept (file);
+}
+
+juce::Rectangle<float> FileBrowser::panel (int windowWidth, int windowHeight) const noexcept
+{
+    const auto w = juce::jmin (640.0f, static_cast<float> (windowWidth) - 40.0f);
+    const auto h = juce::jmin (560.0f, static_cast<float> (windowHeight) - 80.0f);
+    return { (windowWidth - w) * 0.5f, (windowHeight - h) * 0.45f, w, h };
+}
+
+int FileBrowser::rowAt (float x, float y) const noexcept
+{
+    const auto listTop = lastPanel.getY() + headerHeight;
+    const auto listBottom = lastPanel.getBottom() - 12.0f;
+    if (x < lastPanel.getX() || x > lastPanel.getRight() || y < listTop || y > listBottom)
+        return -1;
+    const auto row = static_cast<int> ((y - listTop + scrollOffset) / rowHeight);
+    return row >= 0 && row <= static_cast<int> (entries.size()) ? row : -1; // row 0 is ".."
+}
+
+bool FileBrowser::mouseMove (float x, float y)
+{
+    if (! active)
+        return false;
+    hover = rowAt (x, y);
+    return true;
+}
+
+bool FileBrowser::mouseButton (int button, bool pressed, float x, float y, double now)
+{
+    if (! active)
+        return false;
+    if (! pressed || button != GLFW_MOUSE_BUTTON_LEFT)
+        return true;
+    if (! lastPanel.contains (x, y))
+    {
+        active = false;
+        return true;
+    }
+    const auto row = rowAt (x, y);
+    if (row < 0)
+        return true;
+    const bool doubleClick = row == lastClickRow && now - lastClickTime < 0.4;
+    lastClickRow = row;
+    lastClickTime = now;
+    if (row == 0)
+    {
+        if (doubleClick || true)
+            enter (current.getParentDirectory());
+        return true;
+    }
+    const auto& entry = entries[static_cast<std::size_t> (row - 1)];
+    if (entry.directory)
+    {
+        enter (entry.file);
+        return true;
+    }
+    selected = row;
+    if (doubleClick)
+        pick (entry.file);
+    return true;
+}
+
+bool FileBrowser::scroll (double dy)
+{
+    if (! active)
+        return false;
+    const auto listHeight = lastPanel.getHeight() - headerHeight - 12.0f;
+    const auto contentHeight = static_cast<float> (entries.size() + 1) * rowHeight;
+    scrollOffset = juce::jlimit (0.0f, juce::jmax (0.0f, contentHeight - listHeight), scrollOffset - static_cast<float> (dy) * 40.0f);
+    return true;
+}
+
+bool FileBrowser::key (int keyCode, int mods)
+{
+    if (! active)
+        return false;
+    juce::ignoreUnused (mods);
+    if (keyCode == GLFW_KEY_ESCAPE)
+        active = false;
+    else if (keyCode == GLFW_KEY_BACKSPACE)
+    {
+        if (filter.isNotEmpty())
+        {
+            filter = filter.dropLastCharacters (1);
+            refresh();
+        }
+        else
+            enter (current.getParentDirectory());
+    }
+    else if (keyCode == GLFW_KEY_DOWN || keyCode == GLFW_KEY_UP)
+    {
+        const auto count = static_cast<int> (entries.size());
+        selected = juce::jlimit (1, juce::jmax (1, count), selected + (keyCode == GLFW_KEY_DOWN ? 1 : -1));
+        const auto rowTop = static_cast<float> (selected) * rowHeight;
+        const auto listHeight = lastPanel.getHeight() - headerHeight - 12.0f;
+        if (rowTop - scrollOffset > listHeight - rowHeight)
+            scrollOffset = rowTop - listHeight + rowHeight;
+        if (rowTop < scrollOffset)
+            scrollOffset = rowTop;
+    }
+    else if (keyCode == GLFW_KEY_ENTER || keyCode == GLFW_KEY_KP_ENTER)
+    {
+        if (selected >= 1 && selected <= static_cast<int> (entries.size()))
+        {
+            const auto& entry = entries[static_cast<std::size_t> (selected - 1)];
+            if (entry.directory)
+                enter (entry.file);
+            else
+                pick (entry.file);
+        }
+    }
+    return true;
+}
+
+bool FileBrowser::character (juce::juce_wchar codepoint)
+{
+    if (! active)
+        return false;
+    if (codepoint >= 32 && filter.length() < 40)
+    {
+        filter += juce::String::charToString (codepoint);
+        refresh();
+        scrollOffset = 0.0f;
+    }
+    return true;
+}
+
+void FileBrowser::draw (int windowWidth, int windowHeight)
+{
+    if (! active)
+        return;
+    lastPanel = panel (windowWidth, windowHeight);
+    const auto& box = lastPanel;
+    nvgBeginPath (vg);
+    nvgRect (vg, 0, 0, static_cast<float> (windowWidth), static_cast<float> (windowHeight));
+    nvgFillColor (vg, nvgRGBAf (0, 0, 0, 0.35f));
+    nvgFill (vg);
+    nvgBeginPath (vg);
+    nvgRoundedRect (vg, box.getX() + 2.0f, box.getY() + 6.0f, box.getWidth(), box.getHeight(), 8.0f);
+    nvgFillColor (vg, nvgRGBAf (0, 0, 0, 0.45f));
+    nvgFill (vg);
+    nvgBeginPath (vg);
+    nvgRoundedRect (vg, box.getX(), box.getY(), box.getWidth(), box.getHeight(), 8.0f);
+    nvgFillColor (vg, palette::panelRaised);
+    nvgFill (vg);
+    nvgStrokeColor (vg, nvgRGBAf (1, 1, 1, 0.1f));
+    nvgStroke (vg);
+
+    nvgFontFaceId (vg, font);
+    nvgFontSize (vg, 11.0f);
+    nvgTextLetterSpacing (vg, 0.8f);
+    nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+    nvgFillColor (vg, palette::mutedText);
+    nvgText (vg, box.getX() + 16.0f, box.getY() + 18.0f, title.toUpperCase().toRawUTF8(), nullptr);
+    nvgTextLetterSpacing (vg, 0.0f);
+    nvgFontSize (vg, 12.0f);
+    nvgFillColor (vg, palette::text);
+    auto pathText = current.getFullPathName();
+    const auto home = juce::File::getSpecialLocation (juce::File::userHomeDirectory).getFullPathName();
+    if (pathText.startsWith (home))
+        pathText = "~" + pathText.substring (home.length());
+    if (filter.isNotEmpty())
+        pathText += "    filter: " + filter;
+    nvgText (vg, box.getX() + 16.0f, box.getY() + 40.0f, pathText.toRawUTF8(), nullptr);
+
+    const auto listTop = box.getY() + headerHeight;
+    const auto listHeight = box.getHeight() - headerHeight - 12.0f;
+    nvgSave (vg);
+    nvgScissor (vg, box.getX(), listTop, box.getWidth(), listHeight);
+    auto drawRow = [&] (int row, const juce::String& name, bool directory, bool wanted)
+    {
+        const auto y = listTop + static_cast<float> (row) * rowHeight - scrollOffset;
+        if (y + rowHeight < listTop || y > listTop + listHeight)
+            return;
+        if (row == hover || row == selected)
+        {
+            nvgBeginPath (vg);
+            nvgRoundedRect (vg, box.getX() + 8.0f, y, box.getWidth() - 16.0f, rowHeight, 4.0f);
+            nvgFillColor (vg, row == selected ? alpha (palette::selection, 0.25f) : lighter (palette::grid, 0.3f));
+            nvgFill (vg);
+        }
+        nvgFontSize (vg, 12.0f);
+        nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvgFillColor (vg, directory ? palette::audio : wanted ? palette::text : alpha (palette::mutedText, 0.6f));
+        nvgText (vg, box.getX() + 18.0f, y + rowHeight * 0.5f, (directory ? name + "/" : name).toRawUTF8(), nullptr);
+    };
+    drawRow (0, "..", true, true);
+    for (std::size_t i = 0; i < entries.size(); ++i)
+        drawRow (static_cast<int> (i) + 1, entries[i].file.getFileName(), entries[i].directory, true);
+    nvgRestore (vg);
+
+    const auto contentHeight = static_cast<float> (entries.size() + 1) * rowHeight;
+    if (contentHeight > listHeight)
+    {
+        const auto trackH = listHeight - 8.0f;
+        const auto thumbH = juce::jmax (24.0f, trackH * listHeight / contentHeight);
+        const auto thumbY = listTop + 4.0f + (trackH - thumbH) * (scrollOffset / (contentHeight - listHeight));
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, box.getRight() - 8.0f, thumbY, 4.0f, thumbH, 2.0f);
+        nvgFillColor (vg, alpha (palette::mutedText, 0.5f));
+        nvgFill (vg);
+    }
+    nvgFontSize (vg, 9.5f);
+    nvgFillColor (vg, alpha (palette::mutedText, 0.7f));
+    nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+    nvgText (vg, box.getX() + 16.0f, box.getBottom() - 3.0f, "type to filter   Backspace up   Enter or double-click to choose   Esc to cancel", nullptr);
+}
 } // namespace signalpatch::v2

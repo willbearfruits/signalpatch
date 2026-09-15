@@ -37,6 +37,7 @@ public:
     void character (unsigned int codepoint);
 
     void fitToPatch (int width, int height);
+    void loadPatchFromCommandLine (const juce::File& file) { openPatchFile (file); }
 
 private:
     struct Button
@@ -124,6 +125,11 @@ private:
     void showCableMenu (const Connection& cable, double x, double y);
     void insertNodeOnCable (const Connection& cable, NodeKind kind, juce::Point<float> world);
     void runButton (const Layout& layout, const Button& button);
+    void showFileMenu (double x, double y);
+    void openPatchFile (const juce::File& file);
+    void saveCurrentPatch();
+    void saveAsPrompt();
+    [[nodiscard]] static juce::File documentsFolder (const char* sub);
     [[nodiscard]] juce::Rectangle<float> buttonBounds (const Layout& layout, juce::Point<float> origin, int index) const noexcept;
 
     PatchEngine& engine;
@@ -131,6 +137,8 @@ private:
     int font;
     Menu menu;
     TextPrompt prompt;
+    FileBrowser browser;
+    juce::File currentFile;
     int windowW = 1600, windowH = 1000;
     std::vector<Layout> layouts;
     std::unordered_map<NodeId, PlateCache> plates;

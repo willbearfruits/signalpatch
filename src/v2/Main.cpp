@@ -80,11 +80,10 @@ int main (int argc, char** argv)
     const auto result = engine.initialise();
     if (result.failed())
         std::fprintf (stderr, "Audio offline: %s\n", result.getErrorMessage().toRawUTF8());
+    signalpatch::v2::RackView rack (engine, vg, font);
     for (int index = 1; index < argc; ++index)
         if (argv[index][0] != '-')
-            engine.loadPatch (juce::File::getCurrentWorkingDirectory().getChildFile (argv[index]));
-
-    signalpatch::v2::RackView rack (engine, vg, font);
+            rack.loadPatchFromCommandLine (juce::File::getCurrentWorkingDirectory().getChildFile (argv[index]));
     glfwSetWindowUserPointer (window, &rack);
     glfwSetCursorPosCallback (window, [] (GLFWwindow* w, double x, double y) { rackFor (w)->mouseMove (x, y); });
     glfwSetMouseButtonCallback (window, [] (GLFWwindow* w, int button, int action, int mods)

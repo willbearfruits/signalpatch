@@ -1,5 +1,6 @@
 #include "RackView.h"
 #include "Palette.h"
+#include "../audio/PatchBundle.h"
 
 #include <GLFW/glfw3.h>
 #define NANOVG_GL3 1
@@ -51,7 +52,7 @@ namespace
 } // namespace
 
 RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
-    : engine (engineToUse), vg (context), font (fontId), menu (context, fontId), prompt (context, fontId)
+    : engine (engineToUse), vg (context), font (fontId), menu (context, fontId), prompt (context, fontId), browser (context, fontId)
 {
     engine.addChangeListener (this);
 }
@@ -298,10 +299,161 @@ void RackView::say (const juce::String& text)
     dirty = true;
 }
 
+juce::File RackView::documentsFolder (const char* sub)
+{
+    auto folder = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("SignalPatch").getChildFile (sub);
+    folder.createDirectory();
+    return folder;
+}
+
+void RackView::openPatchFile (const juce::File& fileToLoad)
+{
+    auto file = fileToLoad;
+    if (file.hasFileExtension ("zip"))
+    {
+        juce::File extracted;
+        const auto unzip = bundle::extractBundle (file, documentsFolder ("projects").getChildFile (file.getFileNameWithoutExtension()), extracted);
+        if (unzip.failed())
+        {
+            say (unzip.getErrorMessage());
+            return;
+        }
+        file = extracted;
+    }
+    const auto result = engine.loadPatch (file);
+    if (result.wasOk())
+    {
+        currentFile = file;
+        selectedNode = 0;
+        selectedCable.reset();
+        say ("Loaded muted: " + file.getFileName() + " - M to fade in");
+        structureDirty = true;
+        fitToPatch (windowW, windowH);
+    }
+    else
+        say (result.getErrorMessage());
+}
+
+void RackView::saveCurrentPatch()
+{
+    if (currentFile == juce::File())
+    {
+        saveAsPrompt();
+        return;
+    }
+    const auto result = engine.savePatch (currentFile);
+    say (result.wasOk() ? "Saved " + currentFile.getFileName() : result.getErrorMessage());
+}
+
+void RackView::saveAsPrompt()
+{
+    const auto initial = currentFile == juce::File() ? juce::String ("my rig") : currentFile.getFileNameWithoutExtension();
+    prompt.open ("Save as (in ~/Documents/SignalPatch/patches)", initial, [this] (const juce::String& name)
+    {
+        if (name.trim().isEmpty())
+            return;
+        auto file = documentsFolder ("patches").getChildFile (name.trim());
+        if (! file.hasFileExtension ("signalpatch"))
+            file = file.withFileExtension ("signalpatch");
+        const auto result = engine.savePatch (file);
+        if (result.wasOk())
+            currentFile = file;
+        say (result.wasOk() ? "Saved " + file.getFullPathName() : result.getErrorMessage());
+    });
+}
+
+void RackView::showFileMenu (double x, double y)
+{
+    enum { newPatch = 1, openPatch, save, saveAs, exportBundle, unmute, quit };
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::sectionHeader (currentFile == juce::File() ? "UNTITLED" : currentFile.getFileName().toUpperCase()));
+    items.push_back (MenuItem::item (newPatch, "New patch", "Ctrl+N"));
+    items.push_back (MenuItem::item (openPatch, "Open patch or project zip...", "Ctrl+O"));
+    items.push_back (MenuItem::item (save, "Save", "Ctrl+S"));
+    items.push_back (MenuItem::item (saveAs, "Save as...", "Ctrl+Shift+S"));
+    items.push_back (MenuItem::item (exportBundle, "Export portable project (.zip)..."));
+    items.push_back (MenuItem::line());
+    items.push_back (MenuItem::item (unmute, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute", "M"));
+    items.push_back (MenuItem::item (quit, "Quit", "Ctrl+Q"));
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this] (int picked)
+    {
+        switch (picked)
+        {
+            case newPatch:
+                engine.newPatch();
+                currentFile = juce::File();
+                say ("New patch (muted) - M to fade in");
+                break;
+            case openPatch:
+                browser.open ("Open patch", currentFile != juce::File() ? currentFile.getParentDirectory() : documentsFolder ("patches"),
+                              { "signalpatch", "zip" }, [this] (const juce::File& file) { openPatchFile (file); });
+                break;
+            case save: saveCurrentPatch(); break;
+            case saveAs: saveAsPrompt(); break;
+            case exportBundle:
+                prompt.open ("Export zip name (in ~/Documents/SignalPatch/projects)",
+                             currentFile == juce::File() ? juce::String ("my rig") : currentFile.getFileNameWithoutExtension(),
+                             [this] (const juce::String& name)
+                {
+                    if (name.trim().isEmpty())
+                        return;
+                    auto file = documentsFolder ("projects").getChildFile (name.trim());
+                    if (! file.hasFileExtension ("zip"))
+                        file = file.withFileExtension ("zip");
+                    const auto result = engine.exportBundle (file);
+                    say (result.wasOk() ? "Exported " + file.getFullPathName() : result.getErrorMessage());
+                });
+                break;
+            case unmute: engine.togglePanic(); say (engine.isPanicMuted() ? "Muted" : "Fading in"); break;
+            case quit: glfwSetWindowShouldClose (glfwGetCurrentContext(), GLFW_TRUE); break;
+            default: break;
+        }
+        dirty = true;
+    });
+    dirty = true;
+}
+
 void RackView::runButton (const Layout& layout, const Button& button)
 {
-    if (button.command == "load" || button.command == "load-a" || button.command == "load-b")
-        say ("File browser is next on the list - the < > buttons step through the folder for now");
+    const auto id = layout.id;
+    const auto* model = engine.getDocument().findNode (id);
+    if (model == nullptr)
+        return;
+    if (button.command == "load")
+    {
+        const juce::File currentModel (model->processor->getExtraState().getProperty ("model", "").toString());
+        browser.open ("Load NAM model", currentModel.getParentDirectory().isDirectory() ? currentModel.getParentDirectory() : documentsFolder ("models"),
+                      { "nam" }, [this, id] (const juce::File& file)
+        {
+            auto* object = new juce::DynamicObject();
+            object->setProperty ("model", file.getFullPathName());
+            engine.applyNodeExtraState (id, juce::var (object));
+            say ("Loading " + file.getFileName());
+        });
+    }
+    else if (button.command == "load-a" || button.command == "load-b")
+    {
+        const bool slotB = button.command == "load-b";
+        const juce::File currentIr (model->processor->getExtraState().getProperty ("ir", "").toString());
+        auto start = currentIr.getParentDirectory();
+        if (! start.isDirectory())
+            start = documentsFolder ("irs");
+        if (start.getNumberOfChildFiles (juce::File::findFiles, "*.wav") == 0 && juce::File ("/usr/share/gx_head/sounds/amps").isDirectory())
+            start = juce::File ("/usr/share/gx_head/sounds/amps");
+        browser.open (slotB ? "Load cab impulse B" : "Load cab impulse A", start, { "wav", "aif", "aiff", "flac" },
+                      [this, id, slotB] (const juce::File& file)
+        {
+            const auto* node = engine.getDocument().findNode (id);
+            if (node == nullptr)
+                return;
+            auto state = node->processor->getExtraState();
+            if (state.getDynamicObject() == nullptr)
+                state = juce::var (new juce::DynamicObject());
+            state.getDynamicObject()->setProperty (slotB ? "irB" : "ir", file.getFullPathName());
+            engine.applyNodeExtraState (id, state);
+            say ("Loading " + file.getFileName());
+        });
+    }
     else if (button.command == "reset-loop")
         engine.resetNodeSafety (layout.id);
     else
@@ -1200,6 +1352,22 @@ void RackView::drawHud (int width, int height, double now)
                     + juce::String (plateRenders) + " plates rasterised";
     nvgText (vg, 150.0f, 17.0f, line.toRawUTF8(), nullptr);
 
+    // FILE button and the current patch name.
+    nvgBeginPath (vg);
+    nvgRoundedRect (vg, static_cast<float> (width) - 240.0f, 6.0f, 50.0f, 22.0f, 4.0f);
+    nvgFillColor (vg, palette::panelRaised);
+    nvgFill (vg);
+    nvgFontSize (vg, 10.5f);
+    nvgTextLetterSpacing (vg, 0.8f);
+    nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    nvgFillColor (vg, palette::text);
+    nvgText (vg, static_cast<float> (width) - 215.0f, 17.0f, "FILE", nullptr);
+    nvgTextLetterSpacing (vg, 0.0f);
+    nvgTextAlign (vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+    nvgFillColor (vg, palette::mutedText);
+    nvgText (vg, static_cast<float> (width) - 250.0f, 17.0f,
+             (currentFile == juce::File() ? juce::String ("untitled") : currentFile.getFileName()).toRawUTF8(), nullptr);
+
     if (status.panicMuted)
     {
         nvgBeginPath (vg);
@@ -1299,6 +1467,7 @@ void RackView::render (int width, int height, float ratio, double now)
 
     drawHud (width, height, now);
     menu.draw (width, height);
+    browser.draw (width, height);
     prompt.draw (width, height, now);
     nvgEndFrame (vg);
 
@@ -1316,7 +1485,7 @@ void RackView::render (int width, int height, float ratio, double now)
 
 void RackView::character (unsigned int codepoint)
 {
-    if (prompt.character (static_cast<juce::juce_wchar> (codepoint)))
+    if (prompt.character (static_cast<juce::juce_wchar> (codepoint)) || browser.character (static_cast<juce::juce_wchar> (codepoint)))
         dirty = true;
 }
 
@@ -1324,6 +1493,12 @@ void RackView::mouseMove (double x, double y)
 {
     mouseX = x;
     mouseY = y;
+    if (browser.isOpen())
+    {
+        browser.mouseMove (static_cast<float> (x), static_cast<float> (y));
+        dirty = true;
+        return;
+    }
     if (menu.isOpen())
     {
         menu.mouseMove (static_cast<float> (x), static_cast<float> (y));
@@ -1369,10 +1544,22 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
     juce::ignoreUnused (mods);
     if (prompt.isOpen())
         return;
+    if (browser.isOpen())
+    {
+        browser.mouseButton (button, pressed, static_cast<float> (x), static_cast<float> (y), lastTick);
+        dirty = true;
+        return;
+    }
     if (menu.isOpen())
     {
         menu.mouseButton (button, pressed, static_cast<float> (x), static_cast<float> (y));
         dirty = true;
+        return;
+    }
+    // HUD: the FILE button top-right of the header strip.
+    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < 34.0 && x >= windowW - 240.0 && x < windowW - 190.0)
+    {
+        showFileMenu (x, 34.0);
         return;
     }
     const auto world = toWorld (x, y);
@@ -1572,6 +1759,12 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
 
 void RackView::scroll (double dx, double dy, int mods, double x, double y)
 {
+    if (browser.isOpen())
+    {
+        browser.scroll (dy);
+        dirty = true;
+        return;
+    }
     if ((mods & GLFW_MOD_SHIFT) != 0 || std::abs (dx) > 0.0)
     {
         panX += (std::abs (dx) > 0.0 ? dx : dy) * 40.0;
@@ -1614,6 +1807,12 @@ void RackView::key (int keyCode, bool pressed, int mods)
         dirty = true;
         return;
     }
+    if (browser.isOpen())
+    {
+        browser.key (keyCode, mods);
+        dirty = true;
+        return;
+    }
     if (menu.isOpen())
     {
         menu.key (keyCode);
@@ -1641,11 +1840,22 @@ void RackView::key (int keyCode, bool pressed, int mods)
     }
     else if (ctrl && keyCode == GLFW_KEY_S)
     {
-        const auto file = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
-            .getChildFile ("SignalPatch").getChildFile ("patches").getChildFile ("v2-session.signalpatch");
-        const auto result = engine.savePatch (file);
-        say (result.wasOk() ? "Saved " + file.getFullPathName() : result.getErrorMessage());
+        if (shift)
+            saveAsPrompt();
+        else
+            saveCurrentPatch();
     }
+    else if (ctrl && keyCode == GLFW_KEY_O)
+        browser.open ("Open patch", currentFile != juce::File() ? currentFile.getParentDirectory() : documentsFolder ("patches"),
+                      { "signalpatch", "zip" }, [this] (const juce::File& file) { openPatchFile (file); });
+    else if (ctrl && keyCode == GLFW_KEY_N)
+    {
+        engine.newPatch();
+        currentFile = juce::File();
+        say ("New patch (muted) - M to fade in");
+    }
+    else if (ctrl && keyCode == GLFW_KEY_Q)
+        glfwSetWindowShouldClose (glfwGetCurrentContext(), GLFW_TRUE);
     else if (keyCode == GLFW_KEY_M)
     {
         engine.togglePanic();
