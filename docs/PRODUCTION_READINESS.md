@@ -43,12 +43,12 @@ next swap; feedback-guard delay/reset semantics are pinned by tests.
 | --- | --- |
 | Unit tests: prepare/reset, variable block lengths, bypass, invalid boundaries | Partial — 16 engine tests incl. all-kinds finite-output sweep with alternating block sizes; per-node parameter-boundary tests not exhaustive |
 | Allocation/deallocation trap around the callback | **Closed** — global new/delete trap (incl. aligned forms) armed around a kitchen-sink graph (every node kind, guarded feedback, live NAM inference); zero allocations over 400 variable-size blocks ("callback path performs no allocation" test) |
-| 30-minute worst-case soak at 48 kHz/64 | **Closed (offline)** — 1.69 M blocks (30 min of 48 kHz audio) rendered through the kitchen-sink graph under the allocation trap with finite outputs (`SIGNALPATCH_SOAK_BLOCKS=1687500`). A live-device wall-clock soak with xrun counting remains worthwhile before a stage gig |
+| 30-minute worst-case soak at 48 kHz/64 | **Closed (offline)** — 1.69 M blocks (30 min of 48 kHz audio) rendered through the kitchen-sink graph under the allocation trap with finite outputs (`SIGNALPATCH_SOAK_BLOCKS=1687500`; last run 2026-09-15 with the looper, tuner, stereo nodes and MIDI Note in the graph and notes dispatched every fifth block). A live-device wall-clock soak with xrun counting remains worthwhile before a stage gig |
 | Stress: rapid edits/recompiles | Partial — "recompile churn keeps rendering" test (25 add/connect/compile/remove rounds with parameter bursts); live UI-stall stress not automated |
 | Adversarial signals (NaN/Inf/full-scale/subnormal) | Partial — guard containment + all-kinds sweep tested; per-node NaN injection only for delay/guard |
 | Callback duration measurement | **Closed** — worst-case callback ratio latched in the callback, displayed as "DSP x% (pk y%)" with slow decay |
 | ASan/UBSan runs | **Closed** — full test suite passes under `-fsanitize=address,undefined -fno-sanitize-recover=all` (`build-asan/`; last run 2026-09-15 over 34 tests incl. looper, MIDI, controller feedback, compound undo) |
-| TSan run | **Open** — cross-thread engine paths not yet exercised under TSan |
+| TSan run | **Closed** for the test suite — `build-tsan/` (`-fsanitize=thread`, headless modules) runs all 34 tests with zero reports (2026-09-15). The live app (audio callback vs. message thread under a real device) is still not TSan-instrumented. |
 
 ## NAM status vs. NAM_ROADMAP.md
 
