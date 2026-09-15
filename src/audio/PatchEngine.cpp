@@ -450,6 +450,11 @@ void PatchEngine::setNodeBypassed (NodeId id, bool bypassed)
 
 bool PatchEngine::sendNodeCommand (NodeId id, const juce::String& command)
 {
+    if (command == "reset-loop")
+    {
+        resetNodeSafety (id); // the Feedback Guard's reset lives in the engine, not the node
+        return true;
+    }
     if (auto* node = document.findNode (id))
         return node->processor->handleUiCommand (command);
     return false;
@@ -682,9 +687,13 @@ void PatchEngine::handleIncomingMidiMessage (juce::MidiInput* source, const juce
     // MIDI thread. Notes go straight to the audio thread through a lock-free
     // FIFO (block-accurate, no allocation); everything hops to the message
     // thread too, where mappings and learn live.
-    if (message.isNoteOnOrOff())
+    if (message.isNoteOnOrOff() && ! callbackRunning.load (std::memory_order_relaxed))
+        midiNotesLost.store (true, std::memory_order_relaxed); // nobody drains the queue: release everything when audio returns
+    else if (message.isNoteOnOrOff())
     {
         const auto scope = midiNoteFifo.write (1);
+        if (scope.blockSize1 == 0)
+            midiNotesLost.store (true, std::memory_order_relaxed); // full: a note-off may be among the dropped
         if (scope.blockSize1 > 0)
             midiNoteEvents[static_cast<std::size_t> (scope.startIndex1)] = { message.getChannel(), message.getNoteNumber(),
                                                                              message.isNoteOn() ? message.getVelocity() : 0,
@@ -754,10 +763,18 @@ void PatchEngine::handleMidiOnMessageThread (const juce::MidiMessage& message)
     if (midiLearnHook && (message.isController() || message.isNoteOn() || message.isProgramChange()))
         if (midiLearnHook (message))
             return;
-    const auto& mappings = document.getMidiMappings();
-    for (std::size_t index = 0; index < mappings.size(); ++index)
-        if (mappings[index].matches (source, message.getChannel(), number))
-            applyMidiMapping (mappings[index], message);
+    // A copy: a slot mapping replaces the whole list, and the same message must
+    // not go on to run the new rig's bindings.
+    const auto mappings = document.getMidiMappings();
+    for (const auto& mapping : mappings)
+        if (mapping.matches (source, message.getChannel(), number))
+        {
+            applyMidiMapping (mapping, message);
+            const bool slotFired = mapping.target == MidiMapping::Target::slot
+                                && (message.isNoteOn() || message.isProgramChange() || (message.isController() && message.getControllerValue() >= 64));
+            if (slotFired)
+                break; // the rig just changed under this message
+        }
 }
 
 void PatchEngine::applyMidiMapping (const MidiMapping& mapping, const juce::MidiMessage& message)
@@ -972,6 +989,8 @@ void PatchEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     if (callbackScheduler.load (std::memory_order_relaxed) < 0)
         callbackScheduler.store (sched_getscheduler (0), std::memory_order_relaxed);
    #endif
+    if (activePlan != nullptr && midiNotesLost.exchange (false, std::memory_order_relaxed))
+        activePlan->dispatchAllNotesOff();
     if (activePlan != nullptr && midiNoteFifo.getNumReady() > 0)
     {
         const auto scope = midiNoteFifo.read (midiNoteFifo.getNumReady());

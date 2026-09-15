@@ -122,6 +122,8 @@ public:
     void setKeyboardVisible (bool visible) noexcept { keyboardVisible = visible; }
     [[nodiscard]] bool isKeyboardVisible() const noexcept { return keyboardVisible; }
     void acceptNow();
+    /** The gamepad: A presses the highlighted key, the d-pad walks the grid. */
+    void padKey (int key);
 
 private:
     static constexpr int keyboardRows = 5, keyboardColumns = 10;

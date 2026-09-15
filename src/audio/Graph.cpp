@@ -1169,6 +1169,13 @@ void RenderPlan::dispatchMidiNote (int channel, int note, int velocity, bool on)
             renderNode->processor->handleMidiNote (channel, note, velocity, on);
 }
 
+void RenderPlan::dispatchAllNotesOff() noexcept
+{
+    for (auto& renderNode : renderNodes)
+        if (renderNode != nullptr && renderNode->processor != nullptr)
+            renderNode->processor->allNotesOff();
+}
+
 RenderPlan::RenderPlan (int maximumBlockSizeToUse)
     : maximumBlockSize (juce::jmax (1, maximumBlockSizeToUse))
 {

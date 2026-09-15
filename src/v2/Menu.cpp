@@ -362,10 +362,6 @@ bool TextPrompt::key (int keyCode, int mods)
         keyColumn = (keyColumn + (keyCode == GLFW_KEY_RIGHT ? 1 : keyboardColumns - 1)) % keyboardColumns;
     else if (keyboardVisible && (keyCode == GLFW_KEY_UP || keyCode == GLFW_KEY_DOWN))
         keyRow = (keyRow + (keyCode == GLFW_KEY_DOWN ? 1 : keyboardRows - 1)) % keyboardRows;
-    else if (keyboardVisible && keyCode == GLFW_KEY_SPACE)
-        character (' ');
-    else if (keyboardVisible && (keyCode == GLFW_KEY_ENTER || keyCode == GLFW_KEY_KP_ENTER))
-        pressHighlightedKey();
     else if (keyCode == GLFW_KEY_ENTER || keyCode == GLFW_KEY_KP_ENTER)
         acceptNow();
     else if (keyCode == GLFW_KEY_BACKSPACE)
@@ -376,6 +372,18 @@ bool TextPrompt::key (int keyCode, int mods)
             text = text.dropLastCharacters (1);
     }
     return true;
+}
+
+void TextPrompt::padKey (int keyCode)
+{
+    if (! active)
+        return;
+    if (keyCode == GLFW_KEY_ENTER)
+        pressHighlightedKey();
+    else if (keyCode == GLFW_KEY_SPACE)
+        character (' ');
+    else
+        key (keyCode, 0);
 }
 
 bool TextPrompt::character (juce::juce_wchar codepoint)

@@ -4495,9 +4495,13 @@ private:
             // Transport commands wait for the clock while one is running;
             // undo and clear are immediate either way.
             if ((command == commandRecord || command == commandPlay) && clock.external (sampleRate))
-                queuedCommand = command;
+                queuedCommand = queuedCommand == command ? commandNone : command; // pressing it again changes your mind
             else
+            {
+                if (command == commandClear)
+                    queuedCommand = commandNone;
                 applyCommand (command, bpm, bars);
+            }
         }
         if (queuedCommand != commandNone && ! clock.external (sampleRate))
         {
@@ -5127,7 +5131,10 @@ public:
     {
         if (command == "run")
         {
-            running.store (! running.load (std::memory_order_relaxed), std::memory_order_relaxed);
+            const auto nowRunning = ! running.load (std::memory_order_relaxed);
+            if (nowRunning)
+                resetRequested.store (true, std::memory_order_release); // a start is a downbeat
+            running.store (nowRunning, std::memory_order_relaxed);
             return true;
         }
         if (command == "reset")
@@ -5295,6 +5302,12 @@ public:
             remove (note);
             currentNote.store (heldCount > 0 ? held[static_cast<std::size_t> (heldCount - 1)] : -1, std::memory_order_relaxed);
         }
+    }
+
+    void allNotesOff() noexcept override
+    {
+        heldCount = 0;
+        currentNote.store (-1, std::memory_order_relaxed);
     }
 
     juce::String statusText() const override

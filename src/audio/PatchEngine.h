@@ -207,6 +207,7 @@ private:
     juce::String lastMidiDescription;
     std::map<std::pair<NodeId, juce::String>, bool> midiCommandGate; // CC rising-edge detection per (node, command)
     std::unordered_map<NodeId, juce::uint32> seenAudioVersions;        // recordings noticed by the timer
+    std::atomic<bool> midiNotesLost { false };                          // MIDI thread sets, audio thread releases all notes
     void openControllerOutput (const juce::String& inputName);
     void sendControllerFeedback (bool full);
     std::vector<std::unique_ptr<juce::MidiOutput>> controllerOutputs;

@@ -162,6 +162,7 @@ private:
     // the epoch before touching a node.
     void patchReplaced();
     int patchEpoch = 0;
+    bool swallowSpaceCharacter = false;
     /** Runs proceed now, or after asking what to do with unsaved changes. */
     void whenChangesAreSettled (const juce::String& action, std::function<void()> proceed);
     /** Merges one key into a node's extra state if the node is still the kind the caller meant. */

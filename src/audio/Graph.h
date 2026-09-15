@@ -237,6 +237,8 @@ public:
         the files on disk are stale. */
     /** Audio thread: a note event delivered before the block renders. Only
         nodes that play notes override it (the MIDI Note node). */
+    /** Every held note released at once (lost note-offs, audio restarting). Audio thread. */
+    virtual void allNotesOff() noexcept {}
     virtual void handleMidiNote (int channel, int note, int velocity, bool on) noexcept
     {
         juce::ignoreUnused (channel, note, velocity, on);
@@ -411,6 +413,7 @@ public:
     [[nodiscard]] int getGraphLatencySamples() const noexcept { return graphLatencySamples; }
     /** Audio thread: hands a note event to every node in the plan. */
     void dispatchMidiNote (int channel, int note, int velocity, bool on) noexcept;
+    void dispatchAllNotesOff() noexcept;
 
     RenderPlan* retiredNext = nullptr;
     bool makesDeviceReady = false;

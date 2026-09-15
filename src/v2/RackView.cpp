@@ -595,7 +595,9 @@ void RackView::openPatchFile (const juce::File& fileToLoad)
     if (file.hasFileExtension ("zip"))
     {
         juce::File extracted;
-        const auto unzip = bundle::extractBundle (file, documentsFolder ("projects").getChildFile (file.getFileNameWithoutExtension()), extracted);
+        // A project already extracted (and maybe saved into since) is never overwritten: a fresh folder each time.
+        const auto target = documentsFolder ("projects").getChildFile (file.getFileNameWithoutExtension()).getNonexistentSibling (true);
+        const auto unzip = bundle::extractBundle (file, target, extracted);
         if (unzip.failed())
         {
             say (unzip.getErrorMessage());
@@ -2408,6 +2410,7 @@ void RackView::pollGamepad (double now)
         if (pad.present)
         {
             pad.present = false;
+            prompt.setKeyboardVisible (false);
             dirty = true;
         }
         return;
@@ -2433,9 +2436,9 @@ void RackView::pollGamepad (double now)
         {
             prompt.setKeyboardVisible (true); // no physical keyboard assumed while a pad drives
             if (pressed (GLFW_GAMEPAD_BUTTON_B))
-                key (GLFW_KEY_BACKSPACE, true, 0);
+                prompt.padKey (GLFW_KEY_BACKSPACE);
             if (pressed (GLFW_GAMEPAD_BUTTON_X))
-                key (GLFW_KEY_SPACE, true, 0);
+                prompt.padKey (GLFW_KEY_SPACE);
             if (pressed (GLFW_GAMEPAD_BUTTON_Y))
                 prompt.acceptNow();
             if (pressed (GLFW_GAMEPAD_BUTTON_START))
@@ -2448,12 +2451,20 @@ void RackView::pollGamepad (double now)
             const bool held = state.buttons[button] == GLFW_PRESS;
             if (held && (pressed (button) || now - pad.lastRepeat > 0.22))
             {
-                key (keyCode, true, 0);
+                if (prompt.isOpen())
+                    prompt.padKey (keyCode);
+                else
+                    key (keyCode, true, 0);
                 pad.lastRepeat = now;
             }
         }
         if (pressed (GLFW_GAMEPAD_BUTTON_A))
-            key (GLFW_KEY_ENTER, true, 0);
+        {
+            if (prompt.isOpen())
+                prompt.padKey (GLFW_KEY_ENTER);
+            else
+                key (GLFW_KEY_ENTER, true, 0);
+        }
         if (pressed (GLFW_GAMEPAD_BUTTON_B) && ! prompt.isOpen())
             key (GLFW_KEY_ESCAPE, true, 0);
         if (pressed (GLFW_GAMEPAD_BUTTON_X) && (browser.isOpen() || toneBrowser.isOpen()))
@@ -4214,6 +4225,12 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
 
 void RackView::character (unsigned int codepoint)
 {
+    if (swallowSpaceCharacter && codepoint == ' ')
+    {
+        swallowSpaceCharacter = false; // the Space that picked a menu item
+        return;
+    }
+    swallowSpaceCharacter = false;
     if (prompt.character (static_cast<juce::juce_wchar> (codepoint)) || browser.character (static_cast<juce::juce_wchar> (codepoint))
         || toneBrowser.character (static_cast<juce::juce_wchar> (codepoint)))
         dirty = true;
@@ -4797,8 +4814,10 @@ void RackView::key (int keyCode, bool pressed, int mods)
         dirty = true;
         return;
     }
+    swallowSpaceCharacter = false;
     if (menu.isOpen())
     {
+        swallowSpaceCharacter = keyCode == GLFW_KEY_SPACE;
         menu.key (keyCode);
         dirty = true;
         return;
