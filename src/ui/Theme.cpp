@@ -51,6 +51,7 @@ juce::Colour kindAccent (NodeKind kind)
         case NodeKind::stereoDelay:          return juce::Colour (0xff53c7ff);
         case NodeKind::stereoChorus:         return juce::Colour (0xffff9eb5);
         case NodeKind::stereoReverb:         return juce::Colour (0xff6fc7d9);
+        case NodeKind::tuner:                return juce::Colour (0xffb8ffd9);
     }
 
     jassertfalse;
@@ -106,6 +107,7 @@ juce::String kindTag (NodeKind kind)
         case NodeKind::stereoDelay:
         case NodeKind::stereoChorus:
         case NodeKind::stereoReverb:         return "ST";
+        case NodeKind::tuner:                return "TUNE";
     }
 
     jassertfalse;
@@ -462,6 +464,13 @@ void drawKindGlyph (juce::Graphics& graphics, NodeKind kind,
             graphics.fillEllipse (x + w * 0.5f - 1.5f, y + h * 0.18f - 1.5f, 3.0f, 3.0f);
             graphics.fillEllipse (x + w * 0.68f - 1.5f, y + h * 0.28f - 1.5f, 3.0f, 3.0f);
             return;
+        case NodeKind::tuner:
+            path.startNewSubPath (x + w * 0.5f, y + h * 0.85f);
+            path.lineTo (x + w * 0.5f, y + h * 0.15f);
+            path.startNewSubPath (x + w * 0.2f, y + h * 0.85f);
+            path.lineTo (x + w * 0.8f, y + h * 0.85f);
+            graphics.strokePath (path, stroke);
+            return;
         case NodeKind::pan:
         case NodeKind::stereoMerge:
         case NodeKind::stereoDelay:
@@ -498,6 +507,7 @@ void drawKindGlyph (juce::Graphics& graphics, NodeKind kind,
 const std::vector<NodePaletteEntry>& nodePalette()
 {
     static const std::vector<NodePaletteEntry> entries {
+        { NodeKind::tuner,                "TUNER",          "UTILITY",     "Chromatic tuner; audio passes through" },
         { NodeKind::gain,                 "GAIN",           "UTILITY",     "Trim or boost a mono signal" },
         { NodeKind::mixer,                "4-CH MIXER",     "UTILITY",     "Sum four mono signals" },
         { NodeKind::crossfade,            "CROSSFADE",      "UTILITY",     "Equal-power blend between two signals" },

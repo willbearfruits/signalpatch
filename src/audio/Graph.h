@@ -65,7 +65,8 @@ enum class NodeKind
     stereoMerge,
     stereoDelay,
     stereoChorus,
-    stereoReverb
+    stereoReverb,
+    tuner
 };
 
 juce::String nodeKindName (NodeKind kind);

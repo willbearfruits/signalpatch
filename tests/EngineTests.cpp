@@ -754,7 +754,7 @@ void testAllNodeKindsRenderFiniteOutput()
         NodeKind::stepSequencer, NodeKind::macro, NodeKind::spectralFollower,
         NodeKind::script, NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal,
         NodeKind::cabinet, NodeKind::looper, NodeKind::pan, NodeKind::stereoMerge, NodeKind::stereoDelay,
-        NodeKind::stereoChorus, NodeKind::stereoReverb
+        NodeKind::stereoChorus, NodeKind::stereoReverb, NodeKind::tuner
     };
 
     for (const auto kind : kinds)
@@ -876,7 +876,7 @@ PatchDocument buildKitchenSinkDocument()
         NodeKind::pitchShifter, NodeKind::pitchCorrector, NodeKind::granular,
         NodeKind::compressor, NodeKind::gate, NodeKind::limiter,
         NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal, NodeKind::cabinet, NodeKind::looper, NodeKind::script,
-        NodeKind::pan, NodeKind::stereoMerge, NodeKind::stereoDelay, NodeKind::stereoChorus, NodeKind::stereoReverb
+        NodeKind::pan, NodeKind::stereoMerge, NodeKind::stereoDelay, NodeKind::stereoChorus, NodeKind::stereoReverb, NodeKind::tuner
     };
     NodeId previous = 0;
     for (const auto kind : chainKinds)
@@ -1727,6 +1727,30 @@ void testStereoNodes()
     }
 }
 
+void testTunerDetectsPitch()
+{
+    auto tuner = createNodeProcessor (NodeKind::tuner);
+    const int block = 64;
+    tuner->prepare (48000.0, block);
+    juce::AudioBuffer<float> inputs (tuner->getNumInputPorts(), block), outputs (1, block);
+    double phase = 0.0;
+    for (int pass = 0; pass < 120; ++pass) // > 4096 samples of 110 Hz (A2) with a little harmonic content
+    {
+        inputs.clear();
+        for (int i = 0; i < block; ++i)
+        {
+            inputs.setSample (0, i, 0.4f * static_cast<float> (std::sin (phase)) + 0.15f * static_cast<float> (std::sin (2.0 * phase)));
+            phase += juce::MathConstants<double>::twoPi * 110.0 / 48000.0;
+        }
+        tuner->render (inputs, outputs, block);
+    }
+    juce::Thread::sleep (45); // past the analysis cache
+    const auto status = tuner->statusText();
+    expect (status.startsWith ("A2"), "tuner should read A2 for 110 Hz: " + status.toStdString());
+    const auto needle = tuner->currentStep();
+    expect (needle >= 45 && needle <= 55, "needle should sit near centre: " + std::to_string (needle));
+}
+
 int main()
 {
     // Flush every insertion so a crash on CI still shows which test was
@@ -1763,7 +1787,8 @@ int main()
         { "looper records, closes, overdubs, undoes", testLooperRecordsClosesOverdubsAndUndoes },
         { "recorded audio saves and loads with the patch", testRecordedAudioSavesAndLoadsWithThePatch },
         { "midi mappings round trip and scrub", testMidiMappingsRoundTripAndScrub },
-        { "stereo nodes: pan, ping-pong delay, cabinet R, reverb/chorus", testStereoNodes }
+        { "stereo nodes: pan, ping-pong delay, cabinet R, reverb/chorus", testStereoNodes },
+        { "tuner detects pitch", testTunerDetectsPitch }
     };
 
     int failures = 0;

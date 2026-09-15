@@ -12,7 +12,9 @@
 #define NANOVG_GL3 1 // declarations only; the implementation lives in NanoVGImpl.cpp
 #include <nanovg_gl.h>
 
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace
 {
@@ -82,10 +84,20 @@ int main (int argc, char** argv)
         std::fprintf (stderr, "Audio offline: %s\n", result.getErrorMessage().toRawUTF8());
     signalpatch::v2::RackView rack (engine, vg, font);
     bool startOnBoard = false;
+    {
+        float contentX = 1.0f, contentY = 1.0f;
+        glfwGetWindowContentScale (window, &contentX, &contentY);
+        if (contentX > 1.05f && std::abs (rack.getUiScale() - 1.0f) < 1.0e-3f)
+            rack.setUiScale (contentX); // seed from the display the first time
+        if (const auto* env = std::getenv ("SIGNALPATCH_SCALE"))
+            rack.setUiScale (static_cast<float> (std::atof (env)));
+    }
     for (int index = 1; index < argc; ++index)
     {
         if (juce::String (argv[index]) == "--board")
             startOnBoard = true;
+        else if (juce::String (argv[index]).startsWith ("--scale="))
+            rack.setUiScale (juce::String (argv[index]).fromFirstOccurrenceOf ("=", false, false).getFloatValue());
         else if (argv[index][0] != '-')
             rack.loadPatchFromCommandLine (juce::File::getCurrentWorkingDirectory().getChildFile (argv[index]));
     }
@@ -121,7 +133,7 @@ int main (int argc, char** argv)
     {
         int width = 0, height = 0;
         glfwGetWindowSize (window, &width, &height);
-        rack.fitToPatch (width, height);
+        rack.fitToPatch (static_cast<int> (width / rack.getUiScale()), static_cast<int> (height / rack.getUiScale()));
         if (startOnBoard)
             rack.showBoard();
     }

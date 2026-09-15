@@ -72,6 +72,15 @@ RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
     : engine (engineToUse), vg (context), font (fontId), menu (context, fontId), prompt (context, fontId), browser (context, fontId)
 {
     engine.addChangeListener (this);
+    {
+        juce::PropertiesFile::Options options;
+        options.applicationName = "SignalPatch";
+        options.filenameSuffix = "settings";
+        options.folderName = "SignalPatch";
+        options.osxLibrarySubFolder = "Application Support";
+        settings = std::make_unique<juce::PropertiesFile> (options);
+        uiScale = juce::jlimit (0.6f, 2.5f, static_cast<float> (settings->getDoubleValue ("uiScale", 1.0)));
+    }
     engine.onParameterChangedByMidi = [this] (NodeId id) { invalidatePlate (id); dirty = true; };
     engine.onMidiUiTarget = [this] (const MidiMapping& mapping, const juce::MidiMessage&)
     {
@@ -403,6 +412,26 @@ juce::Rectangle<float> RackView::buttonBounds (const Layout& layout, juce::Point
     const auto y = bottom - 26.0f - static_cast<float> (rows - 1 - button.row) * 28.0f;
     const auto width = (layout.w - 24.0f - static_cast<float> (rowCount - 1) * 6.0f) / static_cast<float> (rowCount);
     return { origin.x + 12.0f + static_cast<float> (indexInRow) * (width + 6.0f), y, width, 22.0f };
+}
+
+void RackView::setUiScale (float scale)
+{
+    scale = juce::jlimit (0.6f, 2.5f, scale);
+    if (std::abs (scale - uiScale) < 1.0e-3f)
+        return;
+    // Keep the rack and board where they are on screen across the change.
+    const auto factor = scale / uiScale;
+    panX /= factor; panY /= factor;
+    boardPanX /= factor; boardPanY /= factor;
+    uiScale = scale;
+    invalidateAllPlates();
+    if (settings != nullptr)
+    {
+        settings->setValue ("uiScale", uiScale);
+        settings->saveIfNeeded();
+    }
+    say ("UI scale " + juce::String (juce::roundToInt (uiScale * 100.0f)) + "%");
+    dirty = true;
 }
 
 void RackView::say (const juce::String& text)
@@ -1093,6 +1122,40 @@ void RackView::drawPreviewContent (const Layout& layout, const NodeModel& model,
                     nvgStroke (vg);
                 }
             }
+        return;
+    }
+
+    if (kind == NodeKind::tuner)
+    {
+        const auto needle = model.processor->currentStep(); // 0-100, -1 silent
+        const auto status = model.processor->statusText();
+        const auto bar = area.reduced (10.0f, 30.0f);
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, bar.getX(), bar.getY(), bar.getWidth(), bar.getHeight(), 3.0f);
+        nvgFillColor (vg, lighter (palette::nodeDark, 0.12f));
+        nvgFill (vg);
+        nvgBeginPath (vg);
+        nvgRect (vg, bar.getCentreX() - 1.0f, bar.getY() - 4.0f, 2.0f, bar.getHeight() + 8.0f);
+        nvgFillColor (vg, alpha (palette::mutedText, 0.8f));
+        nvgFill (vg);
+        if (needle >= 0)
+        {
+            const auto x = bar.getX() + bar.getWidth() * static_cast<float> (needle) / 100.0f;
+            const bool inTune = std::abs (needle - 50) <= 3;
+            nvgBeginPath (vg);
+            nvgRect (vg, x - 2.0f, bar.getY() - 6.0f, 4.0f, bar.getHeight() + 12.0f);
+            nvgFillColor (vg, inTune ? palette::okay : palette::warning);
+            nvgFill (vg);
+        }
+        nvgFontFaceId (vg, font);
+        nvgFontSize (vg, needle >= 0 ? 15.0f : 11.0f);
+        nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_TOP);
+        nvgFillColor (vg, needle >= 0 && std::abs (needle - 50) <= 3 ? palette::okay : palette::text);
+        nvgText (vg, area.getCentreX(), area.getY() + 4.0f, status.upToFirstOccurrenceOf ("  ", false, false).toRawUTF8(), nullptr);
+        nvgFontSize (vg, 9.0f);
+        nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
+        nvgFillColor (vg, palette::mutedText);
+        nvgText (vg, area.getCentreX(), area.getBottom() - 3.0f, status.fromFirstOccurrenceOf ("  ", false, false).trim().toRawUTF8(), nullptr);
         return;
     }
 
@@ -3068,7 +3131,7 @@ void RackView::drawNode (const Layout& layout, double now)
 
     drawPreviewContent (layout, *model, origin);
 
-    const auto status = model->processor->statusText();
+    const auto status = layout.kind == NodeKind::tuner || layout.kind == NodeKind::looper ? juce::String() : model->processor->statusText();
     if (status.isNotEmpty())
     {
         nvgFontFaceId (vg, font);
@@ -3253,14 +3316,18 @@ void RackView::drawHud (int width, int height, double now)
     const auto hint = message.isNotEmpty() ? message
         : mode == Mode::board
             ? juce::String ("drag pedals to place them  |  Shift+click to select several, right-click to group them into one pedal  |  1-5 load a slot (knobs glide), Shift+1-5 store  |  Tab rack")
-            : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan  |  wheel zooms  |  Del  Ctrl+Z  Ctrl+D  M mute  F fit  |  Tab board");
+            : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan  |  wheel zooms  |  Del  Ctrl+Z  Ctrl+D  M mute  F fit  |  Ctrl +/- UI scale  |  Tab board");
     nvgText (vg, 16.0f, static_cast<float> (height) - 10.0f, hint.toRawUTF8(), nullptr);
 }
 
-void RackView::render (int width, int height, float ratio, double now)
+void RackView::render (int physicalWidth, int physicalHeight, float ratio, double now)
 {
     const auto start = juce::Time::getMillisecondCounterHiRes();
-    pixelRatio = ratio;
+    // Everything below works in logical pixels; the UI scale is one transform
+    // on the frame, so a 7-inch screen and a 27-inch one get the same layout.
+    const int width = juce::jmax (1, static_cast<int> (physicalWidth / uiScale));
+    const int height = juce::jmax (1, static_cast<int> (physicalHeight / uiScale));
+    pixelRatio = ratio * uiScale;
     windowW = width;
     windowH = height;
     menu.setWindowSize (width, height);
@@ -3269,7 +3336,7 @@ void RackView::render (int width, int height, float ratio, double now)
 
     // Plates are rasterised at the settled zoom; while the zoom eases they
     // are drawn scaled, then re-rasterised once when it lands.
-    const auto wantedScale = juce::jlimit (0.5f, 2.5f, static_cast<float> (zoom) * ratio);
+    const auto wantedScale = juce::jlimit (0.5f, 3.0f, static_cast<float> (zoom) * ratio * uiScale);
     const bool zoomSettled = std::abs (targetZoom - zoom) < 0.0005;
     if (zoomSettled && std::abs (wantedScale - cachedPlateScale) > 0.01f)
     {
@@ -3293,9 +3360,10 @@ void RackView::render (int width, int height, float ratio, double now)
         else
             ++it;
     }
-    glViewport (0, 0, static_cast<int> (width * ratio), static_cast<int> (height * ratio));
+    glViewport (0, 0, static_cast<int> (physicalWidth * ratio), static_cast<int> (physicalHeight * ratio));
 
-    nvgBeginFrame (vg, static_cast<float> (width), static_cast<float> (height), ratio);
+    nvgBeginFrame (vg, static_cast<float> (physicalWidth), static_cast<float> (physicalHeight), ratio);
+    nvgScale (vg, uiScale, uiScale);
     if (mode == Mode::board)
     {
         nvgBeginPath (vg);
@@ -3384,6 +3452,8 @@ void RackView::character (unsigned int codepoint)
 
 void RackView::mouseMove (double x, double y)
 {
+    x /= uiScale;
+    y /= uiScale;
     mouseX = x;
     mouseY = y;
     if (browser.isOpen())
@@ -3483,7 +3553,8 @@ void RackView::mouseMove (double x, double y)
 
 void RackView::mouseButton (int button, bool pressed, int mods, double x, double y)
 {
-    juce::ignoreUnused (mods);
+    x /= uiScale;
+    y /= uiScale;
     if (prompt.isOpen())
         return;
     if (browser.isOpen())
@@ -3782,6 +3853,8 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
 
 void RackView::scroll (double dx, double dy, int mods, double x, double y)
 {
+    x /= uiScale;
+    y /= uiScale;
     if (browser.isOpen())
     {
         browser.scroll (dy);
@@ -3934,12 +4007,11 @@ void RackView::key (int keyCode, bool pressed, int mods)
         else
             fitToPatch (windowW, windowH);
     }
-    else if (keyCode == GLFW_KEY_0 && ctrl)
-    {
-        targetZoom = 1.0;
-        zoomAnchorX = mouseX;
-        zoomAnchorY = mouseY;
-        dirty = true;
-    }
+    else if (ctrl && (keyCode == GLFW_KEY_EQUAL || keyCode == GLFW_KEY_KP_ADD))
+        setUiScale (uiScale * 1.1f);
+    else if (ctrl && (keyCode == GLFW_KEY_MINUS || keyCode == GLFW_KEY_KP_SUBTRACT))
+        setUiScale (uiScale / 1.1f);
+    else if (ctrl && keyCode == GLFW_KEY_0)
+        setUiScale (1.0f);
 }
 } // namespace signalpatch::v2

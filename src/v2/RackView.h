@@ -37,6 +37,9 @@ public:
     void character (unsigned int codepoint);
 
     void fitToPatch (int width, int height);
+    /** Global UI scale (logical pixels are multiplied by it); saved in settings. */
+    void setUiScale (float scale);
+    [[nodiscard]] float getUiScale() const noexcept { return uiScale; }
     void loadPatchFromCommandLine (const juce::File& file) { openPatchFile (file); }
     /** --board: open on the pedalboard instead of the rack. */
     void showBoard() { setMode (Mode::board); }
@@ -152,6 +155,8 @@ private:
     std::unordered_map<NodeId, PlateCache> plates;
     float cachedPlateScale = 0.0f;
     float pixelRatio = 1.0f;
+    float uiScale = 1.0f;
+    std::unique_ptr<juce::PropertiesFile> settings;
     bool structureDirty = true;
     bool dirty = true;
     bool animating = false;

@@ -108,6 +108,7 @@ inline NVGcolor accent (NodeKind kind) noexcept
         case NodeKind::stereoDelay:          return rgb (0xff53c7ff);
         case NodeKind::stereoChorus:         return rgb (0xffff9eb5);
         case NodeKind::stereoReverb:         return rgb (0xff6fc7d9);
+        case NodeKind::tuner:                return rgb (0xffb8ffd9);
     }
     return palette::selection;
 }
@@ -122,6 +123,7 @@ struct ModuleEntry
 inline const std::vector<ModuleEntry>& moduleCatalogue()
 {
     static const std::vector<ModuleEntry> entries {
+        { NodeKind::tuner,                "TUNER",          "UTILITY" },
         { NodeKind::gain,                 "GAIN",           "UTILITY" },
         { NodeKind::mixer,                "4-CH MIXER",     "UTILITY" },
         { NodeKind::crossfade,            "CROSSFADE",      "UTILITY" },

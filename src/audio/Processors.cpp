@@ -4546,6 +4546,153 @@ private:
     Side left, right;
 };
 
+// Tuner: passes audio through and shows note / cents. Detection is YIN on a
+// snapshot of the last ~85 ms, run on the message thread when the UI asks
+// (statusText / currentStep), so the audio callback only copies samples.
+class TunerNode final : public DspNode
+{
+public:
+    TunerNode() : DspNode (NodeKind::tuner, nodeKindName (NodeKind::tuner))
+    {
+        addInputPort ("In", SignalType::audio);
+        addOutputPort ("Out", SignalType::audio);
+        addParameter ("reference", "A =", "Hz", juce::NormalisableRange<float> (415.0f, 466.0f, 0.1f), 440.0f, 0.0f, false);
+    }
+
+    juce::String statusText() const override
+    {
+        analyse();
+        if (detectedHz <= 0.0f)
+            return "- - -";
+        return noteName + "  " + (cents >= 0 ? "+" : "") + juce::String (cents) + " cents   " + juce::String (detectedHz, 1) + " Hz";
+    }
+
+    /** Needle position 0-100 (50 = in tune), -1 when nothing is detected. */
+    int currentStep() const noexcept override
+    {
+        analyse();
+        return detectedHz > 0.0f ? juce::jlimit (0, 100, 50 + cents) : -1;
+    }
+
+private:
+    static constexpr int windowSize = 4096;
+
+    void prepareDsp (double newSampleRate, int) override
+    {
+        sampleRate = newSampleRate;
+        ring.assign (windowSize, 0.0f);
+        writeIndex.store (0, std::memory_order_relaxed);
+    }
+    void resetDsp() noexcept override {}
+
+    void processDsp (const juce::AudioBuffer<float>& inputs, juce::AudioBuffer<float>& outputs, int numSamples) noexcept override
+    {
+        const auto* input = inputs.getReadPointer (0);
+        auto* output = outputs.getWritePointer (0);
+        auto index = writeIndex.load (std::memory_order_relaxed);
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const auto value = std::isfinite (input[sample]) ? input[sample] : 0.0f;
+            output[sample] = value;
+            ring[static_cast<std::size_t> (index)] = value;
+            index = (index + 1) % windowSize;
+        }
+        writeIndex.store (index, std::memory_order_release);
+    }
+
+    // Message thread. Cached for 40 ms so a busy UI does not repeat the work.
+    void analyse() const
+    {
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        if (now - lastAnalysis < 40.0 || ring.empty())
+            return;
+        lastAnalysis = now;
+        // Snapshot, decimated by two (24 kHz is plenty for guitar and bass).
+        std::array<float, windowSize / 2> frame {};
+        const auto start = writeIndex.load (std::memory_order_acquire);
+        float energy = 0.0f;
+        for (int i = 0; i < windowSize / 2; ++i)
+        {
+            const auto a = ring[static_cast<std::size_t> ((start + 2 * i) % windowSize)];
+            const auto b = ring[static_cast<std::size_t> ((start + 2 * i + 1) % windowSize)];
+            frame[static_cast<std::size_t> (i)] = 0.5f * (a + b);
+            energy += frame[static_cast<std::size_t> (i)] * frame[static_cast<std::size_t> (i)];
+        }
+        if (energy / (windowSize / 2) < 1.0e-6f) // silence
+        {
+            detectedHz = 0.0f;
+            return;
+        }
+        const auto rate = sampleRate * 0.5;
+        const int minLag = juce::jmax (2, static_cast<int> (rate / 1200.0));  // 1.2 kHz
+        const int maxLag = juce::jmin (windowSize / 4, static_cast<int> (rate / 27.5)); // A0
+        // YIN difference function with cumulative mean normalisation.
+        static thread_local std::vector<float> d;
+        d.assign (static_cast<std::size_t> (maxLag + 1), 0.0f);
+        const int half = windowSize / 4;
+        for (int lag = minLag; lag <= maxLag; ++lag)
+        {
+            float sum = 0.0f;
+            for (int i = 0; i < half; ++i)
+            {
+                const auto delta = frame[static_cast<std::size_t> (i)] - frame[static_cast<std::size_t> (i + lag)];
+                sum += delta * delta;
+            }
+            d[static_cast<std::size_t> (lag)] = sum;
+        }
+        // Cumulative mean normalisation over the whole range first, then the
+        // search: comparing normalised against raw values sent the walk astray.
+        float running = 0.0f;
+        for (int lag = minLag; lag <= maxLag; ++lag)
+        {
+            running += d[static_cast<std::size_t> (lag)];
+            d[static_cast<std::size_t> (lag)] = running > 0.0f ? d[static_cast<std::size_t> (lag)] * static_cast<float> (lag - minLag + 1) / running : 1.0f;
+        }
+        int best = -1;
+        for (int lag = minLag; lag <= maxLag; ++lag)
+        {
+            if (d[static_cast<std::size_t> (lag)] < 0.15f)
+            {
+                best = lag; // first dip under the threshold: walk to its bottom
+                while (best + 1 <= maxLag && d[static_cast<std::size_t> (best + 1)] < d[static_cast<std::size_t> (best)])
+                    ++best;
+                break;
+            }
+        }
+        if (best < 0)
+        {
+            detectedHz = 0.0f;
+            return;
+        }
+        // Parabolic interpolation around the minimum.
+        auto period = static_cast<double> (best);
+        if (best > minLag && best < maxLag)
+        {
+            const auto s0 = d[static_cast<std::size_t> (best - 1)], s1 = d[static_cast<std::size_t> (best)], s2 = d[static_cast<std::size_t> (best + 1)];
+            const auto denominator = 2.0f * (2.0f * s1 - s2 - s0);
+            if (std::abs (denominator) > 1.0e-9f)
+                period += (s2 - s0) / denominator;
+        }
+        const auto hz = static_cast<float> (rate / period);
+        // Smooth a little between analyses so the needle does not jitter.
+        detectedHz = detectedHz > 0.0f && std::abs (hz - detectedHz) < detectedHz * 0.06f ? detectedHz * 0.6f + hz * 0.4f : hz;
+        const auto reference = getParameter (0).getValue();
+        const auto midi = 69.0 + 12.0 * std::log2 (detectedHz / reference);
+        const auto nearest = static_cast<int> (std::round (midi));
+        cents = juce::jlimit (-50, 50, static_cast<int> (std::round ((midi - nearest) * 100.0)));
+        static const char* names[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+        noteName = juce::String (names[((nearest % 12) + 12) % 12]) + juce::String (nearest / 12 - 1);
+    }
+
+    double sampleRate = 48000.0;
+    std::vector<float> ring;
+    std::atomic<int> writeIndex { 0 };
+    mutable double lastAnalysis = 0.0;
+    mutable float detectedHz = 0.0f;
+    mutable int cents = 0;
+    mutable juce::String noteName;
+};
+
 std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
 {
     switch (kind)
@@ -4593,6 +4740,7 @@ std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
         case NodeKind::stereoDelay:          return std::make_shared<StereoDelayNode>();
         case NodeKind::stereoChorus:         return std::make_shared<StereoChorusNode>();
         case NodeKind::stereoReverb:         return std::make_shared<StereoReverbNode>();
+        case NodeKind::tuner:                return std::make_shared<TunerNode>();
         case NodeKind::hardwareInput:
         case NodeKind::hardwareOutput:       break;
     }
