@@ -24,9 +24,21 @@ Load-bearing gaps that most requests run into: the engine is **mono**, has
 
 ## The destination
 
-An ASUS ROG Ally X as a self-contained rig: boot to the Board, a small USB
-interface, a purpose-built foot controller, gamepad for everything the feet
-don't do. Every phase below is ordered by how much closer it gets that box.
+One instrument that runs wherever it is plugged in: the desktop (primary —
+where rigs are built and most playing happens), and a handheld such as the
+ROG Ally X for the stage, driven by a purpose-built foot controller and a
+gamepad. The rule that follows is **scale, don't specialise**: one UI whose
+layout, hit targets and density follow the window size and pixel density,
+so a 27-inch desktop, a laptop and a 7-inch handheld all get the same app,
+not three. Every phase below is ordered by how much closer it gets that.
+
+Cross-cutting from 0.3 on:
+- **UI scale**: a global scale factor (Ctrl+/- and a setting, seeded from
+  the display's content scale), all sizes in logical units, pedals and
+  menus sized for fingers at scale 1.25+ automatically.
+- **Input parity**: everything reachable by pointer, touch, gamepad and MIDI.
+- **Engine budget**: every node meets a 128-sample deadline on a laptop-class
+  CPU (the Ally X's Z1 Extreme is the reference floor).
 
 ---
 
@@ -75,18 +87,19 @@ Exit: a whole song with hands on the guitar only.
 Exit: the rig into the interface's two outputs sounds like a record, not a
 demo.
 
-## 0.6 — The handheld
+## 0.6 — Handheld deployment
 
 - **Ally X bring-up**: OS decision (Linux recommended: native Wayland, the
   PipeWire/JACK path we already qualify on; Windows kept building), USB
   interface latency qualification at 64/128, battery vs performance presets.
-- **Boot to Board**: `--board --kiosk --unmute`, 7-inch layout (larger
-  targets, fewer knobs per pedal by default), touch as a first-class pointer.
+- **Boot to Board**: `--board --kiosk --unmute`; the same UI at handheld
+  scale (no separate layout), touch as a first-class pointer.
 - **Gamepad-only recovery** from every state (menus, browser, prompts).
-- Packaging for the box (AppImage/Flatpak), CI for `signalpatch2` on Linux
-  and Windows.
+- Packaging (AppImage/Flatpak, Windows zip), CI for the app on Linux and
+  Windows.
 
-Exit: pick it up, plug in, play a gig without touching a keyboard.
+Exit: the rig built on the desktop runs unchanged on the handheld, and a gig
+happens without touching a keyboard.
 
 ## 0.7 — Pedals you can reuse (sub-patches)
 
@@ -106,6 +119,6 @@ persistence come before control because a foot controller with nothing to
 loop is a light show. Stereo waits for control because a mono rig you can
 play beats a stereo rig you cannot; it comes before sub-patches so the port
 model changes once. The handheld is last as a phase but a constraint
-throughout: from 0.3 on, nothing lands on the Board that cannot be reached
-with a gamepad and nothing lands in the engine that cannot meet a 128-sample
-deadline on a laptop-class CPU.
+throughout: from 0.3 on, nothing lands in the UI that does not scale with
+the window and cannot be reached with a gamepad, and nothing lands in the
+engine that cannot meet a 128-sample deadline on a laptop-class CPU.
