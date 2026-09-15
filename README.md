@@ -119,9 +119,11 @@ pw-jack ./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch  # PipeWire
 
 If the status bar says **NO RT PRIORITY**, the audio thread runs under the
 ordinary scheduler and every busy moment on the desktop becomes an xrun. On
-Arch either `pacman -S rtkit` (PipeWire asks it over D-Bus) or
-`pacman -S realtime-privileges && gpasswd -a $USER realtime` and log in
-again; other distributions ship one of the two with PipeWire.
+Arch: `pacman -S realtime-privileges && gpasswd -a $USER realtime`, then log
+in again (PipeWire and its clients then take realtime through rlimits).
+Avoid rtkit with PipeWire 1.6.8: it reports its time limit in a way that
+makes PipeWire set `RLIMIT_RTTIME` to 0, and the kernel SIGKILLs every
+process the moment its audio thread goes realtime — the app included.
 
 ### Flatpak
 

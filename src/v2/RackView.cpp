@@ -3703,19 +3703,42 @@ void RackView::drawHud (int width, int height, double now)
                     + juce::String (status.bufferSize) + " smp ("
                     + juce::String (status.bufferSize * 1000.0 / juce::jmax (1.0, status.sampleRate), 2) + " ms)   "
                     + "DSP " + juce::String (status.cpuLoad * 100.0f, 1) + "%   xruns " + juce::String (status.xruns)
-                    + (status.realtimeThread ? juce::String() : juce::String ("   NO RT PRIORITY (install rtkit or realtime-privileges)"))
+                    + (status.realtimeThread ? juce::String() : juce::String ("   NO RT PRIORITY (realtime-privileges + realtime group, see README)"))
                     + "   |   " + juce::String (fps, 0) + " fps  " + juce::String (lastFrameMs, 2) + " ms/frame  "
                     + juce::String (plateRenders) + " plates rasterised";
-    nvgText (vg, 150.0f, 17.0f, line.toRawUTF8(), nullptr);
+    // The header's right side (file name, view / AUDIO / FILE buttons, mute) starts
+    // about 400 px from the edge; drop the least useful stats when the window is narrow.
+    const auto rightEdge = static_cast<float> (width) - 410.0f;
+    auto textRight = [&] (const juce::String& text)
+    {
+        float bounds[4] {};
+        nvgTextBounds (vg, 150.0f, 17.0f, text.toRawUTF8(), nullptr, bounds);
+        return bounds[2];
+    };
+    juce::String shown = line;
+    if (textRight (shown) > rightEdge)
+        shown = line.upToFirstOccurrenceOf ("   |   ", false, false); // no frame stats
+    if (textRight (shown) > rightEdge)
+        shown = juce::String (status.sampleRate / 1000.0, 1) + " kHz  " + juce::String (status.bufferSize) + " smp   DSP "
+              + juce::String (status.cpuLoad * 100.0f, 0) + "%   xruns " + juce::String (status.xruns)
+              + (status.realtimeThread ? juce::String() : juce::String ("   NO RT"));
+    if (textRight (shown) > rightEdge)
+        shown = juce::String();
+    nvgText (vg, 150.0f, 17.0f, shown.toRawUTF8(), nullptr);
     {
         const auto inputs = engine.getOpenMidiInputNames();
         const auto midiLine = inputs.isEmpty() ? juce::String ("MIDI: none")
                             : "MIDI: " + juce::String (inputs.size()) + (inputs.size() == 1 ? " input" : " inputs")
                               + (engine.getLastMidiDescription().isNotEmpty() ? "   " + engine.getLastMidiDescription() : juce::String());
+        const auto midiText = midiLine + (pad.present ? "   GAMEPAD" : "");
+        const auto x = textRight (shown) + 24.0f;
         float bounds[4] {};
-        nvgTextBounds (vg, 150.0f, 17.0f, line.toRawUTF8(), nullptr, bounds);
-        nvgFillColor (vg, inputs.isEmpty() ? alpha (palette::mutedText, 0.6f) : palette::control);
-        nvgText (vg, bounds[2] + 24.0f, 17.0f, (midiLine + (pad.present ? "   GAMEPAD" : "")).toRawUTF8(), nullptr);
+        nvgTextBounds (vg, x, 17.0f, midiText.toRawUTF8(), nullptr, bounds);
+        if (bounds[2] <= rightEdge)
+        {
+            nvgFillColor (vg, inputs.isEmpty() ? alpha (palette::mutedText, 0.6f) : palette::control);
+            nvgText (vg, x, 17.0f, midiText.toRawUTF8(), nullptr);
+        }
     }
     if (learnTarget.has_value())
     {
