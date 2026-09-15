@@ -75,7 +75,11 @@
   <p class="lead">Drag cables between modules while the audio keeps running. Every cable
   glows with its live signal and carries flow pulses toward its destination. Every effect
   has a true-bypass stomp switch. Feedback loops are legal — through a guard stage that
-  keeps them finite. Patches save as JSON and your last session comes back on launch.</p>
+  keeps them finite. Patches save as JSON and your last session comes back on launch.
+  Press Tab and the same rig is a <b>pedalboard</b>: movable pedals, groups, five rig slots
+  whose knobs glide into place, a looper, a foot controller with LED feedback, a gamepad
+  that drives it all — the instrument drawn by its own GPU renderer (GLFW + NanoVG) at
+  a couple of milliseconds a frame.</p>
   <div class="grid">
     <div class="card" style="--accent:var(--orange)"><h3>NEURAL AMP MODELER</h3>
       <p>Load real .nam amp profiles. Models parse on a worker thread and swap into the audio path atomically — no dropout, no freeze.</p></div>
@@ -91,13 +95,13 @@
       <p>Every knob has a mod socket. LFOs, envelopes, sequencers, FFT band energies and macros patch into any parameter of any module.</p></div>
   </div>
   <div class="fam">
-    <span class="chip"><b>35 modules</b></span>
+    <span class="chip"><b>45 modules</b></span>
     <span class="chip">utility</span><span class="chip">effects</span>
     <span class="chip">voice</span><span class="chip">instruments</span>
     <span class="chip">dynamics</span><span class="chip">control</span>
     <span class="chip"><b>Linux</b> ALSA / JACK / PipeWire</span>
     <span class="chip"><b>Windows</b> WASAPI / ASIO</span>
-    <span class="chip">C++20 · JUCE 8 · AGPL-3.0</span>
+    <span class="chip">C++20 · JUCE 8 engine · GLFW/OpenGL/NanoVG UI · AGPL-3.0</span>
   </div>
 </section>
 
@@ -111,11 +115,11 @@
     at arm's length. Every roadmap phase walks toward that: playability first, then stereo
     and recording, then qualified neural amps, then the handheld itself.</p>
     <div class="road">
-      <div class="step" style="--accent:var(--teal)"><span class="v">0.2</span><p>MIDI in, MIDI learn, undo/redo, presets — play it like an instrument</p></div>
-      <div class="step" style="--accent:var(--green)"><span class="v">0.3</span><p>Stereo, master recorder, sampler &amp; 4-track persistence</p></div>
-      <div class="step" style="--accent:var(--amber)"><span class="v">0.4</span><p>NAM performance qualification, cab/IR node, model browser</p></div>
-      <div class="step" style="--accent:var(--orange)"><span class="v">0.5</span><p>Engine maturity, Windows, packaging, licence-clean releases</p></div>
-      <div class="step" style="--accent:var(--violet)"><span class="v">0.6</span><p>Handheld instrument mode: controller-first, boot-to-patch</p></div>
+      <div class="step" style="--accent:var(--teal)"><span class="v">0.2 ✓</span><p>Undo/redo, cabinet IRs, portable projects, context menus everywhere</p></div>
+      <div class="step" style="--accent:var(--green)"><span class="v">0.3 ✓</span><p>The GPU app: rack + pedalboard, groups, slot glides, looper, recordings saved</p></div>
+      <div class="step" style="--accent:var(--amber)"><span class="v">0.4 ✓</span><p>MIDI learn, MIDI Note, foot-controller protocol with LED feedback, gamepad</p></div>
+      <div class="step" style="--accent:var(--orange)"><span class="v">0.5</span><p>Stereo (L/R pairs done; true multi-channel ports next)</p></div>
+      <div class="step" style="--accent:var(--violet)"><span class="v">0.6</span><p>Handheld deployment: kiosk boot, 7-inch profile, packaging</p></div>
     </div>
   </div>
 </section>
