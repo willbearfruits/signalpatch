@@ -85,6 +85,7 @@ juce::String nodeKindName (NodeKind kind)
         case NodeKind::stereoChorus:        return "Stereo Chorus";
         case NodeKind::stereoReverb:        return "Stereo Reverb";
         case NodeKind::tuner:               return "Tuner";
+        case NodeKind::midiNote:            return "MIDI Note";
     }
 
     return "Unknown";
@@ -140,6 +141,7 @@ juce::String nodeKindKey (NodeKind kind)
         case NodeKind::stereoChorus:         return "stereo-chorus";
         case NodeKind::stereoReverb:         return "stereo-reverb";
         case NodeKind::tuner:                return "tuner";
+        case NodeKind::midiNote:             return "midi-note";
     }
 
     return "unknown";
@@ -161,7 +163,7 @@ std::optional<NodeKind> nodeKindFromKey (const juce::String& key)
                              NodeKind::macro, NodeKind::spectralFollower, NodeKind::script,
                              NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal,
                              NodeKind::cabinet, NodeKind::looper, NodeKind::pan, NodeKind::stereoMerge,
-                             NodeKind::stereoDelay, NodeKind::stereoChorus, NodeKind::stereoReverb, NodeKind::tuner })
+                             NodeKind::stereoDelay, NodeKind::stereoChorus, NodeKind::stereoReverb, NodeKind::tuner, NodeKind::midiNote })
         if (key == nodeKindKey (kind))
             return kind;
 
@@ -1123,6 +1125,13 @@ juce::Result PatchDocument::loadJson (const juce::var& value)
     setMidiMappings (midiMappingsFromJson (root->getProperty ("midi")));
 
     return juce::Result::ok();
+}
+
+void RenderPlan::dispatchMidiNote (int channel, int note, int velocity, bool on) noexcept
+{
+    for (auto& renderNode : renderNodes)
+        if (renderNode != nullptr && renderNode->processor != nullptr)
+            renderNode->processor->handleMidiNote (channel, note, velocity, on);
 }
 
 RenderPlan::RenderPlan (int maximumBlockSizeToUse)

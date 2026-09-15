@@ -754,7 +754,7 @@ void testAllNodeKindsRenderFiniteOutput()
         NodeKind::stepSequencer, NodeKind::macro, NodeKind::spectralFollower,
         NodeKind::script, NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal,
         NodeKind::cabinet, NodeKind::looper, NodeKind::pan, NodeKind::stereoMerge, NodeKind::stereoDelay,
-        NodeKind::stereoChorus, NodeKind::stereoReverb, NodeKind::tuner
+        NodeKind::stereoChorus, NodeKind::stereoReverb, NodeKind::tuner, NodeKind::midiNote
     };
 
     for (const auto kind : kinds)
@@ -1751,6 +1751,35 @@ void testTunerDetectsPitch()
     expect (needle >= 45 && needle <= 55, "needle should sit near centre: " + std::to_string (needle));
 }
 
+void testMidiNoteNodeDrivesGateAndPitch()
+{
+    auto node = createNodeProcessor (NodeKind::midiNote);
+    const int block = 64;
+    node->prepare (48000.0, block);
+    juce::AudioBuffer<float> inputs (juce::jmax (1, node->getNumInputPorts()), block), outputs (3, block);
+    inputs.clear();
+    node->render (inputs, outputs, block);
+    expect (outputs.getSample (0, 5) == 0.0f, "gate should start closed");
+    node->handleMidiNote (1, 72, 100, true);   // C5: one octave above the base
+    node->render (inputs, outputs, block);
+    expect (outputs.getSample (0, 5) == 1.0f, "gate should open on note on");
+    expect (std::abs (outputs.getSample (1, 5) - 12.0f / 48.0f) < 1.0e-5f, "pitch control should be +12 semitones / 48");
+    expect (std::abs (outputs.getSample (2, 5) - 100.0f / 127.0f) < 1.0e-5f, "velocity control wrong");
+    node->handleMidiNote (1, 60, 90, true);    // second note takes over
+    node->render (inputs, outputs, block);
+    expect (std::abs (outputs.getSample (1, 5)) < 1.0e-5f, "newest note should sound");
+    node->handleMidiNote (1, 60, 0, false);    // release it: back to the held C5
+    node->render (inputs, outputs, block);
+    expect (outputs.getSample (0, 5) == 1.0f && std::abs (outputs.getSample (1, 5) - 0.25f) < 1.0e-5f, "held note should return after release");
+    node->handleMidiNote (1, 72, 0, false);
+    node->render (inputs, outputs, block);
+    expect (outputs.getSample (0, 5) == 0.0f && std::abs (outputs.getSample (1, 5) - 0.25f) < 1.0e-5f, "gate closes, pitch holds for the tail");
+    node->getParameter (1).setValue (5.0f);    // channel filter
+    node->handleMidiNote (1, 64, 100, true);
+    node->render (inputs, outputs, block);
+    expect (outputs.getSample (0, 5) == 0.0f, "notes on another channel should be ignored");
+}
+
 int main()
 {
     // Flush every insertion so a crash on CI still shows which test was
@@ -1788,7 +1817,8 @@ int main()
         { "recorded audio saves and loads with the patch", testRecordedAudioSavesAndLoadsWithThePatch },
         { "midi mappings round trip and scrub", testMidiMappingsRoundTripAndScrub },
         { "stereo nodes: pan, ping-pong delay, cabinet R, reverb/chorus", testStereoNodes },
-        { "tuner detects pitch", testTunerDetectsPitch }
+        { "tuner detects pitch", testTunerDetectsPitch },
+        { "MIDI Note node drives gate and pitch", testMidiNoteNodeDrivesGateAndPitch }
     };
 
     int failures = 0;

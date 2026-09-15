@@ -185,6 +185,9 @@ private:
     std::unordered_map<NodeId, juce::uint32> savedAudioVersions;    // per explicit save target
     std::unordered_map<NodeId, juce::uint32> autosavedAudioVersions; // per autosave
     juce::File savedAudioTarget;
+    struct MidiNoteEvent { int channel = 0, note = 0, velocity = 0; bool on = false; };
+    juce::AbstractFifo midiNoteFifo { 256 };
+    std::array<MidiNoteEvent, 256> midiNoteEvents {};
     int midiInputsOpen = 0;
     int midiRefreshCountdown = 0;
     juce::String lastMidiDescription;

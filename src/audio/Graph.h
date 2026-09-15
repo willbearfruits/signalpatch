@@ -66,7 +66,8 @@ enum class NodeKind
     stereoDelay,
     stereoChorus,
     stereoReverb,
-    tuner
+    tuner,
+    midiNote
 };
 
 juce::String nodeKindName (NodeKind kind);
@@ -229,6 +230,13 @@ public:
         into a freshly prepared node. audioContentVersion changes whenever a
         recording starts, stops, is undone or cleared, so autosave knows when
         the files on disk are stale. */
+    /** Audio thread: a note event delivered before the block renders. Only
+        nodes that play notes override it (the MIDI Note node). */
+    virtual void handleMidiNote (int channel, int note, int velocity, bool on) noexcept
+    {
+        juce::ignoreUnused (channel, note, velocity, on);
+    }
+
     [[nodiscard]] virtual bool hasAudioContent() const noexcept { return false; }
     [[nodiscard]] virtual juce::AudioBuffer<float> exportAudioContent() const { return {}; }
     virtual void importAudioContent (const juce::AudioBuffer<float>&) {}
@@ -385,6 +393,8 @@ public:
 
     [[nodiscard]] int getMaximumBlockSize() const noexcept { return maximumBlockSize; }
     [[nodiscard]] int getGraphLatencySamples() const noexcept { return graphLatencySamples; }
+    /** Audio thread: hands a note event to every node in the plan. */
+    void dispatchMidiNote (int channel, int note, int velocity, bool on) noexcept;
 
     RenderPlan* retiredNext = nullptr;
     bool makesDeviceReady = false;

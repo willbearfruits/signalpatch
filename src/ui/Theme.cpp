@@ -52,6 +52,7 @@ juce::Colour kindAccent (NodeKind kind)
         case NodeKind::stereoChorus:         return juce::Colour (0xffff9eb5);
         case NodeKind::stereoReverb:         return juce::Colour (0xff6fc7d9);
         case NodeKind::tuner:                return juce::Colour (0xffb8ffd9);
+        case NodeKind::midiNote:             return juce::Colour (0xffc7b3ff);
     }
 
     jassertfalse;
@@ -108,6 +109,7 @@ juce::String kindTag (NodeKind kind)
         case NodeKind::stereoChorus:
         case NodeKind::stereoReverb:         return "ST";
         case NodeKind::tuner:                return "TUNE";
+        case NodeKind::midiNote:             return "MIDI";
     }
 
     jassertfalse;
@@ -464,6 +466,10 @@ void drawKindGlyph (juce::Graphics& graphics, NodeKind kind,
             graphics.fillEllipse (x + w * 0.5f - 1.5f, y + h * 0.18f - 1.5f, 3.0f, 3.0f);
             graphics.fillEllipse (x + w * 0.68f - 1.5f, y + h * 0.28f - 1.5f, 3.0f, 3.0f);
             return;
+        case NodeKind::midiNote:
+            for (int key = 0; key < 4; ++key)
+                graphics.drawRect (x + w * 0.25f * static_cast<float> (key), y + h * 0.2f, w * 0.25f, h * 0.6f, 1.0f);
+            return;
         case NodeKind::tuner:
             path.startNewSubPath (x + w * 0.5f, y + h * 0.85f);
             path.lineTo (x + w * 0.5f, y + h * 0.15f);
@@ -544,6 +550,7 @@ const std::vector<NodePaletteEntry>& nodePalette()
         { NodeKind::limiter,              "LIMITER",        "DYNAMICS",    "Zero-lookahead live safety limiter" },
         { NodeKind::gate,                 "NOISE GATE",     "DYNAMICS",    "Threshold gate with attack, release and range" },
         { NodeKind::feedbackGuard,        "FEEDBACK GUARD", "DYNAMICS",    "Required causal delay and hard safety bound for loops" },
+        { NodeKind::midiNote,             "MIDI NOTE",      "CONTROL",     "Keyboard notes as gate / pitch / velocity control" },
         { NodeKind::lfo,                  "LFO",            "CONTROL",     "Audio-rate sine, triangle, square or saw control" },
         { NodeKind::randomLfo,            "RANDOM",         "CONTROL",     "Sample-and-hold random control with slew" },
         { NodeKind::envelopeFollower,     "ENVELOPE",       "CONTROL",     "Convert audio amplitude to control" },

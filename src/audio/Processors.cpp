@@ -4693,6 +4693,88 @@ private:
     mutable juce::String noteName;
 };
 
+// MIDI Note: turns keyboard notes into control signals for the synth and
+// pluck. Gate is 1 while a note is held (last-note priority), Pitch is
+// (note - base) / 48 so a mod depth of 100% on a +/-24 st pitch knob gives
+// exact semitones, Velocity is 0-1. Events arrive on the audio thread
+// through the plan, so timing is block-accurate.
+class MidiNoteNode final : public DspNode
+{
+public:
+    MidiNoteNode() : DspNode (NodeKind::midiNote, nodeKindName (NodeKind::midiNote))
+    {
+        addOutputPort ("Gate", SignalType::control);
+        addOutputPort ("Pitch", SignalType::control);
+        addOutputPort ("Velocity", SignalType::control);
+        addParameter ("base", "Base note", "", juce::NormalisableRange<float> (36.0f, 84.0f, 1.0f), 60.0f, 0.0f, false);
+        addParameter ("channel", "Channel", "", juce::NormalisableRange<float> (0.0f, 16.0f, 1.0f), 0.0f, 0.0f, false);
+    }
+
+    void handleMidiNote (int channel, int note, int velocity, bool on) noexcept override
+    {
+        const auto wanted = static_cast<int> (std::round (getParameter (1).getValue()));
+        if (wanted != 0 && channel != wanted)
+            return;
+        auto remove = [this] (int which)
+        {
+            for (int i = 0; i < heldCount; ++i)
+                if (held[static_cast<std::size_t> (i)] == which)
+                {
+                    for (int j = i; j + 1 < heldCount; ++j)
+                        held[static_cast<std::size_t> (j)] = held[static_cast<std::size_t> (j + 1)];
+                    --heldCount;
+                    return;
+                }
+        };
+        if (on)
+        {
+            remove (note);
+            if (heldCount == static_cast<int> (held.size()))
+                remove (held[0]); // oldest falls off the stack
+            held[static_cast<std::size_t> (heldCount++)] = note;
+            currentNote.store (note, std::memory_order_relaxed);
+            currentVelocity.store (velocity, std::memory_order_relaxed);
+        }
+        else
+        {
+            remove (note);
+            currentNote.store (heldCount > 0 ? held[static_cast<std::size_t> (heldCount - 1)] : -1, std::memory_order_relaxed);
+        }
+    }
+
+    juce::String statusText() const override
+    {
+        const auto note = currentNote.load (std::memory_order_relaxed);
+        if (note < 0)
+            return "waiting for notes";
+        static const char* names[] { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+        return juce::String (names[note % 12]) + juce::String (note / 12 - 1) + "  vel " + juce::String (currentVelocity.load (std::memory_order_relaxed));
+    }
+
+private:
+    void prepareDsp (double, int) override {}
+    void resetDsp() noexcept override { heldCount = 0; currentNote.store (-1, std::memory_order_relaxed); }
+
+    void processDsp (const juce::AudioBuffer<float>& inputs, juce::AudioBuffer<float>& outputs, int numSamples) noexcept override
+    {
+        const auto note = currentNote.load (std::memory_order_relaxed);
+        const auto base = parameterValue (0, inputs, 0);
+        const auto gate = note >= 0 ? 1.0f : 0.0f;
+        const auto pitch = note >= 0 ? juce::jlimit (-1.0f, 1.0f, (static_cast<float> (note) - base) / 48.0f) : lastPitch;
+        const auto velocity = static_cast<float> (currentVelocity.load (std::memory_order_relaxed)) / 127.0f;
+        lastPitch = pitch; // keep the pitch through the release so the tail does not jump
+        juce::FloatVectorOperations::fill (outputs.getWritePointer (0), gate, numSamples);
+        juce::FloatVectorOperations::fill (outputs.getWritePointer (1), pitch, numSamples);
+        juce::FloatVectorOperations::fill (outputs.getWritePointer (2), velocity, numSamples);
+    }
+
+    std::array<int, 8> held {};
+    int heldCount = 0;
+    float lastPitch = 0.0f;
+    std::atomic<int> currentNote { -1 };
+    std::atomic<int> currentVelocity { 0 };
+};
+
 std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
 {
     switch (kind)
@@ -4741,6 +4823,7 @@ std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
         case NodeKind::stereoChorus:         return std::make_shared<StereoChorusNode>();
         case NodeKind::stereoReverb:         return std::make_shared<StereoReverbNode>();
         case NodeKind::tuner:                return std::make_shared<TunerNode>();
+        case NodeKind::midiNote:             return std::make_shared<MidiNoteNode>();
         case NodeKind::hardwareInput:
         case NodeKind::hardwareOutput:       break;
     }

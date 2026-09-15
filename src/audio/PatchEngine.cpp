@@ -655,7 +655,17 @@ void PatchEngine::refreshMidiInputs()
 
 void PatchEngine::handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& message)
 {
-    // MIDI thread: hop to the message thread, where the document is safe to touch.
+    // MIDI thread. Notes go straight to the audio thread through a lock-free
+    // FIFO (block-accurate, no allocation); everything hops to the message
+    // thread too, where mappings and learn live.
+    if (message.isNoteOnOrOff())
+    {
+        const auto scope = midiNoteFifo.write (1);
+        if (scope.blockSize1 > 0)
+            midiNoteEvents[static_cast<std::size_t> (scope.startIndex1)] = { message.getChannel(), message.getNoteNumber(),
+                                                                             message.isNoteOn (true) ? message.getVelocity() : 0,
+                                                                             message.isNoteOn (true) };
+    }
     juce::MessageManager::callAsync ([this, message] { handleMidiOnMessageThread (message); });
 }
 
@@ -870,6 +880,20 @@ void PatchEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     callbackRunning.store (true, std::memory_order_relaxed);
     if (numSamples > 0)
         observedBlockSize.store (numSamples, std::memory_order_relaxed);
+    if (activePlan != nullptr && midiNoteFifo.getNumReady() > 0)
+    {
+        const auto scope = midiNoteFifo.read (midiNoteFifo.getNumReady());
+        for (int i = 0; i < scope.blockSize1; ++i)
+        {
+            const auto& event = midiNoteEvents[static_cast<std::size_t> (scope.startIndex1 + i)];
+            activePlan->dispatchMidiNote (event.channel, event.note, event.velocity, event.on);
+        }
+        for (int i = 0; i < scope.blockSize2; ++i)
+        {
+            const auto& event = midiNoteEvents[static_cast<std::size_t> (scope.startIndex2 + i)];
+            activePlan->dispatchMidiNote (event.channel, event.note, event.velocity, event.on);
+        }
+    }
 
     const auto hasPendingPlan = pendingPlan.load (std::memory_order_acquire) != nullptr;
     if (hasPendingPlan && activePlan != nullptr && audioThreadMasterGain > 1.0e-4f)
