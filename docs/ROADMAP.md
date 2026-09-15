@@ -148,12 +148,48 @@ happens without touching a keyboard.
 
 A group becomes a real module: its own ports, saved to a library, dropped
 into other rigs, shared with other people. Waits for stereo so ports are
-defined once.
+defined once. (Daisypatcher has subpatches already; the same shape will
+make the `.dpatch` export in 0.8 line up.)
+
+## 0.8 — Hardware: the controller and the rig that leaves the computer
+
+Two boards, two jobs, one bridge: **Daisypatcher** (the visual patcher for
+the Daisy Seed and ESP32-S3/C3 that compiles a patch into firmware) is the
+tool that turns anything designed here into something you can flash. The
+codebases stay separate — a JUCE rig with a neural amp inside is a
+different runtime from a worklet-plus-emitter firmware patch — and the
+`.dpatch` file is where they meet.
+
+- **The foot controller is a Daisypatcher patch.** The ESP32-S3 SuperMini
+  kit (the open handheld: buttons, encoder, OLED, USB) already runs
+  Daisypatcher patches with MIDI nodes, a menu system and an OLED designer.
+  Ship a template patch that implements `docs/CONTROLLER.md` exactly:
+  footswitches → Note On/Off 60+n on channel 10, expression → CC 11/4,
+  encoders → CC 20-23 relative, program change for slots, and the SysEx
+  feedback (0x01-0x04) driving the LEDs and the OLED labels. Flash it from
+  Daisypatcher, plug it in, and SignalPatch's MIDI learn and controller
+  feedback just work. Keep the template in this repo
+  (`packaging/controller/`) and in Daisypatcher's examples.
+- **Export a rig as a `.dpatch`.** A kind-mapping table (delay → delay,
+  SVF filter → svf, reverb → reverb, chorus/phaser/tremolo, bitcrusher,
+  compressor/limiter/gate, LFO/envelope/sequencer, looper → sample-based
+  loop, drum machine → drums + step sequencer...) so a pedalboard built and
+  played on the desktop can be compiled for a Daisy Seed pedal (the
+  DP guitar box is the natural host). Neural Amp, Cabinet convolution, the
+  vocoder and the granular cloud are flagged as desktop-only in the export
+  dialog rather than silently dropped; a NAM "nano" model on the Seed is
+  a research item, not a promise.
+- **Import the other way** so a Daisypatcher patch opens as a rack here
+  (same table, reversed) — useful for auditioning with the real interface
+  and the NAM before flashing.
+- **One vocabulary.** Where both projects name the same thing, use the same
+  key; where they differ, the mapping table is the single source of truth
+  and both READMEs point at it.
 
 ## Beyond
 
-TONE3000 in-app browsing and downloads; OSC; plug-in target (VST3/CLAP);
-scene morphing beyond slot glides; a third-party node SDK.
+OSC; plug-in target (VST3/CLAP); scene morphing beyond slot glides; a
+third-party node SDK.
 
 ## Ordering rationale
 
