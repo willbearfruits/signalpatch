@@ -27,22 +27,35 @@ namespace
 
     int loadFont (NVGcontext* vg)
     {
-        const char* candidates[] {
+        // The bundled Roboto next to the executable first (same look on every
+        // platform), then whatever the system has.
+        const auto exeDir = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
+        juce::StringArray candidates {
+            exeDir.getChildFile ("fonts").getChildFile ("Roboto-Regular.ttf").getFullPathName(),
+            exeDir.getChildFile ("Roboto-Regular.ttf").getFullPathName(),
+            "/usr/share/fonts/TTF/Roboto-Regular.ttf",
             "/usr/share/fonts/TTF/Inter-Regular.ttf",
             "/usr/share/fonts/inter/Inter-Regular.ttf",
-            "/usr/share/fonts/TTF/Roboto-Regular.ttf",
             "/usr/share/fonts/noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/TTF/DejaVuSans.ttf",
             "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         };
-        for (const auto* path : candidates)
+       #if JUCE_WINDOWS
+        const juce::File windowsFonts (juce::File::getSpecialLocation (juce::File::windowsSystemDirectory).getParentDirectory().getChildFile ("Fonts"));
+        for (const auto* name : { "segoeui.ttf", "arial.ttf", "calibri.ttf", "tahoma.ttf" })
+            candidates.add (windowsFonts.getChildFile (name).getFullPathName());
+       #elif JUCE_MAC
+        candidates.add ("/System/Library/Fonts/Supplemental/Arial.ttf");
+        candidates.add ("/Library/Fonts/Arial.ttf");
+       #endif
+        for (const auto& path : candidates)
             if (juce::File (path).existsAsFile())
             {
-                const auto id = nvgCreateFont (vg, "sans", path);
+                const auto id = nvgCreateFont (vg, "sans", path.toRawUTF8());
                 if (id >= 0)
                     return id;
             }
-        std::fprintf (stderr, "SignalPatch 2: no usable TTF font found\n");
+        std::fprintf (stderr, "SignalPatch: no usable TTF font found (put Roboto-Regular.ttf in a fonts/ folder next to the executable)\n");
         return -1;
     }
 } // namespace

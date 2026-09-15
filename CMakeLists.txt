@@ -264,8 +264,18 @@ if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
     target_compile_definitions(signalpatch PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS} ${SIGNALPATCH_APP_CURL}
         JUCE_MODAL_LOOPS_PERMITTED=1) # runDispatchLoopUntil: JUCE pumped from the GLFW frame loop
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        target_compile_definitions(signalpatch PRIVATE JUCE_ALSA=1 JUCE_JACK=1) # Windows: WASAPI/DirectSound defaults
+        target_compile_definitions(signalpatch PRIVATE JUCE_ALSA=1 JUCE_JACK=1)
+    elseif(WIN32)
+        target_compile_definitions(signalpatch PRIVATE JUCE_WASAPI=1 JUCE_DIRECTSOUND=1
+            JUCE_ASIO=$<BOOL:${SIGNALPATCH_ENABLE_ASIO}>)
+        # A windowed app: no console window behind the rack, main() kept as the entry point.
+        if(MSVC)
+            target_link_options(signalpatch PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
+        endif()
     endif()
+    # The bundled font travels next to the executable (see loadFont in Main.cpp).
+    add_custom_command(TARGET signalpatch POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/external/fonts" "$<TARGET_FILE_DIR:signalpatch>/fonts")
     set_source_files_properties("${nanovg_SOURCE_DIR}/src/nanovg.c" "${CMAKE_CURRENT_SOURCE_DIR}/external/glad/src/gl.c"
         PROPERTIES COMPILE_OPTIONS "$<IF:$<C_COMPILER_ID:MSVC>,/w,-w>")
     if(SIGNALPATCH_HAS_NAM)
@@ -296,4 +306,5 @@ endif()
 
 if(TARGET signalpatch)
     install(TARGETS signalpatch RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(DIRECTORY external/fonts/ DESTINATION "${CMAKE_INSTALL_DATADIR}/signalpatch/fonts")
 endif()

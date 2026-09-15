@@ -29,7 +29,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: SignalPatch-linux-x86_64
-          path: build/signalpatch_artefacts/RelWithDebInfo/SignalPatch
+          path: |
+            build/signalpatch_artefacts/RelWithDebInfo/SignalPatch
+            build/signalpatch_artefacts/RelWithDebInfo/fonts
           if-no-files-found: error
 
   windows:
@@ -50,5 +52,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: SignalPatch-windows-x64
-          path: build/signalpatch_artefacts/Release/SignalPatch.exe
+          path: |
+            build/signalpatch_artefacts/Release/SignalPatch.exe
+            build/signalpatch_artefacts/Release/fonts
           if-no-files-found: error

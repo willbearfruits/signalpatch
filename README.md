@@ -135,6 +135,18 @@ Avoid rtkit with PipeWire 1.6.8: it reports its time limit in a way that
 makes PipeWire set `RLIMIT_RTTIME` to 0, and the kernel SIGKILLs every
 process the moment its audio thread goes realtime — the app included.
 
+### Windows (and the ROG Ally)
+
+Every push builds `SignalPatch.exe` on the Windows CI job; the zip on the
+[releases page](https://github.com/willbearfruits/signalpatch/releases)
+is that build with its `fonts/` folder. Unzip anywhere and run
+`SignalPatch.exe` (`--kiosk --board` for a handheld). In the AUDIO menu
+pick **Windows Audio (Exclusive Mode)** and your interface for the lowest
+latency; ASIO needs Steinberg's SDK and is off in these builds
+(`-DSIGNALPATCH_ENABLE_ASIO=ON` with the SDK enables it). The built-in
+controller of a handheld is seen as a gamepad, so the Board's pad map
+applies from the start.
+
 ### Flatpak
 
 ```sh
