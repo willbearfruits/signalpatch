@@ -1644,6 +1644,27 @@ void testRecordedAudioSavesAndLoadsWithThePatch()
     temp.deleteRecursively();
 }
 
+void testDrumMachineTapTempo()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    const auto drums = document.addNode (NodeKind::drumMachine, { 0.0f, 0.0f }, 820);
+    auto& node = *document.findNode (drums)->processor;
+    auto& bpm = node.getParameter (0);
+    expect (bpm.name == "Tempo", "parameter 0 should be the tempo");
+    const auto before = bpm.getValue();
+    expect (node.handleUiCommand ("tap"), "tap should be a known command");
+    expect (std::abs (bpm.getValue() - before) < 1.0e-6f, "one tap must not change the tempo");
+    // Three more taps 150 ms apart: 400 bpm is out of range, so the knob clamps to 240 - use 300 ms => 200 bpm.
+    for (int i = 0; i < 3; ++i)
+    {
+        juce::Thread::sleep (300);
+        node.handleUiCommand ("tap");
+    }
+    expect (std::abs (bpm.getValue() - 200.0f) < 12.0f, "four taps at 300 ms should give ~200 bpm, got " + std::to_string (bpm.getValue()));
+    expect (! node.handleUiCommand ("nonsense"), "unknown commands are refused");
+}
+
 void testControllerFeedback()
 {
     PatchDocument document;
@@ -1707,21 +1728,30 @@ void testMidiMappingsRoundTripAndScrub()
     slot.target = MidiMapping::Target::slot; slot.slot = 2;
     MidiMapping encoder = knob;
     encoder.number = 20; encoder.relative = true;
+    MidiMapping pedal = knob;
+    pedal.number = 11; pedal.low = 20; pedal.high = 110;
     MidiMapping dangling = knob;
     dangling.node = 999; // no such node: dropped on set
-    document.setMidiMappings ({ knob, stomp, rec, slot, encoder, dangling });
-    expect (document.getMidiMappings().size() == 5, "dangling mapping should be dropped");
+    document.setMidiMappings ({ knob, stomp, rec, slot, encoder, pedal, dangling });
+    expect (document.getMidiMappings().size() == 6, "dangling mapping should be dropped");
 
     PatchDocument reloaded;
     reloaded.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
     expectOk (reloaded.loadJson (document.toJson()), "reload with midi");
     const auto& back = reloaded.getMidiMappings();
-    expect (back.size() == 5, "mappings lost in the round trip");
+    expect (back.size() == 6, "mappings lost in the round trip");
     expect (back[0].matches (MidiMapping::Source::controlChange, 5, 21) && back[0].target == MidiMapping::Target::parameter && back[0].parameter == 0, "knob mapping changed");
     expect (back[1].matches (MidiMapping::Source::note, 10, 60) && ! back[1].matches (MidiMapping::Source::note, 1, 60), "channel filter lost");
     expect (back[2].command == "rec" && back[2].node == loop, "command mapping changed");
     expect (back[3].target == MidiMapping::Target::slot && back[3].slot == 2 && back[3].sourceLabel() == "PC2", "slot mapping changed");
     expect (back[4].relative && ! back[0].relative, "relative flag lost in the round trip");
+    expect (back[0].low == 0 && back[0].high == 127, "default span should stay 0-127");
+    expect (back[5].low == 20 && back[5].high == 110, "calibrated span lost in the round trip");
+    expect (std::abs (back[5].normalised (20)) < 1.0e-6f && std::abs (back[5].normalised (110) - 1.0f) < 1.0e-6f && std::abs (back[5].normalised (65) - 0.5f) < 1.0e-6f
+            && back[5].normalised (0) == 0.0f && back[5].normalised (127) == 1.0f, "calibrated span should map heel..toe onto 0..1 and clamp outside");
+    MidiMapping inverted = back[5];
+    inverted.low = 110; inverted.high = 20;
+    expect (std::abs (inverted.normalised (110)) < 1.0e-6f && std::abs (inverted.normalised (20) - 1.0f) < 1.0e-6f, "swapped ends should invert the pedal");
 
     reloaded.removeNode (drive);
     expect (reloaded.getMidiMappings().size() == 2, "mappings to a deleted node should be scrubbed");
@@ -1897,6 +1927,7 @@ int main()
         { "recorded audio saves and loads with the patch", testRecordedAudioSavesAndLoadsWithThePatch },
         { "midi mappings round trip and scrub", testMidiMappingsRoundTripAndScrub },
         { "controller feedback state and sysex", testControllerFeedback },
+        { "drum machine tap tempo", testDrumMachineTapTempo },
         { "stereo nodes: pan, ping-pong delay, cabinet R, reverb/chorus", testStereoNodes },
         { "tuner detects pitch", testTunerDetectsPitch },
         { "MIDI Note node drives gate and pitch", testMidiNoteNodeDrivesGateAndPitch }

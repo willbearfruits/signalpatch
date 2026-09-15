@@ -2449,7 +2449,33 @@ public:
         return activeStep.load (std::memory_order_relaxed);
     }
 
+    /** "tap": tap tempo from a button or footswitch (message thread). Up to
+        four intervals are averaged; a pause over two seconds starts over. */
+    bool handleUiCommand (const juce::String& command) override
+    {
+        if (command != "tap")
+            return false;
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        if (tapCount > 0 && now - tapTimes[static_cast<std::size_t> ((tapCount - 1) % tapTimes.size())] > 2000.0)
+            tapCount = 0;
+        tapTimes[static_cast<std::size_t> (tapCount % tapTimes.size())] = now;
+        ++tapCount;
+        const auto samples = juce::jmin (tapCount, static_cast<int> (tapTimes.size()));
+        if (samples < 2)
+            return true;
+        // Oldest kept tap to the newest, over the intervals between them.
+        const auto newest = tapTimes[static_cast<std::size_t> ((tapCount - 1) % tapTimes.size())];
+        const auto oldest = tapTimes[static_cast<std::size_t> ((tapCount - samples) % tapTimes.size())];
+        const auto interval = (newest - oldest) / static_cast<double> (samples - 1);
+        if (interval > 0.0)
+            getParameter (0).setValue (static_cast<float> (60000.0 / interval));
+        return true;
+    }
+
 private:
+    std::array<double, 4> tapTimes {};
+    int tapCount = 0;
+
     void prepareDsp (double newSampleRate, int) override
     {
         sampleRate = newSampleRate;

@@ -94,6 +94,18 @@ RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
     };
     engine.midiLearnHook = [this] (const juce::MidiMessage& message) -> bool
     {
+        if (calibration.has_value() && message.isController()
+            && calibration->mapping.matches (MidiMapping::Source::controlChange, message.getChannel(), message.getControllerNumber()))
+        {
+            // Watch the sweep; the value still reaches the knob through the mapping.
+            calibration->low = juce::jmin (calibration->low, message.getControllerValue());
+            calibration->high = juce::jmax (calibration->high, message.getControllerValue());
+            calibration->lastAt = lastTick;
+            this->message = "Pedal range so far: " + juce::String (calibration->low) + "-" + juce::String (calibration->high);
+            messageUntil = lastTick + 3.0;
+            dirty = true;
+            return false;
+        }
         if (! learnTarget.has_value())
             return false;
         auto mapping = *learnTarget;
@@ -217,6 +229,9 @@ void RackView::rebuildLayouts()
                 break;
             case NodeKind::feedbackGuard:
                 button ("RESET LOOP", "reset-loop", palette::feedback);
+                break;
+            case NodeKind::drumMachine:
+                button ("TAP", "tap", palette::control);
                 break;
             case NodeKind::looper:
                 button ("REC", "rec", palette::warning);
@@ -875,7 +890,7 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
         for (const auto& connection : engine.getDocument().getConnections())
             if (connection.destinationNode == layout.id && connection.destinationPort == parameter.inputPortIndex)
                 modulation = connection;
-    enum { reset = 1, setValue, zeroDepth, fullDepth, removeModulation, midiLearn, midiRemove, midiLearnRelative };
+    enum { reset = 1, setValue, zeroDepth, fullDepth, removeModulation, midiLearn, midiRemove, midiLearnRelative, midiCalibrate };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (parameter.name.toUpperCase()));
     items.push_back (MenuItem::item (reset, "Reset to default (" + juce::String (parameter.defaultValue, 2) + ")", "dbl-click"));
@@ -889,6 +904,15 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
         for (auto& item : midiMenuItems (target, parameter.name, midiLearn, midiRemove))
             items.push_back (std::move (item));
         items.push_back (MenuItem::item (midiLearnRelative, "MIDI learn as relative encoder"));
+        for (const auto& existing : engine.getMidiMappings())
+            if (existing.target == MidiMapping::Target::parameter && existing.node == layout.id && existing.parameter == parameterIndex
+                && existing.source == MidiMapping::Source::controlChange && ! existing.relative)
+            {
+                items.push_back (MenuItem::item (midiCalibrate, existing.low == 0 && existing.high == 127
+                                                                    ? juce::String ("Calibrate the pedal (move it heel to toe)")
+                                                                    : "Recalibrate the pedal (now " + juce::String (existing.low) + "-" + juce::String (existing.high) + ")"));
+                break;
+            }
     }
     if (parameter.inputPortIndex >= 0)
     {
@@ -927,6 +951,18 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
                 if (modulation.has_value())
                     engine.disconnect (*modulation);
                 break;
+            case midiCalibrate:
+            {
+                for (const auto& existing : engine.getMidiMappings())
+                    if (existing.target == MidiMapping::Target::parameter && existing.node == id && existing.parameter == parameterIndex
+                        && existing.source == MidiMapping::Source::controlChange)
+                    {
+                        calibration = Calibration { existing, 127, 0, lastTick };
+                        say ("Move the pedal all the way heel to toe; the range is kept two seconds after it stops");
+                        break;
+                    }
+                return;
+            }
             case midiLearn:
             case midiLearnRelative:
             {
@@ -2928,6 +2964,26 @@ void RackView::tick (double now)
     const auto dt = lastTick > 0.0 ? juce::jlimit (0.0, 0.1, now - lastTick) : 0.016;
     lastTick = now;
     animating = false;
+
+    if (calibration.has_value() && now - calibration->lastAt > 2.0 && calibration->high > calibration->low)
+    {
+        // The sweep stopped: keep the range on the mapping (undoable, saved with the patch).
+        auto mappings = engine.getMidiMappings();
+        for (auto& mapping : mappings)
+            if (mapping.target == calibration->mapping.target && mapping.node == calibration->mapping.node && mapping.parameter == calibration->mapping.parameter)
+            {
+                mapping.low = calibration->low;
+                mapping.high = calibration->high;
+            }
+        engine.setMidiMappings (std::move (mappings));
+        say ("Pedal calibrated: " + juce::String (calibration->low) + "-" + juce::String (calibration->high) + " now covers the whole knob");
+        calibration.reset();
+    }
+    else if (calibration.has_value() && now - calibration->lastAt > 12.0)
+    {
+        say ("Calibration cancelled (the pedal did not move)");
+        calibration.reset();
+    }
 
     if (structureDirty)
     {

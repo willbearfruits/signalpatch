@@ -780,7 +780,7 @@ void PatchEngine::applyMidiMapping (const MidiMapping& mapping, const juce::Midi
                 parameter.setNormalisedValue (juce::jlimit (0.0f, 1.0f, parameter.getNormalisedValue() + step));
             }
             else
-                parameter.setValue (parameter.range.convertFrom0to1 (static_cast<float> (message.getControllerValue()) / 127.0f));
+                parameter.setValue (parameter.range.convertFrom0to1 (mapping.normalised (message.getControllerValue())));
             markDocumentEdited();
             if (onParameterChangedByMidi)
                 onParameterChangedByMidi (mapping.node);

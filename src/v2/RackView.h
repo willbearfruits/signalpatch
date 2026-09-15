@@ -239,6 +239,14 @@ private:
 
     // MIDI learn: the next CC / note / program change binds to this target.
     std::optional<MidiMapping> learnTarget;
+    // Expression pedal calibration: watch one CC's sweep, keep its min/max on the mapping.
+    struct Calibration
+    {
+        MidiMapping mapping;
+        int low = 127, high = 0;
+        double lastAt = 0.0;
+    };
+    std::optional<Calibration> calibration;
     void beginMidiLearn (MidiMapping target, const juce::String& what);
     void removeMidiMapping (const std::function<bool (const MidiMapping&)>& matches);
     [[nodiscard]] juce::String midiLabelFor (const std::function<bool (const MidiMapping&)>& matches) const;

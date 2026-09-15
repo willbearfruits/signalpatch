@@ -24,6 +24,15 @@ struct MidiMapping
     int slot = -1;        // slot target (0-based)
     juce::String command; // command target (e.g. "rec")
     bool relative = false; // CC 64 +/- n nudges the knob instead of setting it (encoders)
+    int low = 0, high = 127; // expression calibration: this CC span covers the whole knob
+
+    /** Absolute CC value -> 0..1 through the calibrated span (swapped ends invert). */
+    [[nodiscard]] float normalised (int value) const noexcept
+    {
+        if (low == high)
+            return value >= low ? 1.0f : 0.0f;
+        return juce::jlimit (0.0f, 1.0f, static_cast<float> (value - low) / static_cast<float> (high - low));
+    }
 
     [[nodiscard]] bool matches (Source messageSource, int messageChannel, int messageNumber) const noexcept
     {

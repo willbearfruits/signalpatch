@@ -22,9 +22,9 @@ works with anything else that speaks MIDI.
 | ------------------ | ------------------------------ | -------------------------------------- |
 | Footswitch n (1-8) | Note On 60+n-1 (press), Note Off (release), channel 10 | Momentary. SignalPatch toggles a stomp on Note On, fires a command on the rising edge, loads a slot on Note On. |
 | Bank / slot buttons| Program Change 0-4             | Direct slot select.                    |
-| Expression 1 / 2   | CC 11 / CC 4                   | 0-127, 7-bit is enough for a pedal.    |
+| Expression 1 / 2   | CC 11 / CC 4                   | 0-127, 7-bit is enough for a pedal. "Calibrate the pedal" on the knob's menu learns the heel/toe span (saved with the mapping; swapped ends invert). |
 | Encoder 1-4        | CC 20-23, relative (64 ± delta)| Learn the knob with "MIDI learn as relative encoder": each detent nudges it 1/128 of its range, n > 1 for fast spins. |
-| Tap tempo          | Note On 48, channel 10         | Mapped like any footswitch (e.g. looper REC). |
+| Tap tempo          | Note On 48, channel 10         | Mapped like any footswitch: the drum machine's TAP button (command "tap", four taps averaged) or the looper's REC. |
 
 Channel 10 keeps the controller's notes away from anything driving a synth.
 
@@ -72,7 +72,7 @@ Try it without hardware: `aseqdump -p "Midi Through"` in one terminal,
 
 ## Follow-ups on the SignalPatch side
 
-- Expression pedal calibration (min/max per CC) and a curve.
+- An expression curve (log/exp) on top of the calibrated span.
 - A "controller layout" view in the app that shows the eight switches the
   way the pedal does.
 
