@@ -15,7 +15,8 @@ sdk: org.freedesktop.Sdk
 command: SignalPatch
 finish-args:
   - --share=ipc
-  - --socket=x11
+  - --socket=wayland
+  - --socket=fallback-x11
   - --device=dri
   - --socket=pulseaudio
   - --filesystem=xdg-run/pipewire-0
@@ -23,6 +24,24 @@ finish-args:
   - --filesystem=xdg-music
   - --filesystem=xdg-documents
 modules:
+  # The app is GLFW + OpenGL; the runtime has no GLFW, so build it here
+  # (Wayland and X11 backends). Added 2026-09-15 with the GLFW app; the
+  # manifest has not been rebuilt since, so treat the first build as a check.
+  - name: glfw
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -DGLFW_BUILD_WAYLAND=ON
+      - -DGLFW_BUILD_X11=ON
+      - -DGLFW_BUILD_EXAMPLES=OFF
+      - -DGLFW_BUILD_TESTS=OFF
+      - -DGLFW_BUILD_DOCS=OFF
+    sources:
+      - type: archive
+        url: https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.zip
+        sha256: b5ec004b2712fd08e8861dc271428f048775200a2df719ccf575143ba749a3e9
   - name: signalpatch
     buildsystem: cmake-ninja
     builddir: true

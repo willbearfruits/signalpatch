@@ -97,7 +97,8 @@ and NeuralAmpModelerCore are fetched automatically when not found locally
 ```sh
 sudo apt install ninja-build libasound2-dev libjack-jackd2-dev \
   libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev \
-  libfreetype6-dev libfontconfig1-dev
+  libfreetype6-dev libfontconfig1-dev libglfw3-dev libgl-dev
+# Arch: pacman -S ninja glfw alsa-lib jack2 freetype2 fontconfig libx11 libxrandr libxinerama libxcursor
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
