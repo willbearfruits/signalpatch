@@ -135,10 +135,11 @@ demo.
 - Packaging (AppImage/Flatpak, Windows zip), CI for the app on Linux and
   Windows. Linux CI builds the app and uploads the binary as an artifact
   (2026-09-15); the Flatpak manifest carries a GLFW module but has not been
-  rebuilt since the switch. The Windows app build still needs an OpenGL
-  loader (opengl32 stops at GL 1.1; NanoVG's GL3 backend wants glad or
-  equivalent through `glfwGetProcAddress`) — tests build there, the app is
-  skipped until then.
+  rebuilt since the switch. Windows CI builds the app too (GL through the
+  vendored glad loader, GLFW fetched) and uploads `SignalPatch.exe`; it has
+  not been run on a Windows machine yet, and it is a console-subsystem
+  build (a console window opens alongside) until a GUI-subsystem target
+  lands.
 
 Exit: the rig built on the desktop runs unchanged on the handheld, and a gig
 happens without touching a keyboard.
