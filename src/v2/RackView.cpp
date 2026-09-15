@@ -2857,7 +2857,7 @@ void RackView::drawHud (int width, int height, double now)
     nvgTextLetterSpacing (vg, 0.8f);
     nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
     nvgFillColor (vg, palette::text);
-    nvgText (vg, 16.0f, 17.0f, "SIGNALPATCH 2", nullptr);
+    nvgText (vg, 16.0f, 17.0f, "SIGNALPATCH", nullptr);
     nvgTextLetterSpacing (vg, 0.0f);
     nvgFontSize (vg, 11.0f);
     nvgFillColor (vg, palette::mutedText);

@@ -58,7 +58,7 @@ int main (int argc, char** argv)
     glfwWindowHint (GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
     glfwWindowHint (GLFW_STENCIL_BITS, 8);
     glfwWindowHint (GLFW_SAMPLES, 0);
-    auto* window = glfwCreateWindow (1600, 1000, "SignalPatch 2", nullptr, nullptr);
+    auto* window = glfwCreateWindow (1600, 1000, "SignalPatch", nullptr, nullptr);
     if (window == nullptr)
     {
         std::fprintf (stderr, "GLFW window creation failed\n");

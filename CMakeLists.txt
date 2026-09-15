@@ -222,6 +222,7 @@ if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/v2/*.h")
 
     juce_add_console_app(signalpatch PRODUCT_NAME "SignalPatch")
+    set_target_properties(signalpatch PROPERTIES OUTPUT_NAME "SignalPatch") # keep the documented executable name
     juce_generate_juce_header(signalpatch)
     target_sources(signalpatch PRIVATE
         ${SIGNALPATCH_V2_SOURCES}
