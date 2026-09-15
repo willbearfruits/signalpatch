@@ -77,7 +77,8 @@ timestamped event on a bounded queue into the callback.
   the knob, the left stick turns it, LB/RB change slot, X undoes, Y fits,
   Start toggles views, Back mutes; the stick clicks open the board and pedal
   menus (the board menu adds modules); inside a menu, browser or prompt the
-  d-pad, A and B are arrows, Enter and Escape. Menus also walk by keyboard,
+  d-pad, A and B are arrows, Enter and Escape; RT/LT press the focused
+  pedal's first two buttons (REC/TAP, PLAY). Menus also walk by keyboard,
   and the Menu key opens the context menu at the pointer. Untested on a
   real pad so far (none on the dev desk).
 - **Relative encoders** (done 2026-09-15): a mapping flag, "MIDI learn as

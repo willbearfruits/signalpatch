@@ -1499,6 +1499,8 @@ void RackView::setMode (Mode newMode)
 
 void RackView::rebuildBoard()
 {
+    if (structureDirty)
+        rebuildLayouts(); // pedals borrow the plates' button rows
     // Depth = longest audio path from a source (hardware input or a module
     // with no audio input), relaxed a bounded number of times so guarded
     // feedback cannot loop forever. Modules off the audio path go to the tray.
@@ -1596,8 +1598,13 @@ void RackView::rebuildBoard()
                 if (pedal.kind == NodeKind::drumMachine && index >= 5) continue;
                 pedal.knobs.emplace_back (node->id, index);
             }
+            if (const auto* layout = layoutFor (node->id); layout != nullptr && ! node->hardware)
+                for (const auto& button : layout->buttons)
+                    if (! button.command.startsWith ("load") && ! button.command.startsWith ("prev") && ! button.command.startsWith ("next"))
+                        pedal.buttons.push_back (button);
             const auto knobRows = (static_cast<int> (pedal.knobs.size()) + 1) / 2;
-            pedal.h = node->hardware ? 150.0f : 96.0f + static_cast<float> (juce::jmax (1, knobRows)) * 72.0f + (wide ? 18.0f : 0.0f);
+            pedal.h = node->hardware ? 150.0f : 96.0f + static_cast<float> (juce::jmax (1, knobRows)) * 72.0f + (wide ? 18.0f : 0.0f)
+                                               + static_cast<float> (pedalButtonRows (pedal)) * 28.0f;
             pedal.x = x;
             pedal.y = y;
             y += pedal.h + gapY;
@@ -1716,6 +1723,33 @@ juce::Point<float> RackView::pedalKnobCentre (const Pedal& pedal, int knobIndex)
 juce::Point<float> RackView::pedalStompCentre (const Pedal& pedal) const noexcept
 {
     return { pedal.x + pedal.w * 0.5f, pedal.y + pedal.h - 24.0f };
+}
+
+int RackView::pedalButtonRows (const Pedal& pedal) noexcept
+{
+    int rows = 0;
+    for (const auto& button : pedal.buttons)
+        rows = juce::jmax (rows, button.row + 1);
+    return rows;
+}
+
+juce::Rectangle<float> RackView::pedalButtonBounds (const Pedal& pedal, int index) const noexcept
+{
+    // Rows sit above the footswitch, laid out like the rack plate's.
+    const auto& button = pedal.buttons[static_cast<std::size_t> (index)];
+    int rowCount = 0, indexInRow = 0;
+    for (int i = 0; i < static_cast<int> (pedal.buttons.size()); ++i)
+        if (pedal.buttons[static_cast<std::size_t> (i)].row == button.row)
+        {
+            if (i == index)
+                indexInRow = rowCount;
+            ++rowCount;
+        }
+    const auto rows = pedalButtonRows (pedal);
+    const auto bottom = pedal.y + pedal.h - (pedal.stomp ? 50.0f : 12.0f);
+    const auto y = bottom - 24.0f - static_cast<float> (rows - 1 - button.row) * 28.0f;
+    const auto width = (pedal.w - 20.0f - static_cast<float> (rowCount - 1) * 6.0f) / static_cast<float> (juce::jmax (1, rowCount));
+    return { pedal.x + 10.0f + static_cast<float> (indexInRow) * (width + 6.0f), y, width, 24.0f };
 }
 
 void RackView::drawBoard (int width, int height, double now)
@@ -1909,6 +1943,32 @@ void RackView::drawBoard (int width, int height, double now)
                 nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
                 nvgFillColor (vg, alpha (palette::mutedText, 0.9f));
                 nvgText (vg, pedal.x + pedal.w * 0.5f, pedal.y + 42.0f, status.toRawUTF8(), nullptr);
+            }
+        }
+
+        for (std::size_t index = 0; index < pedal.buttons.size() && model != nullptr; ++index)
+        {
+            const auto& button = pedal.buttons[index];
+            const auto bounds = pedalButtonBounds (pedal, static_cast<int> (index));
+            const bool lit = model->processor->uiToggleState (button.command);
+            nvgBeginPath (vg);
+            nvgRoundedRect (vg, bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), 5.0f);
+            nvgFillColor (vg, lit ? button.active : alpha (palette::nodeDark, 0.8f));
+            nvgFill (vg);
+            nvgStrokeColor (vg, nvgRGBAf (1, 1, 1, lit ? 0.2f : 0.1f));
+            nvgStrokeWidth (vg, 1.0f);
+            nvgStroke (vg);
+            nvgFontFaceId (vg, font);
+            nvgFontSize (vg, 10.0f);
+            nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor (vg, lit ? palette::nodeDark : palette::text);
+            nvgText (vg, bounds.getCentreX(), bounds.getCentreY(), button.label.toRawUTF8(), nullptr);
+            const auto midi = midiLabelFor ([&] (const MidiMapping& m) { return m.target == MidiMapping::Target::command && m.node == pedal.id && m.command == button.command; });
+            if (midi.isNotEmpty())
+            {
+                nvgFontSize (vg, 7.5f);
+                nvgFillColor (vg, lit ? palette::nodeDark : palette::control);
+                nvgText (vg, bounds.getCentreX(), bounds.getBottom() - 4.0f, midi.toRawUTF8(), nullptr);
             }
         }
 
@@ -2120,7 +2180,7 @@ void RackView::pollGamepad (double now)
     if (! pad.present)
     {
         pad.present = true;
-        say ("Gamepad connected: d-pad walks pedals, A stomps, B picks a knob, stick turns it, stick clicks open menus, LB/RB slots, Start toggles views");
+        say ("Gamepad connected: d-pad walks pedals, A stomps, B picks a knob, stick turns it, RT/LT press the pedal's buttons, stick clicks open menus, LB/RB slots, Start toggles views");
     }
     auto pressed = [&] (int button) { return state.buttons[button] == GLFW_PRESS && pad.buttons[static_cast<std::size_t> (button)] != GLFW_PRESS; };
     auto rememberButtons = [&]
@@ -2233,6 +2293,19 @@ void RackView::pollGamepad (double now)
             {
                 focusKnob = (focusKnob + 1) % static_cast<int> (pedal.knobs.size());
                 dirty = true;
+            }
+            // RT fires the pedal's first button (REC / TAP), LT its second (PLAY).
+            const float triggerAxes[2] = { state.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER], state.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER] };
+            for (std::size_t trigger = 0; trigger < 2; ++trigger)
+            {
+                const bool held = triggerAxes[trigger] > 0.0f; // GLFW reports -1 released .. 1 pressed
+                if (held && ! pad.triggers[trigger] && pedal.buttons.size() > trigger)
+                {
+                    engine.sendNodeCommand (pedal.id, pedal.buttons[trigger].command);
+                    invalidatePlate (pedal.id);
+                    dirty = true;
+                }
+                pad.triggers[trigger] = held;
             }
             const auto stick = -state.axes[GLFW_GAMEPAD_AXIS_LEFT_Y]; // up = positive
             if (std::abs (stick) > 0.15f && ! pedal.knobs.empty())
@@ -2760,6 +2833,35 @@ bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, d
     const auto* model = isGroup ? nullptr : engine.getDocument().findNode (pedal->id);
     if (! isGroup && model == nullptr)
         return true;
+    if (! isGroup && ! pedal->tray)
+        for (std::size_t index = 0; index < pedal->buttons.size(); ++index)
+            if (pedalButtonBounds (*pedal, static_cast<int> (index)).contains (board))
+            {
+                const auto command = pedal->buttons[index].command;
+                const auto label = pedal->buttons[index].label;
+                const auto id = pedal->id;
+                if (button == GLFW_MOUSE_BUTTON_RIGHT)
+                {
+                    MidiMapping target;
+                    target.target = MidiMapping::Target::command;
+                    target.node = id;
+                    target.command = command;
+                    auto items = midiMenuItems (target, label, 1, 2);
+                    items.insert (items.begin(), MenuItem::sectionHeader (label));
+                    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, target, label] (int picked)
+                    {
+                        if (picked == 1) beginMidiLearn (target, label);
+                        else if (picked == 2) removeMidiMapping ([target] (const MidiMapping& m) { return m.target == target.target && m.node == target.node && m.command == target.command; });
+                    });
+                }
+                else if (button == GLFW_MOUSE_BUTTON_LEFT)
+                {
+                    engine.sendNodeCommand (id, command);
+                    invalidatePlate (id);
+                }
+                dirty = true;
+                return true;
+            }
     if (button == GLFW_MOUSE_BUTTON_RIGHT)
     {
         if (isGroup)

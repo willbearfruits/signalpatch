@@ -194,6 +194,7 @@ private:
         int column = 0;
         std::vector<std::pair<NodeId, int>> knobs; // (module, parameter), up to four
         std::vector<NodeId> members;               // group pedals
+        std::vector<Button> buttons;               // transport commands (REC, PLAY, TAP...), same as the rack plate
         bool hardware = false, stomp = false, tray = false;
     };
     struct BoardDrag
@@ -227,6 +228,7 @@ private:
     {
         bool present = false;
         std::array<unsigned char, 15> buttons {};
+        std::array<bool, 2> triggers {}; // RT / LT held last frame
         double lastRepeat = 0.0;
     };
     GamepadState pad;
@@ -277,6 +279,8 @@ private:
     [[nodiscard]] juce::Point<float> toBoard (double x, double y) const noexcept;
     [[nodiscard]] juce::Point<float> pedalKnobCentre (const Pedal& pedal, int knobIndex) const noexcept;
     [[nodiscard]] juce::Point<float> pedalStompCentre (const Pedal& pedal) const noexcept;
+    [[nodiscard]] juce::Rectangle<float> pedalButtonBounds (const Pedal& pedal, int index) const noexcept;
+    [[nodiscard]] static int pedalButtonRows (const Pedal& pedal) noexcept;
     [[nodiscard]] static juce::File slotFile (int slot);
     void loadSlot (int slot);
     void storeSlot (int slot);

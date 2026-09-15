@@ -60,7 +60,8 @@ Try it without hardware: `aseqdump -p "Midi Through"` in one terminal,
 ## What SignalPatch already does
 
 - Opens every MIDI input, hot-plug included.
-- MIDI learn on knobs, stomps, module buttons, group pedals and rig slots;
+- MIDI learn on knobs, stomps, module buttons (on the rack plate and on the
+  Board pedal - right-click the button), group pedals and rig slots;
   bindings saved in the patch.
 - Note On toggles a stomp, CC >= 64 sets it, commands fire on the rising
   edge, program changes select slots.
