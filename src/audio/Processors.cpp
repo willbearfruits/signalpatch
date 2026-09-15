@@ -20,22 +20,33 @@ struct ClockFollower
     bool wasHigh = false;
     int samplesSincePulse = 1 << 30;
 
-    void reset() noexcept { wasHigh = false; samplesSincePulse = 1 << 30; }
+    void reset() noexcept { wasHigh = false; samplesSincePulse = 1 << 30; lastInterval = 0; }
 
     /** Call once per sample; returns true on a rising edge. */
+    int lastInterval = 0;      // samples between the last two pulses
+
     bool tick (const float* clock, int sample, double sampleRate) noexcept
     {
         const bool high = clock != nullptr && clock[sample] > 0.5f;
         const bool edge = high && ! wasHigh;
         wasHigh = high;
         if (edge)
+        {
+            if (samplesSincePulse < (1 << 30))
+                lastInterval = samplesSincePulse;
             samplesSincePulse = 0;
+        }
         else if (samplesSincePulse < (1 << 30))
             ++samplesSincePulse;
         juce::ignoreUnused (sampleRate);
         return edge;
     }
-    [[nodiscard]] bool external (double sampleRate) const noexcept { return samplesSincePulse < static_cast<int> (sampleRate * 4.0); }
+    /** Pulses count as "the clock" for four seconds, or 2.5 intervals when they are slower (a bar at 40 bpm is 6 s). */
+    [[nodiscard]] bool external (double sampleRate) const noexcept
+    {
+        const auto window = juce::jmax (static_cast<double> (lastInterval) * 2.5, sampleRate * 4.0);
+        return samplesSincePulse < static_cast<int> (juce::jmin (window, 1.0e9));
+    }
     [[nodiscard]] const float* pointer (const juce::AudioBuffer<float>& inputs) const noexcept
     {
         return port >= 0 && inputs.getNumChannels() > port ? inputs.getReadPointer (port) : nullptr;
@@ -752,16 +763,7 @@ public:
         // The knob's target (plus its mod socket at the block start) rather than
         // parameterValue(): that steps the per-sample smoother, and one step per
         // block would take seconds to arrive.
-        auto target = [&] (int index)
-        {
-            const auto& parameter = getParameter (index);
-            float modulation = 0.0f;
-            if (juce::isPositiveAndBelow (parameter.inputPortIndex, inputs.getNumChannels()) && inputs.getNumSamples() > 0)
-                modulation = inputs.getSample (parameter.inputPortIndex, 0);
-            if (! std::isfinite (modulation))
-                modulation = 0.0f;
-            return parameter.range.convertFrom0to1 (juce::jlimit (0.0f, 1.0f, parameter.getNormalisedValue() + modulation * parameter.getModulationDepth()));
-        };
+        auto target = [&] (int index) { return parameterTarget (index, inputs); };
         if (getKind() == NodeKind::neuralPedal)
             tone.update (sampleRate, 0.0f, 0.0f, target (3), 0.0f);
         else
@@ -932,6 +934,7 @@ private:
         maximumBlockSize = juce::jmax (16, newMaximumBlockSize);
         scratchIn.assign (static_cast<std::size_t> (maximumBlockSize), 0.0f);
         scratchOut.assign (static_cast<std::size_t> (maximumBlockSize), 0.0f);
+        tone = AmpToneStack {}; // coefficients depend on the sample rate
         // prepareAll runs while the device callback is stopped, so resetting
         // the loaded model here is safe.
         if (currentModel != nullptr)
@@ -987,14 +990,15 @@ private:
             auto modelled = scratchOut[static_cast<std::size_t> (sample)];
             if (! std::isfinite (modelled))
                 modelled = 0.0f;
-            auto value = juce::jlimit (-4.0f, 4.0f, tone.process (modelled) * outputGain);
+            auto value = tone.process (modelled);
             if (isPedal)
             {
+                // Mix blends the untouched input (no Drive) with the pedal; Level sets the result.
                 const auto mix = juce::jlimit (0.0f, 1.0f, parameterValue (2, inputs, sample) * 0.01f);
-                const auto dry = scratchIn[static_cast<std::size_t> (sample)];
+                const auto dry = std::isfinite (input[sample]) ? input[sample] : 0.0f;
                 value = dry + mix * (value - dry);
             }
-            output[sample] = value;
+            output[sample] = juce::jlimit (-4.0f, 4.0f, value * outputGain);
         }
         if (frames < numSamples)
             juce::FloatVectorOperations::clear (output + frames, numSamples - frames);
@@ -1022,7 +1026,7 @@ private:
     }
 
 private:
-    void prepareDsp (double newSampleRate, int) override { sampleRate = newSampleRate; }
+    void prepareDsp (double newSampleRate, int) override { sampleRate = newSampleRate; tone = AmpToneStack {}; }
     void resetDsp() noexcept override { tone.reset(); }
 
     void processDsp (const juce::AudioBuffer<float>& inputs,
@@ -3076,7 +3080,7 @@ public:
     // Recording persistence: the four tapes as four channels, trimmed to the
     // last audible sample so an empty tape costs nothing on disk.
     bool hasAudioContent() const noexcept override { return recordedContentVersion.load (std::memory_order_relaxed) > 0 && contentLength() > 0; }
-    juce::uint32 audioContentVersion() const noexcept override { return recordedContentVersion.load (std::memory_order_relaxed); }
+    juce::uint32 audioContentVersion() const noexcept override { return recordedContentVersion.load (std::memory_order_relaxed) + takesEnded.load (std::memory_order_relaxed); }
 
     juce::AudioBuffer<float> exportAudioContent() const override
     {
@@ -3134,6 +3138,8 @@ private:
         playing.store (false, std::memory_order_relaxed);
         recording.store (false, std::memory_order_relaxed);
         for (auto& head : playhead) head = 0.0;
+        transport = 0.0;
+        wroteLastBlock = false;
         for (auto& slot : lastRecordSlot) slot = -1;
         for (auto& seconds : playheadSeconds) seconds.store (0.0f, std::memory_order_relaxed);
     }
@@ -3152,15 +3158,24 @@ private:
         }
 
         if (returnToZero.exchange (false, std::memory_order_acq_rel))
+        {
+            transport = 0.0;
             for (auto& head : playhead)
                 head = 0.0;
+            for (auto& slot : lastRecordSlot)
+                slot = -1;
+        }
         const bool sync = synced.load (std::memory_order_relaxed);
+        if (sync && ! wasSynced)
+            transport = playhead[0]; // switching SYNC on locks everything to track 1 where it stands
+        wasSynced = sync;
         if (sync)
-            for (int track = 1; track < trackCount; ++track)
-                playhead[static_cast<std::size_t> (track)] = playhead[0];
+            for (auto& head : playhead)
+                head = transport; // synced tracks follow the machine's own head, whichever tracks run
 
         const bool run = playing.load (std::memory_order_relaxed);
         const bool doRecord = run && recording.load (std::memory_order_relaxed);
+        bool wroteThisBlock = false;
         for (int sample = 0; sample < numSamples; ++sample)
         {
             const auto master = juce::Decibels::decibelsToGain (parameterValue (trackCount, inputs, sample));
@@ -3183,26 +3198,39 @@ private:
                 const auto writeSlot = juce::jlimit (0, capacity - 1, static_cast<int> (head));
                 const auto indexA = juce::jlimit (0, capacity - 2, static_cast<int> (head));
                 const auto fraction = static_cast<float> (head - std::floor (head));
-                if (doRecord && armed[index].load (std::memory_order_relaxed))
+                const bool recordingHere = doRecord && armed[index].load (std::memory_order_relaxed);
+                if (recordingHere)
                 {
                     // Varispeed advances more than one slot per sample; fill the
-                    // whole span so fast-tape recordings have no silent gaps.
-                    auto slot = lastRecordSlot[index] >= 0 ? (lastRecordSlot[index] + 1) % capacity : writeSlot;
-                    for (int guard = 0; guard < 8; ++guard)
+                    // whole span so fast-tape recordings have no silent gaps. Slow
+                    // tape revisits a slot (nothing to add); a jump (RTZ, a sync
+                    // snap) starts afresh at the head.
+                    const auto last = lastRecordSlot[index];
+                    const auto ahead = last >= 0 ? (writeSlot - last + capacity) % capacity : -1;
+                    if (ahead != 0)
                     {
-                        tape[static_cast<std::size_t> (slot)] = dry;
-                        if (slot == writeSlot)
-                            break;
-                        slot = (slot + 1) % capacity;
+                        auto slot = ahead > 0 && ahead <= 8 ? (last + 1) % capacity : writeSlot;
+                        for (int guard = 0; guard < 8; ++guard)
+                        {
+                            tape[static_cast<std::size_t> (slot)] = dry;
+                            if (slot == writeSlot)
+                                break;
+                            slot = (slot + 1) % capacity;
+                        }
                     }
                     lastRecordSlot[index] = writeSlot;
+                    wroteThisBlock = true;
                 }
                 else
                     lastRecordSlot[index] = -1;
-                const auto trackLevel = juce::Decibels::decibelsToGain (parameterValue (track, inputs, sample));
-                const auto value = tape[static_cast<std::size_t> (indexA)]
-                                 + fraction * (tape[static_cast<std::size_t> (indexA + 1)] - tape[static_cast<std::size_t> (indexA)]);
-                mixed += value * trackLevel;
+                // A track being recorded is heard through the input monitor, not read back from tape.
+                if (! recordingHere)
+                {
+                    const auto trackLevel = juce::Decibels::decibelsToGain (parameterValue (track, inputs, sample));
+                    const auto value = tape[static_cast<std::size_t> (indexA)]
+                                     + fraction * (tape[static_cast<std::size_t> (indexA + 1)] - tape[static_cast<std::size_t> (indexA)]);
+                    mixed += value * trackLevel;
+                }
 
                 head += trackSpeed;
                 if (head >= capacity - 1)
@@ -3211,9 +3239,19 @@ private:
                     lastRecordSlot[index] = -1;
                 }
             }
+            if (run)
+            {
+                transport += masterSpeed;
+                if (transport >= capacity - 1)
+                    transport = 0.0;
+            }
             // A tape machine monitors its input: the dry signal always passes, the tapes add to it.
             output[sample] = dry + mixed * master;
         }
+        // A take that just ended (PLAY, an arm or REC toggle) moves the saved-content version.
+        if (wroteLastBlock && ! wroteThisBlock)
+            takesEnded.fetch_add (1, std::memory_order_relaxed);
+        wroteLastBlock = wroteThisBlock;
         for (int track = 0; track < trackCount; ++track)
             playheadSeconds[static_cast<std::size_t> (track)].store (static_cast<float> (playhead[static_cast<std::size_t> (track)] / juce::jmax (1.0, sampleRate)),
                                                                      std::memory_order_relaxed);
@@ -3222,6 +3260,10 @@ private:
     double sampleRate = 48000.0;
     std::array<std::vector<float>, trackCount> tracks;
     std::array<double, trackCount> playhead {};
+    double transport = 0.0;            // the machine's head; synced tracks follow it
+    bool wasSynced = true;
+    bool wroteLastBlock = false;
+    std::atomic<juce::uint32> takesEnded { 0 };
     std::array<int, trackCount> lastRecordSlot { -1, -1, -1, -1 };
     std::array<std::atomic<float>, trackCount> playheadSeconds {};
     std::atomic<bool> playing { false };
@@ -4060,8 +4102,8 @@ private:
             return;
         }
 
-        const auto lowHz = parameterValue (2, inputs, 0);
-        const auto highHz = parameterValue (3, inputs, 0);
+        const auto lowHz = parameterTarget (2, inputs);
+        const auto highHz = parameterTarget (3, inputs);
         if (lowHz != lastLowCut)
         {
             lowCut.set (sampleRate, lowHz, true);
@@ -4179,6 +4221,23 @@ public:
         if (command == "half")     { halfSpeed.store (! halfSpeed.load (std::memory_order_relaxed), std::memory_order_relaxed); return true; }
         if (command == "reverse")  { reversed.store (! reversed.load (std::memory_order_relaxed), std::memory_order_relaxed); return true; }
         return false;
+    }
+
+    juce::var getExtraState() const override
+    {
+        auto* object = new juce::DynamicObject();
+        object->setProperty ("half", halfSpeed.load (std::memory_order_relaxed));
+        object->setProperty ("reverse", reversed.load (std::memory_order_relaxed));
+        return juce::var (object);
+    }
+
+    void setExtraState (const juce::var& value) override
+    {
+        if (const auto* object = value.getDynamicObject())
+        {
+            halfSpeed.store (static_cast<bool> (object->getProperty ("half")), std::memory_order_relaxed);
+            reversed.store (static_cast<bool> (object->getProperty ("reverse")), std::memory_order_relaxed);
+        }
     }
 
     bool uiToggleState (const juce::String& command) const override
@@ -4305,7 +4364,11 @@ private:
                 break;
             case commandPlay:
                 if (current == playing || current == overdubbing)
+                {
                     state.store (stopped, std::memory_order_release);
+                    if (current == overdubbing)
+                        contentVersion.fetch_add (1, std::memory_order_relaxed); // the overdubbed layers must reach the saved file
+                }
                 else if (current == stopped)
                 {
                     playhead = 0.0;
@@ -4315,25 +4378,25 @@ private:
                     closeLoop();
                 break;
             case commandUndo:
-                if (undoAvailable && (current == playing || current == overdubbing || current == stopped))
+                if (undoAvailable && restoreRemaining == 0 && (current == playing || current == overdubbing || current == stopped))
                 {
+                    // The slots the session touched form one run from sessionStart in
+                    // its direction; copy them back a chunk per block (continueRestore)
+                    // so a 60 s loop never costs one long callback.
                     const auto len = lengthSamples.load (std::memory_order_relaxed);
-                    const auto restore = juce::jmin (len, savedInSession);
-                    // Restore the samples the last pass touched; the pass wrote
-                    // at most one full cycle before "previous" stopped updating.
-                    for (int i = 0; i < restore; ++i)
-                    {
-                        const auto index = static_cast<std::size_t> ((sessionStart + i) % juce::jmax (1, len));
-                        loop[index] = previous[index];
-                    }
+                    restoreRemaining = juce::jmin (len, savedInSession);
+                    restoreCursor = sessionStart;
+                    restoreDirection = sessionDirection;
                     undoAvailable = false;
                     layers.store (juce::jmax (1, layers.load (std::memory_order_relaxed) - 1), std::memory_order_relaxed);
                     if (current == overdubbing)
                         state.store (playing, std::memory_order_release);
-                    contentVersion.fetch_add (1, std::memory_order_relaxed);
+                    if (restoreRemaining == 0)
+                        contentVersion.fetch_add (1, std::memory_order_relaxed);
                 }
                 break;
             case commandClear:
+                restoreRemaining = 0;
                 lengthSamples.store (0, std::memory_order_release);
                 layers.store (0, std::memory_order_relaxed);
                 recorded = 0;
@@ -4344,6 +4407,46 @@ private:
                 break;
             case commandNone: break;
         }
+    }
+
+    /** Undo's copy, bounded per block. */
+    void continueRestore() noexcept
+    {
+        const auto len = lengthSamples.load (std::memory_order_relaxed);
+        if (restoreRemaining <= 0 || len <= 0)
+        {
+            restoreRemaining = 0;
+            return;
+        }
+        auto chunk = juce::jmin (restoreRemaining, maxRestorePerBlock);
+        restoreRemaining -= chunk;
+        auto index = juce::jlimit (0, len - 1, restoreCursor);
+        while (chunk-- > 0)
+        {
+            loop[static_cast<std::size_t> (index)] = previous[static_cast<std::size_t> (index)];
+            index += restoreDirection;
+            if (index >= len) index = 0;
+            if (index < 0) index = len - 1;
+        }
+        restoreCursor = index;
+        if (restoreRemaining == 0)
+            contentVersion.fetch_add (1, std::memory_order_relaxed);
+    }
+
+    /** One loop slot during an overdub: remember it the first time this session reaches it, then add the input once. */
+    void overdubSlot (int slot, float dry, float feedback, int len) noexcept
+    {
+        if (! sessionFrozen && savedInSession < len)
+        {
+            const auto distance = sessionDirection > 0 ? (slot - sessionStart + len) % len : (sessionStart - slot + len) % len;
+            if (distance == savedInSession)
+            {
+                previous[static_cast<std::size_t> (slot)] = loop[static_cast<std::size_t> (slot)];
+                ++savedInSession;
+            }
+        }
+        auto& value = loop[static_cast<std::size_t> (slot)];
+        value = value * feedback + dry;
     }
 
     void closeLoop() noexcept
@@ -4362,7 +4465,12 @@ private:
         const auto len = lengthSamples.load (std::memory_order_relaxed);
         if (len <= 0)
             return;
+        if (restoreRemaining > 0)
+            return; // an undo is still copying back; the next press starts the overdub
         sessionStart = juce::jlimit (0, len - 1, static_cast<int> (playhead));
+        sessionDirection = reversed.load (std::memory_order_relaxed) ? -1 : 1;
+        sessionFrozen = false;
+        lastOverdubSlot = -1;
         savedInSession = 0;
         undoAvailable = true;
         layers.store (layers.load (std::memory_order_relaxed) + 1, std::memory_order_relaxed);
@@ -4379,8 +4487,8 @@ private:
             juce::FloatVectorOperations::copy (output, input, numSamples);
             return;
         }
-        const auto bpm = parameterValue (4, inputs, 0);
-        const auto bars = static_cast<int> (std::round (parameterValue (5, inputs, 0)));
+        const auto bpm = parameterTarget (4, inputs);
+        const auto bars = static_cast<int> (std::round (parameterTarget (5, inputs)));
         const auto* clockIn = clock.pointer (inputs);
         if (const auto command = static_cast<Command> (pendingCommand.exchange (commandNone, std::memory_order_acq_rel)); command != commandNone)
         {
@@ -4397,9 +4505,16 @@ private:
             queuedCommand = commandNone;
         }
         queuedForUi.store (queuedCommand != commandNone, std::memory_order_relaxed);
+        continueRestore();
 
         const bool half = halfSpeed.load (std::memory_order_relaxed);
         const bool backwards = reversed.load (std::memory_order_relaxed);
+        const int direction = backwards ? -1 : 1;
+        if (state.load (std::memory_order_relaxed) == overdubbing && direction != sessionDirection && ! sessionFrozen)
+        {
+            sessionFrozen = true;   // REV flipped mid-overdub: undo keeps the run it has, new slots are not remembered
+            lastOverdubSlot = -1;
+        }
 
         for (int sample = 0; sample < numSamples; ++sample)
         {
@@ -4439,16 +4554,24 @@ private:
                     const auto indexB = (indexA + 1) % len;
                     const auto fraction = static_cast<float> (playhead - std::floor (playhead));
                     loopOut = loop[static_cast<std::size_t> (indexA)] + fraction * (loop[static_cast<std::size_t> (indexB)] - loop[static_cast<std::size_t> (indexA)]);
-                    if (current == overdubbing)
+                    if (current == overdubbing && indexA != lastOverdubSlot)
                     {
-                        auto& slot = loop[static_cast<std::size_t> (indexA)];
-                        if (savedInSession < len)
+                        // Once per slot, whatever the speed: half speed does not add the
+                        // input twice, fast speed fills the slots it jumps over.
+                        auto slot = lastOverdubSlot < 0 ? indexA : lastOverdubSlot + direction;
+                        for (int guard = 0; guard < 8; ++guard)
                         {
-                            previous[static_cast<std::size_t> (indexA)] = slot;
-                            ++savedInSession;
+                            if (slot >= len) slot = 0;
+                            if (slot < 0) slot = len - 1;
+                            overdubSlot (slot, dry, feedback, len);
+                            if (slot == indexA)
+                                break;
+                            slot += direction;
                         }
-                        slot = slot * feedback + dry;
+                        lastOverdubSlot = indexA;
                     }
+                    else if (current != overdubbing)
+                        lastOverdubSlot = -1;
                     playhead += backwards ? -speed : speed;
                     if (playhead >= len) playhead -= len;
                     if (playhead < 0.0) playhead += len;
@@ -4463,6 +4586,10 @@ private:
     std::vector<float> loop, previous;
     double playhead = 0.0;
     int recorded = 0, targetLength = 0, sessionStart = 0, savedInSession = 0;
+    int sessionDirection = 1, lastOverdubSlot = -1;
+    bool sessionFrozen = false;
+    int restoreRemaining = 0, restoreCursor = 0, restoreDirection = 1;
+    static constexpr int maxRestorePerBlock = 32768;
     bool undoAvailable = false;
     std::atomic<int> state { empty };
     std::atomic<int> pendingCommand { commandNone };
@@ -4615,7 +4742,8 @@ private:
         const auto* inR = inputs.getReadPointer (1);
         auto* outL = outputs.getWritePointer (0);
         auto* outR = outputs.getWritePointer (1);
-        const bool sum = parameterValue (5, inputs, 0) > 0.5f;
+        // "Sum inputs": a mono cable into In L feeds both sides while In R has no cable.
+        const bool monoIn = parameterTarget (5, inputs) > 0.5f && ! isInputConnected (1);
         for (int sample = 0; sample < numSamples; ++sample)
         {
             const auto timeL = parameterValue (0, inputs, sample) * static_cast<float> (sampleRate * 0.001);
@@ -4625,12 +4753,8 @@ private:
             const auto cross = juce::jlimit (0.0f, 1.0f, parameterValue (3, inputs, sample) * 0.01f);
             auto l = std::isfinite (inL[sample]) ? inL[sample] : 0.0f;
             auto r = std::isfinite (inR[sample]) ? inR[sample] : 0.0f;
-            if (sum)
-            {
-                const auto both = (l + r) * (r == 0.0f || l == 0.0f ? 1.0f : 0.5f);
-                l = both;
-                r = both;
-            }
+            if (monoIn)
+                r = l;
             const auto delayedL = lines.read (0, timeL);
             const auto delayedR = lines.read (1, timeR);
             // Ping-pong: each line's feedback comes partly from the other side.
@@ -4679,7 +4803,8 @@ private:
         const auto* inR = inputs.getReadPointer (1);
         auto* outL = outputs.getWritePointer (0);
         auto* outR = outputs.getWritePointer (1);
-        const bool sum = parameterValue (5, inputs, 0) > 0.5f;
+        // "Sum inputs": a mono cable into In L feeds both sides while In R has no cable.
+        const bool monoIn = parameterTarget (5, inputs) > 0.5f && ! isInputConnected (1);
         for (int sample = 0; sample < numSamples; ++sample)
         {
             const auto rate = parameterValue (0, inputs, sample);
@@ -4689,12 +4814,8 @@ private:
             const auto spread = parameterValue (4, inputs, sample) / 360.0f;
             auto l = std::isfinite (inL[sample]) ? inL[sample] : 0.0f;
             auto r = std::isfinite (inR[sample]) ? inR[sample] : 0.0f;
-            if (sum)
-            {
-                const auto both = (l + r) * (r == 0.0f || l == 0.0f ? 1.0f : 0.5f);
-                l = both;
-                r = both;
-            }
+            if (monoIn)
+                r = l;
             const auto wobbleL = static_cast<float> (std::sin (juce::MathConstants<double>::twoPi * phase));
             const auto wobbleR = static_cast<float> (std::sin (juce::MathConstants<double>::twoPi * (phase + spread)));
             const auto msL = juce::jmax (1.0f, centreMs + wobbleL * depth * 8.0f) * static_cast<float> (sampleRate * 0.001);
@@ -4810,6 +4931,7 @@ private:
         const auto* inR = inputs.getReadPointer (1);
         auto* outL = outputs.getWritePointer (0);
         auto* outR = outputs.getWritePointer (1);
+        const bool monoIn = ! isInputConnected (1); // a mono cable into In L feeds both sides
         for (int sample = 0; sample < numSamples; ++sample)
         {
             const auto size = juce::jlimit (0.0f, 1.0f, parameterValue (0, inputs, sample) * 0.01f);
@@ -4818,15 +4940,15 @@ private:
             const auto mix = juce::jlimit (0.0f, 1.0f, parameterValue (3, inputs, sample) * 0.01f);
             const auto roomFeedback = 0.72f + 0.26f * size;
             const auto l = std::isfinite (inL[sample]) ? inL[sample] : 0.0f;
-            const auto r = std::isfinite (inR[sample]) ? inR[sample] : 0.0f;
-            const auto fed = (l + r) * 0.015f * (r == 0.0f || l == 0.0f ? 1.0f : 0.5f); // Freeverb sums the input
+            const auto r = monoIn ? l : (std::isfinite (inR[sample]) ? inR[sample] : 0.0f);
+            const auto fed = (l + r) * 0.0075f; // Freeverb sums the input
             const auto wetL = left.process (fed, damp, roomFeedback);
             const auto wetR = right.process (fed, damp, roomFeedback);
             const auto wet1 = (1.0f + width) * 0.5f, wet2 = (1.0f - width) * 0.5f;
             const auto mixedL = wetL * wet1 + wetR * wet2;
             const auto mixedR = wetR * wet1 + wetL * wet2;
             outL[sample] = l + mix * (mixedL - l);
-            outR[sample] = (r == 0.0f && l != 0.0f ? l : r) + mix * (mixedR - (r == 0.0f && l != 0.0f ? l : r));
+            outR[sample] = r + mix * (mixedR - r);
         }
     }
 
@@ -4862,12 +4984,16 @@ public:
     }
 
 private:
-    static constexpr int windowSize = 4096;
+    static constexpr int frameSize = 2048;   // analysis frame after decimation
+    int windowSize = 4096;                   // ring length: frameSize x decimation, ~85 ms at any rate
+    int decimation = 2;
 
     void prepareDsp (double newSampleRate, int) override
     {
         sampleRate = newSampleRate;
-        ring.assign (windowSize, 0.0f);
+        decimation = juce::jmax (2, juce::nextPowerOfTwo (juce::roundToInt (newSampleRate / 24000.0)));
+        windowSize = frameSize * decimation;
+        ring.assign (static_cast<std::size_t> (windowSize), 0.0f);
         writeIndex.store (0, std::memory_order_relaxed);
     }
     void resetDsp() noexcept override {}
@@ -4894,29 +5020,30 @@ private:
         if (now - lastAnalysis < 40.0 || ring.empty())
             return;
         lastAnalysis = now;
-        // Snapshot, decimated by two (24 kHz is plenty for guitar and bass).
-        std::array<float, windowSize / 2> frame {};
+        // Snapshot, decimated to about 24 kHz (plenty for guitar and bass).
+        std::array<float, frameSize> frame {};
         const auto start = writeIndex.load (std::memory_order_acquire);
         float energy = 0.0f;
-        for (int i = 0; i < windowSize / 2; ++i)
+        for (int i = 0; i < frameSize; ++i)
         {
-            const auto a = ring[static_cast<std::size_t> ((start + 2 * i) % windowSize)];
-            const auto b = ring[static_cast<std::size_t> ((start + 2 * i + 1) % windowSize)];
-            frame[static_cast<std::size_t> (i)] = 0.5f * (a + b);
+            float sum = 0.0f;
+            for (int k = 0; k < decimation; ++k)
+                sum += ring[static_cast<std::size_t> ((start + decimation * i + k) % windowSize)];
+            frame[static_cast<std::size_t> (i)] = sum / static_cast<float> (decimation);
             energy += frame[static_cast<std::size_t> (i)] * frame[static_cast<std::size_t> (i)];
         }
-        if (energy / (windowSize / 2) < 1.0e-6f) // silence
+        if (energy / frameSize < 1.0e-6f) // silence
         {
             detectedHz = 0.0f;
             return;
         }
-        const auto rate = sampleRate * 0.5;
+        const auto rate = sampleRate / decimation;
         const int minLag = juce::jmax (2, static_cast<int> (rate / 1200.0));  // 1.2 kHz
-        const int maxLag = juce::jmin (windowSize / 4, static_cast<int> (rate / 27.5)); // A0
+        const int maxLag = juce::jmin (frameSize / 2, static_cast<int> (rate / 27.5)); // A0
         // YIN difference function with cumulative mean normalisation.
         static thread_local std::vector<float> d;
         d.assign (static_cast<std::size_t> (maxLag + 1), 0.0f);
-        const int half = windowSize / 4;
+        const int half = frameSize / 2;
         for (int lag = minLag; lag <= maxLag; ++lag)
         {
             float sum = 0.0f;
@@ -5132,7 +5259,8 @@ public:
         addOutputPort ("Gate", SignalType::control);
         addOutputPort ("Pitch", SignalType::control);
         addOutputPort ("Velocity", SignalType::control);
-        addParameter ("base", "Base note", "", juce::NormalisableRange<float> (36.0f, 84.0f, 1.0f), 60.0f, 0.0f, false);
+        // Base 45 = A2: the synth and pluck read 0 on Pitch as 110 Hz, so keys play at their real pitch.
+        addParameter ("base", "Base note", "", juce::NormalisableRange<float> (21.0f, 84.0f, 1.0f), 45.0f, 0.0f, false);
         addParameter ("channel", "Channel", "", juce::NormalisableRange<float> (0.0f, 16.0f, 1.0f), 0.0f, 0.0f, false);
     }
 
@@ -5158,6 +5286,7 @@ public:
             if (heldCount == static_cast<int> (held.size()))
                 remove (held[0]); // oldest falls off the stack
             held[static_cast<std::size_t> (heldCount++)] = note;
+            retrigger = true; // a new key always makes a gate edge, legato included
             currentNote.store (note, std::memory_order_relaxed);
             currentVelocity.store (velocity, std::memory_order_relaxed);
         }
@@ -5184,12 +5313,15 @@ private:
     void processDsp (const juce::AudioBuffer<float>& inputs, juce::AudioBuffer<float>& outputs, int numSamples) noexcept override
     {
         const auto note = currentNote.load (std::memory_order_relaxed);
-        const auto base = parameterValue (0, inputs, 0);
+        const auto base = parameterTarget (0, inputs);
         const auto gate = note >= 0 ? 1.0f : 0.0f;
         const auto pitch = note >= 0 ? juce::jlimit (-1.0f, 1.0f, (static_cast<float> (note) - base) / 48.0f) : lastPitch;
         const auto velocity = static_cast<float> (currentVelocity.load (std::memory_order_relaxed)) / 127.0f;
         lastPitch = pitch; // keep the pitch through the release so the tail does not jump
         juce::FloatVectorOperations::fill (outputs.getWritePointer (0), gate, numSamples);
+        if (retrigger && gate > 0.0f)
+            juce::FloatVectorOperations::clear (outputs.getWritePointer (0), juce::jmin (numSamples, 16)); // short low so followers see an edge
+        retrigger = false;
         juce::FloatVectorOperations::fill (outputs.getWritePointer (1), pitch, numSamples);
         juce::FloatVectorOperations::fill (outputs.getWritePointer (2), velocity, numSamples);
     }
@@ -5197,6 +5329,7 @@ private:
     std::array<int, 8> held {};
     int heldCount = 0;
     float lastPitch = 0.0f;
+    bool retrigger = false;
     std::atomic<int> currentNote { -1 };
     std::atomic<int> currentVelocity { 0 };
 };

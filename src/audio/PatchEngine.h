@@ -1,5 +1,7 @@
 #pragma once
 
+#include <map>
+
 #include "Graph.h"
 #include "PatchHistory.h"
 #include "MidiMap.h"
@@ -104,7 +106,8 @@ public:
     // the patch's folder when they live under it, absolute otherwise. A
     // folder with the patch plus an assets/ subfolder is therefore already a
     // portable project; exportBundle builds one and zips it.
-    juce::Result savePatch (const juce::File& file);
+    /** marksDocumentSaved = false for copies (a rig slot) that must not clear the unsaved flag of the open patch. */
+    juce::Result savePatch (const juce::File& file, bool marksDocumentSaved = true);
     juce::Result loadPatch (const juce::File& file);
     /** Merges another patch's nodes and cables into the current one (undoable). */
     juce::Result importPatch (const juce::File& file);
@@ -202,7 +205,8 @@ private:
     int midiInputsOpen = 0;
     int midiRefreshCountdown = 0;
     juce::String lastMidiDescription;
-    std::unordered_map<juce::int64, bool> midiCommandGate; // rising-edge detection per (mapping index)
+    std::map<std::pair<NodeId, juce::String>, bool> midiCommandGate; // CC rising-edge detection per (node, command)
+    std::unordered_map<NodeId, juce::uint32> seenAudioVersions;        // recordings noticed by the timer
     void openControllerOutput (const juce::String& inputName);
     void sendControllerFeedback (bool full);
     std::vector<std::unique_ptr<juce::MidiOutput>> controllerOutputs;

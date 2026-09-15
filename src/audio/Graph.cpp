@@ -405,16 +405,31 @@ void DspNode::render (const juce::AudioBuffer<float>& inputs,
 {
     if (isBypassed())
     {
-        // True pedal bypass: first audio input passes straight to the first
-        // audio output; everything else this node would emit goes silent.
+        // True pedal bypass: audio inputs pass to audio outputs in order
+        // (In L -> Out L, In R -> Out R); a node with one audio input feeds it
+        // to every audio output (Pan, a stereo Cabinet). Control outputs go silent.
         for (int channel = 0; channel < outputs.getNumChannels(); ++channel)
             juce::FloatVectorOperations::clear (outputs.getWritePointer (channel), numSamples);
-        const auto throughIn = firstAudioInputPort (*this);
-        const auto throughOut = firstAudioOutputPort (*this);
-        if (throughIn >= 0 && throughOut >= 0
-            && throughIn < inputs.getNumChannels() && throughOut < outputs.getNumChannels())
-            juce::FloatVectorOperations::copy (outputs.getWritePointer (throughOut),
-                                               inputs.getReadPointer (throughIn), numSamples);
+        int audioInputs = 0, lastAudioInput = -1;
+        for (int port = 0; port < juce::jmin (getNumInputPorts(), inputs.getNumChannels()); ++port)
+            if (getInputPort (port).type == SignalType::audio) { ++audioInputs; lastAudioInput = port; }
+        int inputCursor = -1;
+        for (int port = 0; port < juce::jmin (getNumOutputPorts(), outputs.getNumChannels()); ++port)
+        {
+            if (getOutputPort (port).type != SignalType::audio)
+                continue;
+            int source = audioInputs == 1 ? lastAudioInput : -1;
+            if (audioInputs > 1)
+                for (int in = inputCursor + 1; in < juce::jmin (getNumInputPorts(), inputs.getNumChannels()); ++in)
+                    if (getInputPort (in).type == SignalType::audio)
+                    {
+                        source = in; // the next audio input in order
+                        inputCursor = in;
+                        break;
+                    }
+            if (source >= 0)
+                juce::FloatVectorOperations::copy (outputs.getWritePointer (port), inputs.getReadPointer (source), numSamples);
+        }
     }
     else
     {
@@ -509,6 +524,23 @@ DspParameter& DspNode::addParameter (juce::String stableId,
     }
     parameters.push_back (std::move (parameter));
     return *parameters.back();
+}
+
+float DspNode::parameterTarget (int parameterIndex, const juce::AudioBuffer<float>& inputs) const noexcept
+{
+    const auto& parameter = getParameter (parameterIndex);
+    float modulation = 0.0f;
+    if (juce::isPositiveAndBelow (parameter.inputPortIndex, inputs.getNumChannels()) && inputs.getNumSamples() > 0)
+        modulation = inputs.getSample (parameter.inputPortIndex, 0);
+    if (! std::isfinite (modulation))
+        modulation = 0.0f;
+    auto base = parameter.getNormalisedValue();
+    if (! std::isfinite (base))
+        base = 0.0f;
+    auto depth = parameter.getModulationDepth();
+    if (! std::isfinite (depth))
+        depth = 0.0f;
+    return parameter.range.convertFrom0to1 (juce::jlimit (0.0f, 1.0f, base + juce::jlimit (-1.0f, 1.0f, modulation) * depth));
 }
 
 float DspNode::parameterValue (int parameterIndex,
@@ -1162,6 +1194,13 @@ void RenderPlan::mixInputs (int nodeIndex, int numSamples) noexcept
             else
                 juce::FloatVectorOperations::add (destinationSamples, sourceSamples, numSamples);
             hasSource = true;
+        }
+
+        if (destinationPort < 64)
+        {
+            const auto bit = std::uint64_t { 1 } << static_cast<unsigned> (destinationPort);
+            destination.processor->connectedInputs = hasSource ? (destination.processor->connectedInputs | bit)
+                                                               : (destination.processor->connectedInputs & ~bit);
         }
 
         for (int sample = 0; sample < numSamples; ++sample)

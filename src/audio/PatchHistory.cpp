@@ -56,6 +56,8 @@ bool PatchHistory::removeNode (NodeId id)
     for (const auto& connection : document.getConnections())
         if (connection.sourceNode == id || connection.destinationNode == id)
             entry.cables.push_back (connection);
+    entry.groupsBeforeRemoval = document.groupsToJson();
+    entry.midiBeforeRemoval = midiMappingsToJson (document.getMidiMappings());
 
     if (! document.removeNode (id))
         return false;
@@ -294,6 +296,12 @@ PatchHistory::Applied PatchHistory::apply (Entry& entry, bool forward)
                     return Applied::none;
                 for (const auto& cable : entry.cables)
                     document.addConnection (cable);
+                // Undo is stack-ordered, so the document is back at the moment right
+                // after the removal: the snapshot from just before it is exact.
+                if (! entry.groupsBeforeRemoval.isVoid())
+                    document.groupsFromJson (entry.groupsBeforeRemoval);
+                if (! entry.midiBeforeRemoval.isVoid())
+                    document.setMidiMappings (midiMappingsFromJson (entry.midiBeforeRemoval));
             }
             else
             {
@@ -305,6 +313,8 @@ PatchHistory::Applied PatchHistory::apply (Entry& entry, bool forward)
                         entry.cables.push_back (connection);
                 if (const auto* node = document.findNode (entry.node))
                     entry.model = *node;
+                entry.groupsBeforeRemoval = document.groupsToJson();
+                entry.midiBeforeRemoval = midiMappingsToJson (document.getMidiMappings());
                 if (! document.removeNode (entry.node))
                     return Applied::none;
             }

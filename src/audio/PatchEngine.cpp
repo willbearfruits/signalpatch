@@ -520,7 +520,7 @@ EngineStatus PatchEngine::getStatus() const
     return status;
 }
 
-juce::Result PatchEngine::savePatch (const juce::File& file)
+juce::Result PatchEngine::savePatch (const juce::File& file, bool marksDocumentSaved)
 {
     if (file == juce::File())
         return juce::Result::fail ("No patch file selected.");
@@ -534,7 +534,8 @@ juce::Result PatchEngine::savePatch (const juce::File& file)
     auto json = bundle::toJsonWithAudio (document, file, savedAudioVersions);
     if (! file.replaceWithText (juce::JSON::toString (json, true)))
         return juce::Result::fail ("Could not write " + file.getFullPathName());
-    modifiedSinceSave = false;
+    if (marksDocumentSaved)
+        modifiedSinceSave = false;
     return juce::Result::ok();
 }
 
@@ -585,6 +586,10 @@ void PatchEngine::newPatch()
     setPanicMuted (true);
     createDefaultPatch();
     modifiedSinceSave = false;
+    savedAudioVersions.clear();
+    autosavedAudioVersions.clear();
+    seenAudioVersions.clear();
+    savedAudioTarget = juce::File();
 }
 
 juce::Result PatchEngine::renameNode (NodeId id, const juce::String& newName)
@@ -682,8 +687,8 @@ void PatchEngine::handleIncomingMidiMessage (juce::MidiInput* source, const juce
         const auto scope = midiNoteFifo.write (1);
         if (scope.blockSize1 > 0)
             midiNoteEvents[static_cast<std::size_t> (scope.startIndex1)] = { message.getChannel(), message.getNoteNumber(),
-                                                                             message.isNoteOn (true) ? message.getVelocity() : 0,
-                                                                             message.isNoteOn (true) };
+                                                                             message.isNoteOn() ? message.getVelocity() : 0,
+                                                                             message.isNoteOn() }; // a velocity-0 note-on is a release
     }
     juce::MessageManager::callAsync ([this, message] { handleMidiOnMessageThread (message); });
 }
@@ -737,16 +742,16 @@ void PatchEngine::handleMidiOnMessageThread (const juce::MidiMessage& message)
     MidiMapping::Source source;
     int number = 0;
     if (message.isController())            { source = MidiMapping::Source::controlChange; number = message.getControllerNumber(); }
-    else if (message.isNoteOn (true))      { source = MidiMapping::Source::note; number = message.getNoteNumber(); }
-    else if (message.isNoteOff (true))     { source = MidiMapping::Source::note; number = message.getNoteNumber(); }
+    else if (message.isNoteOn())           { source = MidiMapping::Source::note; number = message.getNoteNumber(); }
+    else if (message.isNoteOff (true))     { source = MidiMapping::Source::note; number = message.getNoteNumber(); } // includes velocity-0 note-ons
     else if (message.isProgramChange())    { source = MidiMapping::Source::programChange; number = message.getProgramChangeNumber(); }
     else
         return;
     lastMidiDescription = (source == MidiMapping::Source::controlChange ? "CC " + juce::String (number) + " = " + juce::String (message.getControllerValue())
-                         : source == MidiMapping::Source::note ? "Note " + juce::String (number) + (message.isNoteOn (true) ? " on" : " off")
+                         : source == MidiMapping::Source::note ? "Note " + juce::String (number) + (message.isNoteOn() ? " on" : " off")
                                                                 : "Program " + juce::String (number))
                         + "  ch " + juce::String (message.getChannel());
-    if (midiLearnHook && (message.isController() || message.isNoteOn (true) || message.isProgramChange()))
+    if (midiLearnHook && (message.isController() || message.isNoteOn() || message.isProgramChange()))
         if (midiLearnHook (message))
             return;
     const auto& mappings = document.getMidiMappings();
@@ -758,9 +763,8 @@ void PatchEngine::handleMidiOnMessageThread (const juce::MidiMessage& message)
 void PatchEngine::applyMidiMapping (const MidiMapping& mapping, const juce::MidiMessage& message)
 {
     // "On" for notes is note-on; for CCs it is value >= 64; program changes are always on.
-    const bool isOn = message.isNoteOn (true) || (message.isController() && message.getControllerValue() >= 64) || message.isProgramChange();
-    const bool isEdge = message.isNoteOn (true) || message.isProgramChange()
-                      || (message.isController() && ! message.isNoteOff (true)); // CC: act on every message, gate below
+    // "On": a key down (velocity > 0), a switch CC at 64 or above, any program change.
+    const bool isOn = message.isNoteOn() || (message.isController() && message.getControllerValue() >= 64) || message.isProgramChange();
     switch (mapping.target)
     {
         case MidiMapping::Target::parameter:
@@ -791,20 +795,29 @@ void PatchEngine::applyMidiMapping (const MidiMapping& mapping, const juce::Midi
             const auto* node = document.findNode (mapping.node);
             if (node == nullptr)
                 return;
-            if (message.isNoteOn (true))
-                setNodeBypassed (mapping.node, ! node->processor->isBypassed()); // a note toggles
+            if (message.isNoteOn() || message.isProgramChange())
+                setNodeBypassed (mapping.node, ! node->processor->isBypassed()); // a key or a program change toggles
             else if (message.isController())
                 setNodeBypassed (mapping.node, ! isOn);                          // a switch CC sets
             return;
         }
         case MidiMapping::Target::command:
         {
-            // Rising edge only, so a latching switch CC does not fire twice.
-            const auto key = static_cast<juce::int64> (mapping.node) * 1000 + mapping.command.hashCode() % 1000;
-            const bool wasOn = midiCommandGate[key];
-            midiCommandGate[key] = isOn;
-            if (isEdge && isOn && ! wasOn)
+            // Keys and program changes are events: every press fires. A CC is a
+            // switch level: it fires on its rising edge only, so a latching pedal
+            // that sends 127 repeatedly does not fire twice.
+            if (message.isProgramChange() || message.isNoteOn())
+            {
                 sendNodeCommand (mapping.node, mapping.command);
+                return;
+            }
+            if (message.isController())
+            {
+                auto& wasOn = midiCommandGate[{ mapping.node, mapping.command }];
+                if (isOn && ! wasOn)
+                    sendNodeCommand (mapping.node, mapping.command);
+                wasOn = isOn;
+            }
             return;
         }
         case MidiMapping::Target::slot:
@@ -896,6 +909,8 @@ juce::Result PatchEngine::loadPatch (const juce::File& file)
         return juce::Result::fail (graphMessage);
     modifiedSinceSave = false;
     savedAudioVersions.clear();
+    autosavedAudioVersions.clear(); // same ids, different recordings: the autosave must rewrite them
+    seenAudioVersions.clear();
     savedAudioTarget = juce::File();
     graphMessage = "Patch loaded muted - press PANIC to fade audio back in";
     return juce::Result::ok();
@@ -1114,6 +1129,20 @@ void PatchEngine::handleAsyncUpdate()
 
 void PatchEngine::timerCallback()
 {
+    // Recording on a looper, 4-track or sampler changes the rig as much as a
+    // knob does: the autosave and the unsaved-changes prompt must know.
+    for (const auto& node : document.getNodes())
+    {
+        const auto version = node.processor->audioContentVersion();
+        const auto seen = seenAudioVersions.find (node.id);
+        if (seen == seenAudioVersions.end())
+            seenAudioVersions.emplace (node.id, version);
+        else if (seen->second != version)
+        {
+            seen->second = version;
+            markDocumentEdited();
+        }
+    }
     reclaimRetiredPlans();
     writeAutosaveIfDue();
     if (--midiRefreshCountdown <= 0)

@@ -1272,6 +1272,41 @@ void testUndoCompoundGestureMovesSeveralModulesAsOneStep()
     expect (! history.canRedo(), "redo should have consumed the whole compound");
 }
 
+void testUndoDeleteBringsBackMidiAndGroups()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    PatchHistory history (document);
+    const auto drive = document.addNode (NodeKind::distortion, { 0.0f, 0.0f });
+    const auto delay = document.addNode (NodeKind::delay, { 200.0f, 0.0f });
+    PedalGroup group;
+    group.id = 1; group.name = "BOX"; group.members = { drive, delay }; group.knobs = { { drive, 0 }, { delay, 0 } };
+    document.setGroups ({ group });
+    MidiMapping stomp;
+    stomp.source = MidiMapping::Source::note; stomp.number = 60; stomp.channel = 10;
+    stomp.target = MidiMapping::Target::bypass; stomp.node = drive;
+    document.setMidiMappings ({ stomp });
+    history.closeGesture();
+
+    expect (history.removeNode (drive), "delete should work");
+    expect (document.getMidiMappings().empty(), "deleting scrubs the node's mappings");
+    expect (document.getGroups().size() == 1 && document.getGroups()[0].members.size() == 1, "deleting takes the node out of its group");
+    expect (history.undo() == PatchHistory::Applied::structure, "undo delete");
+    expect (document.getMidiMappings().size() == 1 && document.getMidiMappings()[0].node == drive, "undo should bring the footswitch binding back");
+    expect (document.getGroups().size() == 1 && document.getGroups()[0].members.size() == 2 && document.getGroups()[0].knobs.size() == 2, "undo should bring the group membership and knobs back");
+
+    // Deleting every member drops the group; undoing both brings it back whole.
+    history.closeGesture();
+    history.beginCompoundGesture ("Remove 2 modules");
+    history.removeNode (drive);
+    history.removeNode (delay);
+    history.closeGesture();
+    expect (document.getGroups().empty(), "an emptied group is dropped");
+    history.undo();
+    expect (document.getGroups().size() == 1 && document.getGroups()[0].members.size() == 2, "undoing a multi-delete restores the whole group");
+    expect (document.getMidiMappings().size() == 1, "and the binding");
+}
+
 void testUndoCoalescesKnobGestures()
 {
     PatchDocument document;
@@ -1620,6 +1655,120 @@ void testLooperRecordsClosesOverdubsAndUndoes()
     node->handleUiCommand ("clear");
     render (0.0f);
     expect (node->statusText().startsWith ("EMPTY"), "clear should empty the loop");
+}
+
+void testLooperOverdubOncePerSlotAndUndoAtAnySpeed()
+{
+    const int block = 64;
+    for (const auto* mode : { "half", "reverse", "fast" })
+    {
+        auto node = createNodeProcessor (NodeKind::looper);
+        node->prepare (48000.0, block);
+        juce::AudioBuffer<float> inputs (node->getNumInputPorts(), block), outputs (1, block);
+        auto render = [&] (float level) { inputs.clear(); for (int i = 0; i < block; ++i) inputs.setSample (0, i, level); node->render (inputs, outputs, block); };
+        // A loop with a distinct value in every slot (a ramp), 75 blocks = 4800 samples.
+        node->handleUiCommand ("rec");
+        render (0.0f); // the command lands at the block start
+        int written = 0;
+        for (int b = 0; b < 75; ++b)
+        {
+            inputs.clear();
+            for (int i = 0; i < block; ++i) inputs.setSample (0, i, -0.5f + static_cast<float> (written++) / 4800.0f);
+            node->render (inputs, outputs, block);
+        }
+        node->handleUiCommand ("rec");
+        render (0.0f);
+        const auto original = node->exportAudioContent();
+        expect (original.getNumSamples() > 4000, std::string (mode) + ": the loop should have closed");
+        const auto versionBefore = node->audioContentVersion();
+
+        if (std::string (mode) == "half") node->handleUiCommand ("half");
+        if (std::string (mode) == "reverse") node->handleUiCommand ("reverse");
+        if (std::string (mode) == "fast") node->getParameter (3).setValue (200.0f);
+        for (int b = 0; b < 30; ++b) render (0.0f); // let the speed smoother settle and move the head
+        node->handleUiCommand ("rec");              // overdub +0.25 for 20 blocks
+        for (int b = 0; b < 20; ++b) render (0.25f);
+        node->handleUiCommand ("play");             // stop the overdub with PLAY
+        render (0.0f);
+        expect (node->audioContentVersion() != versionBefore, std::string (mode) + ": stopping an overdub with PLAY must change the saved-content version");
+        const auto dubbed = node->exportAudioContent();
+        int touched = 0;
+        for (int i = 0; i < dubbed.getNumSamples(); ++i)
+        {
+            const auto delta = dubbed.getSample (0, i) - original.getSample (0, i);
+            if (std::abs (delta) > 1.0e-4f)
+            {
+                ++touched;
+                expect (std::abs (delta - 0.25f) < 1.0e-3f, std::string (mode) + ": each slot must get the overdub exactly once, got +" + std::to_string (delta) + " at " + std::to_string (i));
+            }
+        }
+        expect (touched > 300, std::string (mode) + ": the overdub should have covered a run of slots: " + std::to_string (touched));
+
+        node->handleUiCommand ("undo");
+        for (int b = 0; b < 4; ++b) render (0.0f);  // the restore may take a few blocks
+        const auto undone = node->exportAudioContent();
+        for (int i = 0; i < undone.getNumSamples(); ++i)
+            if (std::abs (undone.getSample (0, i) - original.getSample (0, i)) > 1.0e-5f)
+                expect (false, std::string (mode) + ": undo must restore every slot and touch nothing else (slot " + std::to_string (i) + ")");
+    }
+}
+
+void testFourTrackSyncWithTrackOneStoppedAndNoDoubledMonitor()
+{
+    auto deck = createNodeProcessor (NodeKind::fourTrack);
+    const int block = 480;
+    deck->prepare (48000.0, block);
+    juce::AudioBuffer<float> inputs (deck->getNumInputPorts(), block), outputs (1, block);
+    auto feed = [&] (float level) { inputs.clear(); for (int i = 0; i < block; ++i) inputs.setSample (0, i, level); deck->render (inputs, outputs, block); };
+
+    // Recording an armed track: the output is the input once, not input + tape readback.
+    deck->handleUiCommand ("arm1");
+    deck->handleUiCommand ("rec");
+    deck->handleUiCommand ("play");
+    feed (0.2f);
+    feed (0.2f);
+    expect (std::abs (outputs.getSample (0, 200) - 0.2f) < 1.0e-4f, "recording must monitor the input once, got " + std::to_string (outputs.getSample (0, 200)));
+    const auto versionDuringTake = deck->audioContentVersion();
+    deck->handleUiCommand ("play"); // end the take with PLAY, REC stays lit
+    feed (0.0f);
+    expect (deck->audioContentVersion() != versionDuringTake, "a take ended by PLAY must change the saved-content version");
+
+    // SYNC on (default), track 1 stopped: tracks 2-4 keep moving along the tape.
+    deck->handleUiCommand ("rec");
+    deck->handleUiCommand ("arm1");
+    deck->handleUiCommand ("play1");
+    deck->handleUiCommand ("rtz");
+    deck->handleUiCommand ("play");
+    feed (0.0f);
+    const auto first = deck->lanePosition (1);
+    for (int b = 0; b < 100; ++b) feed (0.0f);   // one second
+    const auto later = deck->lanePosition (1);
+    expect (later >= 0.0f && (later - first) * 60.0f > 0.9f, "track 2 must advance ~1 s while track 1 is stopped, moved " + std::to_string ((later - first) * 60.0f) + " s");
+}
+
+void testStereoBypassKeepsBothSides()
+{
+    for (const auto kind : { NodeKind::stereoDelay, NodeKind::stereoChorus, NodeKind::stereoReverb })
+    {
+        auto node = createNodeProcessor (kind);
+        const int block = 64;
+        node->prepare (48000.0, block);
+        node->setBypassed (true);
+        juce::AudioBuffer<float> inputs (node->getNumInputPorts(), block), outputs (node->getNumOutputPorts(), block);
+        inputs.clear();
+        for (int i = 0; i < block; ++i) { inputs.setSample (0, i, 0.3f); inputs.setSample (1, i, -0.2f); }
+        node->render (inputs, outputs, block);
+        expect (std::abs (outputs.getSample (0, 10) - 0.3f) < 1.0e-6f && std::abs (outputs.getSample (1, 10) + 0.2f) < 1.0e-6f,
+                "bypass must pass In L to Out L and In R to Out R for " + nodeKindKey (kind).toStdString());
+    }
+    auto pan = createNodeProcessor (NodeKind::pan);
+    pan->prepare (48000.0, 64);
+    pan->setBypassed (true);
+    juce::AudioBuffer<float> inputs (pan->getNumInputPorts(), 64), outputs (2, 64);
+    inputs.clear();
+    for (int i = 0; i < 64; ++i) inputs.setSample (0, i, 0.4f);
+    pan->render (inputs, outputs, 64);
+    expect (std::abs (outputs.getSample (0, 5) - 0.4f) < 1.0e-6f && std::abs (outputs.getSample (1, 5) - 0.4f) < 1.0e-6f, "a bypassed Pan feeds its one input to both sides");
 }
 
 void testRecordedAudioSavesAndLoadsWithThePatch()
@@ -2130,28 +2279,30 @@ void testMidiNoteNodeDrivesGateAndPitch()
     auto node = createNodeProcessor (NodeKind::midiNote);
     const int block = 64;
     node->prepare (48000.0, block);
+    expect (std::abs (node->getParameter (0).getValue() - 45.0f) < 1.0e-4f, "default base should be A2 (45) so 0 on Pitch is 110 Hz");
+    node->getParameter (0).setValue (60.0f); // the checks below were written around a C4 base
     juce::AudioBuffer<float> inputs (juce::jmax (1, node->getNumInputPorts()), block), outputs (3, block);
     inputs.clear();
     node->render (inputs, outputs, block);
-    expect (outputs.getSample (0, 5) == 0.0f, "gate should start closed");
+    expect (outputs.getSample (0, 20) == 0.0f, "gate should start closed");
     node->handleMidiNote (1, 72, 100, true);   // C5: one octave above the base
     node->render (inputs, outputs, block);
-    expect (outputs.getSample (0, 5) == 1.0f, "gate should open on note on");
-    expect (std::abs (outputs.getSample (1, 5) - 12.0f / 48.0f) < 1.0e-5f, "pitch control should be +12 semitones / 48");
-    expect (std::abs (outputs.getSample (2, 5) - 100.0f / 127.0f) < 1.0e-5f, "velocity control wrong");
+    expect (outputs.getSample (0, 20) == 1.0f, "gate should open on note on");
+    expect (std::abs (outputs.getSample (1, 20) - 12.0f / 48.0f) < 1.0e-5f, "pitch control should be +12 semitones / 48");
+    expect (std::abs (outputs.getSample (2, 20) - 100.0f / 127.0f) < 1.0e-5f, "velocity control wrong");
     node->handleMidiNote (1, 60, 90, true);    // second note takes over
     node->render (inputs, outputs, block);
-    expect (std::abs (outputs.getSample (1, 5)) < 1.0e-5f, "newest note should sound");
+    expect (std::abs (outputs.getSample (1, 20)) < 1.0e-5f, "newest note should sound");
     node->handleMidiNote (1, 60, 0, false);    // release it: back to the held C5
     node->render (inputs, outputs, block);
-    expect (outputs.getSample (0, 5) == 1.0f && std::abs (outputs.getSample (1, 5) - 0.25f) < 1.0e-5f, "held note should return after release");
+    expect (outputs.getSample (0, 20) == 1.0f && std::abs (outputs.getSample (1, 20) - 0.25f) < 1.0e-5f, "held note should return after release");
     node->handleMidiNote (1, 72, 0, false);
     node->render (inputs, outputs, block);
-    expect (outputs.getSample (0, 5) == 0.0f && std::abs (outputs.getSample (1, 5) - 0.25f) < 1.0e-5f, "gate closes, pitch holds for the tail");
+    expect (outputs.getSample (0, 20) == 0.0f && std::abs (outputs.getSample (1, 20) - 0.25f) < 1.0e-5f, "gate closes, pitch holds for the tail");
     node->getParameter (1).setValue (5.0f);    // channel filter
     node->handleMidiNote (1, 64, 100, true);
     node->render (inputs, outputs, block);
-    expect (outputs.getSample (0, 5) == 0.0f, "notes on another channel should be ignored");
+    expect (outputs.getSample (0, 20) == 0.0f, "notes on another channel should be ignored");
 }
 
 int main()
@@ -2182,6 +2333,7 @@ int main()
         { "undo/redo structure round trip", testUndoRedoStructure },
         { "undo delete restores processor and cables", testUndoDeleteRestoresSameProcessorAndCables },
         { "undo coalesces knob gestures", testUndoCoalescesKnobGestures },
+        { "undo of a delete brings back MIDI bindings and groups", testUndoDeleteBringsBackMidiAndGroups },
         { "undo compound gesture moves several modules as one step", testUndoCompoundGestureMovesSeveralModulesAsOneStep },
         { "raw juce convolution sanity", testRawJuceConvolutionSanity },
         { "cabinet convolves an impulse", testCabinetConvolvesImpulse },
@@ -2189,6 +2341,9 @@ int main()
         { "portable bundle round trip", testBundleRoundTripKeepsAssetsRelative },
         { "board positions and groups round trip", testBoardPositionsAndGroupsRoundTrip },
         { "looper records, closes, overdubs, undoes", testLooperRecordsClosesOverdubsAndUndoes },
+        { "looper overdubs once per slot and undoes at any speed", testLooperOverdubOncePerSlotAndUndoAtAnySpeed },
+        { "4-track sync with track 1 stopped, no doubled monitor, take versions", testFourTrackSyncWithTrackOneStoppedAndNoDoubledMonitor },
+        { "stereo bypass keeps both sides", testStereoBypassKeepsBothSides },
         { "recorded audio saves and loads with the patch", testRecordedAudioSavesAndLoadsWithThePatch },
         { "midi mappings round trip and scrub", testMidiMappingsRoundTripAndScrub },
         { "controller feedback state and sysex", testControllerFeedback },

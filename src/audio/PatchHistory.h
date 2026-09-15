@@ -106,6 +106,9 @@ private:
         double preparedSampleRate = 0.0;
         int preparedMaximumBlockSize = 0;
         Connection connection;
+        // Removing a node scrubs its MIDI bindings and pedal-group membership;
+        // the state from just before the removal comes back with the node.
+        juce::var groupsBeforeRemoval, midiBeforeRemoval;
 
         juce::int64 lastEditMs = 0;
         int gestureId = 0; // > 0: part of a compound gesture, undone/redone together

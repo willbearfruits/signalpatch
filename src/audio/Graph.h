@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include <JuceHeader.h>
 
 #include <array>
@@ -259,6 +261,15 @@ protected:
     [[nodiscard]] float parameterValue (int parameterIndex,
                                         const juce::AudioBuffer<float>& inputs,
                                         int sampleIndex) noexcept;
+    /** For reads made once per block: the knob's target plus its mod socket at
+        the block start, without stepping the per-sample smoother (which would
+        otherwise take hundreds of blocks to arrive). */
+    [[nodiscard]] float parameterTarget (int parameterIndex, const juce::AudioBuffer<float>& inputs) const noexcept;
+    /** Whether the running plan has a cable into this input (set per block by the plan). */
+    [[nodiscard]] bool isInputConnected (int port) const noexcept
+    {
+        return port < 0 || port >= 64 || (connectedInputs >> static_cast<unsigned> (port) & 1u) != 0;
+    }
     void setReportedLatencySamples (int samples) noexcept { reportedLatencySamples = juce::jmax (0, samples); }
 
     virtual void prepareDsp (double sampleRate, int maximumBlockSize) = 0;
@@ -278,6 +289,8 @@ private:
     std::vector<std::unique_ptr<SignalMeter>> outputMeters;
     int reportedLatencySamples = 0;
     std::atomic<bool> bypassed { false };
+    std::uint64_t connectedInputs = 0; // audio thread only, set by the running plan per block (a node rendered on its own has no cables)
+    friend class RenderPlan;
 };
 
 struct NodeModel
