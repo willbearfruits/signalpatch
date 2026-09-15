@@ -565,7 +565,7 @@ void RackView::requestQuit()
 
 void RackView::showFileMenu (double x, double y)
 {
-    enum { newPatch = 1, openPatch, save, saveAs, exportBundle, unmute, quit };
+    enum { newPatch = 1, openPatch, save, saveAs, exportBundle, unmute, quit, audioSettings };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (currentFile == juce::File() ? "UNTITLED" : currentFile.getFileName().toUpperCase()));
     items.push_back (MenuItem::item (newPatch, "New patch", "Ctrl+N"));
@@ -575,11 +575,13 @@ void RackView::showFileMenu (double x, double y)
     items.push_back (MenuItem::item (exportBundle, "Export portable project (.zip)..."));
     items.push_back (MenuItem::line());
     items.push_back (MenuItem::item (unmute, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute", "M"));
+    items.push_back (MenuItem::item (audioSettings, "Audio device and buffer...")); // so a pad (Guide) reaches it too
     items.push_back (MenuItem::item (quit, "Quit", "Ctrl+Q"));
-    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this] (int picked)
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, x, y] (int picked)
     {
         switch (picked)
         {
+            case audioSettings: showAudioMenu (x, y); break;
             case newPatch:
                 engine.newPatch();
                 currentFile = juce::File();

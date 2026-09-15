@@ -124,8 +124,8 @@ demo.
   scale factor itself.
 - **Gamepad-only recovery** from every state: menus, browser and prompts
   are covered (prompts grow an on-screen keyboard while a pad drives; Guide
-  opens FILE, the left stick click opens the rack's canvas menu); still
-  missing: the palette and the AUDIO menu.
+  opens FILE, which now also reaches the audio device menu; the left stick
+  click opens the rack's canvas menu, which covers the palette's job).
 - **Realtime scheduling check** on the target OS image: the HUD flags a
   callback thread that is not SCHED_FIFO/RR (rtkit or realtime-privileges).
 - Packaging (AppImage/Flatpak, Windows zip), CI for the app on Linux and

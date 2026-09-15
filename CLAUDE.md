@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 SignalPatch is a C++20/JUCE 8 standalone modular audio processor (guitar/voice/synth rack) for Linux and Windows, published at github.com/willbearfruits/signalpatch under AGPL-3.0, with a site at willbearfruits.github.io/signalpatch. The patch graph derives its ports from the selected audio device's actual enabled channels — there is deliberately no hard-coded input count anywhere in the graph or DSP layer.
 
-Doc map: `docs/ROADMAP.md` (the single ordered plan, 0.2 MIDI/control → 0.6 handheld instrument — keep it updated as phases land) · `docs/ARCHITECTURE.md` (engine design) · `docs/REALTIME_SAFETY.md` (callback contract, a release gate) · `docs/PRODUCTION_READINESS.md` (which verification gates are closed vs. open — update when a gate moves) · `docs/PRODUCT.md` (target spec, not shipped claims) · `docs/NAM_ROADMAP.md` (neural amp staging).
+Doc map: `docs/CHANGELOG.md` (keep the Unreleased section current as features land) · `docs/ROADMAP.md` (the single ordered plan, 0.2 MIDI/control → 0.6 handheld instrument — keep it updated as phases land) · `docs/ARCHITECTURE.md` (engine design) · `docs/REALTIME_SAFETY.md` (callback contract, a release gate) · `docs/PRODUCTION_READINESS.md` (which verification gates are closed vs. open — update when a gate moves) · `docs/PRODUCT.md` (target spec, not shipped claims) · `docs/NAM_ROADMAP.md` (neural amp staging).
 
 ## Build and test
 

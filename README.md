@@ -158,6 +158,7 @@ buffers is roadmap item 0.4.
 | Doc | What it is |
 | --- | --- |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | The ordered plan, 0.2 → handheld instrument |
+| [`docs/CHANGELOG.md`](docs/CHANGELOG.md) | What each version brought; "Unreleased" is what `main` has beyond the last tag |
 | [`docs/APPLIANCE.md`](docs/APPLIANCE.md) | Building the dedicated handheld rig (ROG Ally + Zoom F4) |
 | [`docs/PRODUCT.md`](docs/PRODUCT.md) | Product specification |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Engine design: document → compiler → snapshot |
