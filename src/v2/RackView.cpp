@@ -1627,6 +1627,7 @@ void RackView::rebuildBoard()
             {
                 if (pedal.kind == NodeKind::stepSequencer && index >= 2) continue;
                 if (pedal.kind == NodeKind::drumMachine && index >= 5) continue;
+                if (pedal.kind == NodeKind::neuralAmpPlaceholder && index == 1) continue; // Gain, Bass, Mid, Treble on the pedal; Master stays in the rack
                 pedal.knobs.emplace_back (node->id, index);
             }
             if (const auto* layout = layoutFor (node->id); layout != nullptr && ! node->hardware)

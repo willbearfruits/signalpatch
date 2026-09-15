@@ -657,6 +657,65 @@ private:
     std::atomic<int> activeStep { 0 };
 };
 
+// Tone controls around a neural capture: RBJ biquads whose coefficients are
+// recomputed on the audio thread only when a knob moved (a few flops), so the
+// per-sample cost is one multiply-add chain per band.
+struct ToneBiquad
+{
+    float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f, z1 = 0.0f, z2 = 0.0f;
+
+    float process (float x) noexcept
+    {
+        const auto y = b0 * x + z1;
+        z1 = b1 * x - a1 * y + z2;
+        z2 = b2 * x - a2 * y;
+        return y;
+    }
+    void reset() noexcept { z1 = z2 = 0.0f; }
+
+    void set (double bb0, double bb1, double bb2, double aa0, double aa1, double aa2) noexcept
+    {
+        b0 = static_cast<float> (bb0 / aa0); b1 = static_cast<float> (bb1 / aa0); b2 = static_cast<float> (bb2 / aa0);
+        a1 = static_cast<float> (aa1 / aa0); a2 = static_cast<float> (aa2 / aa0);
+    }
+    void lowShelf (double sampleRate, double frequency, double gainDb) noexcept
+    {
+        const auto A = std::pow (10.0, gainDb / 40.0), w = juce::MathConstants<double>::twoPi * frequency / sampleRate;
+        const auto cw = std::cos (w), sw = std::sin (w), alpha = sw / 2.0 * std::sqrt (2.0), beta = 2.0 * std::sqrt (A) * alpha;
+        set (A * ((A + 1) - (A - 1) * cw + beta), 2 * A * ((A - 1) - (A + 1) * cw), A * ((A + 1) - (A - 1) * cw - beta),
+             (A + 1) + (A - 1) * cw + beta, -2 * ((A - 1) + (A + 1) * cw), (A + 1) + (A - 1) * cw - beta);
+    }
+    void highShelf (double sampleRate, double frequency, double gainDb) noexcept
+    {
+        const auto A = std::pow (10.0, gainDb / 40.0), w = juce::MathConstants<double>::twoPi * frequency / sampleRate;
+        const auto cw = std::cos (w), sw = std::sin (w), alpha = sw / 2.0 * std::sqrt (2.0), beta = 2.0 * std::sqrt (A) * alpha;
+        set (A * ((A + 1) + (A - 1) * cw + beta), -2 * A * ((A - 1) + (A + 1) * cw), A * ((A + 1) + (A - 1) * cw - beta),
+             (A + 1) - (A - 1) * cw + beta, 2 * ((A - 1) - (A + 1) * cw), (A + 1) - (A - 1) * cw - beta);
+    }
+    void peak (double sampleRate, double frequency, double q, double gainDb) noexcept
+    {
+        const auto A = std::pow (10.0, gainDb / 40.0), w = juce::MathConstants<double>::twoPi * frequency / sampleRate;
+        const auto cw = std::cos (w), alpha = std::sin (w) / (2.0 * q);
+        set (1 + alpha * A, -2 * cw, 1 - alpha * A, 1 + alpha / A, -2 * cw, 1 - alpha / A);
+    }
+};
+
+struct AmpToneStack
+{
+    ToneBiquad bass, mid, treble, presence;
+    float lastBass = 1.0e9f, lastMid = 1.0e9f, lastTreble = 1.0e9f, lastPresence = 1.0e9f;
+
+    void update (double sampleRate, float bassDb, float midDb, float trebleDb, float presenceDb) noexcept
+    {
+        if (std::abs (bassDb - lastBass) > 0.01f)         { bass.lowShelf (sampleRate, 110.0, bassDb);          lastBass = bassDb; }
+        if (std::abs (midDb - lastMid) > 0.01f)           { mid.peak (sampleRate, 750.0, 0.7, midDb);            lastMid = midDb; }
+        if (std::abs (trebleDb - lastTreble) > 0.01f)     { treble.highShelf (sampleRate, 2200.0, trebleDb);     lastTreble = trebleDb; }
+        if (std::abs (presenceDb - lastPresence) > 0.01f) { presence.peak (sampleRate, 4800.0, 1.2, presenceDb); lastPresence = presenceDb; }
+    }
+    float process (float x) noexcept { return presence.process (treble.process (mid.process (bass.process (x)))); }
+    void reset() noexcept { bass.reset(); mid.reset(); treble.reset(); presence.reset(); }
+};
+
 // One engine, two personalities: the amp head and the stompbox. Both run any
 // .nam capture; the pedal adds a wet/dry mix because drive captures are often
 // blended, and both can step through the models folder like a pedal library.
@@ -666,12 +725,47 @@ public:
     explicit NeuralAmpNode (NodeKind kindToUse)
         : DspNode (kindToUse, nodeKindName (kindToUse))
     {
-        addInputPort (kindToUse == NodeKind::neuralPedal ? "In" : "Guitar", SignalType::audio);
+        const bool pedal = kindToUse == NodeKind::neuralPedal;
+        addInputPort (pedal ? "In" : "Guitar", SignalType::audio);
         addOutputPort ("Audio", SignalType::audio);
-        addParameter ("input-trim", "Input trim", "dB", juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, 0.25f);
-        addParameter ("output-trim", "Output trim", "dB", juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, 0.25f);
-        if (kindToUse == NodeKind::neuralPedal)
+        // Keys and the first indices are stable (saved patches store values by
+        // index); the tone knobs came later and sit at the end.
+        addParameter ("input-trim", pedal ? "Drive" : "Gain", "dB", juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, 0.25f);
+        addParameter ("output-trim", pedal ? "Level" : "Master", "dB", juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, 0.25f);
+        if (pedal)
+        {
             addParameter ("mix", "Mix", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 100.0f, 0.5f);
+            addParameter ("tone", "Tone", "dB", juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f, 0.5f);
+        }
+        else
+        {
+            addParameter ("bass", "Bass", "dB", juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f, 0.5f);
+            addParameter ("mid", "Mid", "dB", juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f, 0.5f);
+            addParameter ("treble", "Treble", "dB", juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f, 0.5f);
+            addParameter ("presence", "Presence", "dB", juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f), 0.0f, 0.5f);
+        }
+    }
+
+    /** Amp: Bass/Mid/Treble/Presence after the model; Pedal: Tone as a high shelf. Called once per block. */
+    void updateTone (const juce::AudioBuffer<float>& inputs) noexcept
+    {
+        // The knob's target (plus its mod socket at the block start) rather than
+        // parameterValue(): that steps the per-sample smoother, and one step per
+        // block would take seconds to arrive.
+        auto target = [&] (int index)
+        {
+            const auto& parameter = getParameter (index);
+            float modulation = 0.0f;
+            if (juce::isPositiveAndBelow (parameter.inputPortIndex, inputs.getNumChannels()) && inputs.getNumSamples() > 0)
+                modulation = inputs.getSample (parameter.inputPortIndex, 0);
+            if (! std::isfinite (modulation))
+                modulation = 0.0f;
+            return parameter.range.convertFrom0to1 (juce::jlimit (0.0f, 1.0f, parameter.getNormalisedValue() + modulation * parameter.getModulationDepth()));
+        };
+        if (getKind() == NodeKind::neuralPedal)
+            tone.update (sampleRate, 0.0f, 0.0f, target (3), 0.0f);
+        else
+            tone.update (sampleRate, target (2), target (3), target (4), target (5));
     }
 
     /** Where model cycling looks when the node has no model yet. */
@@ -844,7 +938,7 @@ private:
             currentModel->ResetAndPrewarm (sampleRate, maximumBlockSize);
     }
 
-    void resetDsp() noexcept override {}
+    void resetDsp() noexcept override { tone.reset(); }
 
     void processDsp (const juce::AudioBuffer<float>& inputs,
                      juce::AudioBuffer<float>& outputs,
@@ -855,13 +949,15 @@ private:
         auto* model = activeModel.load (std::memory_order_acquire);
         const auto frames = juce::jmin (numSamples, static_cast<int> (scratchIn.size()));
 
+        updateTone (inputs);
         if (model == nullptr || frames <= 0)
         {
             for (int sample = 0; sample < numSamples; ++sample)
             {
                 const auto inputGain = juce::Decibels::decibelsToGain (parameterValue (0, inputs, sample));
                 const auto outputGain = juce::Decibels::decibelsToGain (parameterValue (1, inputs, sample));
-                output[sample] = input[sample] * inputGain * outputGain;
+                const auto x = std::isfinite (input[sample]) ? input[sample] : 0.0f;
+                output[sample] = tone.process (x * inputGain) * outputGain;
             }
             return;
         }
@@ -888,10 +984,10 @@ private:
         for (int sample = 0; sample < frames; ++sample)
         {
             const auto outputGain = juce::Decibels::decibelsToGain (parameterValue (1, inputs, sample));
-            auto value = scratchOut[static_cast<std::size_t> (sample)] * outputGain;
-            if (! std::isfinite (value))
-                value = 0.0f;
-            value = juce::jlimit (-4.0f, 4.0f, value);
+            auto modelled = scratchOut[static_cast<std::size_t> (sample)];
+            if (! std::isfinite (modelled))
+                modelled = 0.0f;
+            auto value = juce::jlimit (-4.0f, 4.0f, tone.process (modelled) * outputGain);
             if (isPedal)
             {
                 const auto mix = juce::jlimit (0.0f, 1.0f, parameterValue (2, inputs, sample) * 0.01f);
@@ -927,7 +1023,7 @@ private:
 
 private:
     void prepareDsp (double newSampleRate, int) override { sampleRate = newSampleRate; }
-    void resetDsp() noexcept override {}
+    void resetDsp() noexcept override { tone.reset(); }
 
     void processDsp (const juce::AudioBuffer<float>& inputs,
                      juce::AudioBuffer<float>& outputs,
@@ -935,11 +1031,12 @@ private:
     {
         const auto* input = inputs.getReadPointer (0);
         auto* output = outputs.getWritePointer (0);
+        updateTone (inputs);
         for (int sample = 0; sample < numSamples; ++sample)
         {
             const auto inputGain = juce::Decibels::decibelsToGain (parameterValue (0, inputs, sample));
             const auto outputGain = juce::Decibels::decibelsToGain (parameterValue (1, inputs, sample));
-            output[sample] = input[sample] * inputGain * outputGain;
+            output[sample] = tone.process (input[sample] * inputGain) * outputGain;
         }
     }
 #endif
@@ -947,6 +1044,7 @@ private:
     double sampleRate = 48000.0;
     juce::String modelPath;
     juce::String loadError;
+    AmpToneStack tone;
 };
 class CrossfadeNode final : public DspNode
 {

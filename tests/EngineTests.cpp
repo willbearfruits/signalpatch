@@ -1979,6 +1979,42 @@ void testClockPulsesAndFollowers()
     expect (looper->uiToggleState ("rec"), "recording should start on the pulse");
 }
 
+void testNeuralAmpToneStackShapesTheSpectrum()
+{
+    // Without a model the amp is trim + tone stack; a full bass cut must lose low end and keep highs.
+    auto amp = createNodeProcessor (NodeKind::neuralAmpPlaceholder);
+    const int block = 256;
+    amp->prepare (48000.0, block);
+    expect (amp->getParameter (2).name == "Bass" && amp->getParameter (5).name == "Presence", "amp tone knobs should follow the trims");
+    juce::AudioBuffer<float> inputs (amp->getNumInputPorts(), block), outputs (1, block);
+    auto rms = [&] (double frequency)
+    {
+        amp->reset();
+        double sum = 0.0; int counted = 0;
+        for (int b = 0; b < 40; ++b)
+        {
+            inputs.clear();
+            for (int i = 0; i < block; ++i)
+                inputs.setSample (0, i, 0.5f * static_cast<float> (std::sin (juce::MathConstants<double>::twoPi * frequency * (b * block + i) / 48000.0)));
+            amp->render (inputs, outputs, block);
+            if (b >= 20)
+                for (int i = 0; i < block; ++i) { sum += outputs.getSample (0, i) * outputs.getSample (0, i); ++counted; }
+        }
+        return std::sqrt (sum / counted);
+    };
+    const auto flatLow = rms (80.0), flatHigh = rms (5000.0);
+    amp->getParameter (2).setValue (-12.0f);
+    const auto cutLow = rms (80.0), cutHigh = rms (5000.0);
+    expect (cutLow < flatLow * 0.4f, "bass at -12 dB should drop 80 Hz: " + std::to_string (cutLow / flatLow));
+    expect (std::abs (cutHigh - flatHigh) < flatHigh * 0.05f, "bass knob must leave 5 kHz alone");
+    amp->getParameter (2).setValue (0.0f);
+    amp->getParameter (5).setValue (12.0f);
+    expect (rms (4800.0) > flatHigh * 2.0f, "presence at +12 dB should lift 4.8 kHz");
+
+    auto pedal = createNodeProcessor (NodeKind::neuralPedal);
+    expect (pedal->getParameter (0).name == "Drive" && pedal->getParameter (3).name == "Tone", "pedal knobs: Drive, Level, Mix, Tone");
+}
+
 void testTone3000PiecesAreRight()
 {
     // RFC 7636 appendix B vector.
@@ -2083,6 +2119,7 @@ int main()
         { "stereo nodes: pan, ping-pong delay, cabinet R, reverb/chorus", testStereoNodes },
         { "tuner detects pitch", testTunerDetectsPitch },
         { "clock pulses; drums and looper follow it", testClockPulsesAndFollowers },
+        { "neural amp tone stack shapes the spectrum", testNeuralAmpToneStackShapesTheSpectrum },
         { "TONE3000 pieces: PKCE, URLs, callback, JSON", testTone3000PiecesAreRight },
         { "MIDI Note node drives gate and pitch", testMidiNoteNodeDrivesGateAndPitch }
     };
