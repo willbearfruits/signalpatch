@@ -7,7 +7,21 @@ hardware, play it like an instrument.**
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/website-willbearfruits.github.io%2Fsignalpatch-4fd8c4)](https://willbearfruits.github.io/signalpatch/)
 
-![SignalPatch rack](docs/assets/rack.png)
+<p align="center">
+  <a href="https://github.com/willbearfruits/signalpatch/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/willbearfruits/signalpatch/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/willbearfruits/signalpatch/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/willbearfruits/signalpatch?include_prereleases&label=release"></a>
+  <a href="./LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
+  <a href="https://willbearfruits.github.io/signalpatch/"><img alt="Website" src="https://img.shields.io/badge/site-willbearfruits.github.io%2Fsignalpatch-8a5cff"></a>
+</p>
+
+![SignalPatch rack: neural pedal, cabinet, drum machine, 4-track with turning reels, synths — family-coloured modules and glowing cables](docs/assets/rack.png)
+
+<p align="center">
+  <img src="docs/assets/board.png" alt="The Board: the same rig as pedals with footswitches, transport buttons and five rig slots" width="49%">
+  <img src="docs/assets/tone3000.png" alt="TONE3000 inside the app: search captures by gear and sort, with photos; Enter loads one into the module while you play" width="49%">
+</p>
+
+**Download:** [Windows (x64) and Linux (x86_64) builds on the releases page](https://github.com/willbearfruits/signalpatch/releases) — unzip, run, plug in.
 
 SignalPatch turns an audio interface into a patchable rack: drag cables
 between modules while the sound keeps running, stomp any effect in or out of
