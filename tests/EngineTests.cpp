@@ -3,6 +3,7 @@
 #include "../src/audio/PatchBundle.h"
 #include "../src/audio/MidiMap.h"
 #include "../src/audio/ControllerFeedback.h"
+#include "../src/audio/Tone3000.h"
 #include "../src/audio/Processors.h"
 
 #include <algorithm>
@@ -1978,6 +1979,39 @@ void testClockPulsesAndFollowers()
     expect (looper->uiToggleState ("rec"), "recording should start on the pulse");
 }
 
+void testTone3000PiecesAreRight()
+{
+    // RFC 7636 appendix B vector.
+    expect (tone3000::Pkce::challengeFor ("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk") == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            "PKCE S256 challenge should match the RFC example");
+    const auto pkce = tone3000::Pkce::generate();
+    expect (pkce.verifier.length() == 43 && pkce.state.length() >= 20 && pkce.challenge == tone3000::Pkce::challengeFor (pkce.verifier), "generated PKCE should be consistent");
+
+    const auto url = tone3000::authorizeUrl ("t3k_pub_x", tone3000::redirectUri(), pkce).toString (true);
+    expect (url.startsWith ("https://www.tone3000.com/api/v1/oauth/authorize?") && url.contains ("client_id=t3k_pub_x") && url.contains ("code_challenge_method=S256")
+            && url.contains ("response_type=code") && url.contains ("redirect_uri=http%3A%2F%2Flocalhost%3A41443%2Fcb"), "authorize URL is missing parameters: " + url.toStdString());
+
+    expect (tone3000::codeFromCallback ("GET /cb?code=abc%2Fdef&state=" + pkce.state + " HTTP/1.1", pkce.state) == "abc/def", "callback code should be extracted and unescaped");
+    expect (tone3000::codeFromCallback ("GET /cb?code=abc&state=wrong HTTP/1.1", pkce.state).isEmpty(), "a wrong state must be rejected");
+
+    const auto page = tone3000::parseTonePage (juce::JSON::parse (R"({"data":[{"id":12,"title":"Plexi 51","gear":"amp","models_count":3,"makes":[{"name":"Marshall"}],"user":{"username":"tim"}},{"id":13,"title":"Nano Rat","gear":"pedal","models_count":1}],"page":2,"page_size":25,"total":51,"total_pages":3})"));
+    expect (page.tones.size() == 2 && page.page == 2 && page.totalPages == 3 && page.total == 51, "tone page envelope");
+    expect (page.tones[0].id == 12 && page.tones[0].title == "Plexi 51" && page.tones[0].make == "Marshall" && page.tones[0].user == "tim" && page.tones[0].modelsCount == 3, "tone fields");
+    expect (page.tones[1].make.isEmpty() && page.tones[1].gear == "pedal", "missing make should stay empty");
+
+    const auto models = tone3000::parseModels (juce::JSON::parse (R"({"data":[{"id":7,"tone_id":12,"name":"Plexi 51 DI#03","model_url":"https://x/y.nam","size":"standard","architecture_version":2},{"id":8,"name":"no url"}]})"));
+    expect (models.size() == 1 && models[0].id == 7 && models[0].size == "standard" && models[0].architecture == 2 && models[0].url == "https://x/y.nam", "model fields; entries without a url dropped");
+    const auto bare = tone3000::parseModels (juce::JSON::parse (R"([{"id":9,"name":"n","model_url":"https://x/z.nam"}])"));
+    expect (bare.size() == 1, "a bare array should parse too");
+    expect (tone3000::modelFileName (page.tones[0], models[0]) == "Plexi 51 - Plexi 51 DI03 (standard).nam", "file name: " + tone3000::modelFileName (page.tones[0], models[0]).toStdString());
+
+    auto tokens = tone3000::Tokens::fromTokenResponse (juce::JSON::parse (R"({"access_token":"A","refresh_token":"R","token_type":"bearer","expires_in":3600})"), 1000);
+    expect (tokens.present() && tokens.refresh == "R" && tokens.expiresAtMs == 3601000, "token response");
+    expect (! tokens.expired (1000) && tokens.expired (3600000), "expiry with a 30 s margin");
+    const auto back = tone3000::Tokens::fromJson (tokens.toJson());
+    expect (back.access == "A" && back.refresh == "R" && back.expiresAtMs == 3601000, "token round trip");
+}
+
 void testMidiNoteNodeDrivesGateAndPitch()
 {
     auto node = createNodeProcessor (NodeKind::midiNote);
@@ -2049,6 +2083,7 @@ int main()
         { "stereo nodes: pan, ping-pong delay, cabinet R, reverb/chorus", testStereoNodes },
         { "tuner detects pitch", testTunerDetectsPitch },
         { "clock pulses; drums and looper follow it", testClockPulsesAndFollowers },
+        { "TONE3000 pieces: PKCE, URLs, callback, JSON", testTone3000PiecesAreRight },
         { "MIDI Note node drives gate and pitch", testMidiNoteNodeDrivesGateAndPitch }
     };
 

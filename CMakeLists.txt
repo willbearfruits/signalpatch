@@ -167,6 +167,7 @@ target_sources(signalpatch_tests PRIVATE
     src/audio/PatchBundle.cpp
     src/audio/MidiMap.cpp
     src/audio/ControllerFeedback.cpp
+    src/audio/Tone3000.cpp
     src/audio/Graph.h
     src/audio/Processors.cpp
     src/audio/Processors.h)
@@ -187,6 +188,7 @@ endif()
 target_link_libraries(signalpatch_tests
     PRIVATE
         juce::juce_audio_basics
+        juce::juce_cryptography
         juce::juce_data_structures
         juce::juce_dsp
         juce::juce_events
@@ -262,6 +264,7 @@ if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
     target_link_libraries(signalpatch
         PRIVATE
             juce::juce_audio_devices
+            juce::juce_cryptography
             juce::juce_audio_formats
             juce::juce_dsp
             juce::juce_graphics

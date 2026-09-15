@@ -71,7 +71,7 @@ namespace
 } // namespace
 
 RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
-    : engine (engineToUse), vg (context), font (fontId), menu (context, fontId), prompt (context, fontId), browser (context, fontId)
+    : engine (engineToUse), vg (context), font (fontId), menu (context, fontId), prompt (context, fontId), browser (context, fontId), toneBrowser (context, fontId)
 {
     engine.addChangeListener (this);
     {
@@ -572,7 +572,7 @@ void RackView::requestQuit()
 
 void RackView::showFileMenu (double x, double y)
 {
-    enum { newPatch = 1, openPatch, save, saveAs, exportBundle, unmute, quit, audioSettings };
+    enum { newPatch = 1, openPatch, save, saveAs, exportBundle, unmute, quit, audioSettings, tone3000Browse };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (currentFile == juce::File() ? "UNTITLED" : currentFile.getFileName().toUpperCase()));
     items.push_back (MenuItem::item (newPatch, "New patch", "Ctrl+N"));
@@ -583,12 +583,14 @@ void RackView::showFileMenu (double x, double y)
     items.push_back (MenuItem::line());
     items.push_back (MenuItem::item (unmute, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute", "M"));
     items.push_back (MenuItem::item (audioSettings, "Audio device and buffer...")); // so a pad (Guide) reaches it too
+    items.push_back (MenuItem::item (tone3000Browse, "Browse TONE3000 captures...", "Ctrl+T"));
     items.push_back (MenuItem::item (quit, "Quit", "Ctrl+Q"));
     menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, x, y] (int picked)
     {
         switch (picked)
         {
             case audioSettings: showAudioMenu (x, y); break;
+            case tone3000Browse: key (GLFW_KEY_T, true, GLFW_MOD_CONTROL); break;
             case newPatch:
                 engine.newPatch();
                 currentFile = juce::File();
@@ -620,6 +622,21 @@ void RackView::showFileMenu (double x, double y)
         }
         dirty = true;
     });
+    dirty = true;
+}
+
+void RackView::openToneBrowser (NodeId id)
+{
+    toneBrowser.open (documentsFolder ("models"), [this, id] (const juce::File& file)
+    {
+        if (engine.getDocument().findNode (id) == nullptr)
+            return;
+        auto* object = new juce::DynamicObject();
+        object->setProperty ("model", file.getFullPathName());
+        engine.applyNodeExtraState (id, juce::var (object));
+        say ("Loading " + file.getFileName());
+    },
+    [this] (const juce::String& text) { say (text); });
     dirty = true;
 }
 
@@ -701,6 +718,8 @@ void RackView::showCanvasMenu (double x, double y)
     items.push_back (MenuItem::line());
     items.push_back (MenuItem::item (3, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute", "M"));
     items.push_back (MenuItem::item (4, "Fit patch to window", "F"));
+    items.push_back (MenuItem::line());
+    items.push_back (MenuItem::item (5, "Browse TONE3000 captures...", "Ctrl+T"));
     const auto world = toWorld (x, y);
     menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, world] (int id)
     {
@@ -718,6 +737,7 @@ void RackView::showCanvasMenu (double x, double y)
         else if (id == 2) say (engine.redo() ? "Redo" : "Nothing to redo");
         else if (id == 3) { engine.togglePanic(); say (engine.isPanicMuted() ? "Muted" : "Fading in"); }
         else if (id == 4) fitToPatch (windowW, windowH);
+        else if (id == 5) key (GLFW_KEY_T, true, GLFW_MOD_CONTROL);
         dirty = true;
     });
     dirty = true;
@@ -732,7 +752,7 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
     for (const auto& connection : engine.getDocument().getConnections())
         if (connection.sourceNode == layout.id || connection.destinationNode == layout.id)
             ++cableCount;
-    enum { bypass = 1, rename, duplicate, resetKnobs, disconnectAll, remove, prevModel, nextModel, prevIr, nextIr, clearIrB,
+    enum { bypass = 1, rename, duplicate, resetKnobs, disconnectAll, remove, prevModel, nextModel, prevIr, nextIr, clearIrB, browseTone3000,
            midiLearnStomp, midiRemoveStomp, midiLearnButtonBase = 3000, midiRemoveButtonBase = 3500 };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (model->processor->getName().toUpperCase()));
@@ -779,6 +799,7 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
     if (layout.kind == NodeKind::neuralAmpPlaceholder || layout.kind == NodeKind::neuralPedal)
     {
         items.push_back (MenuItem::line());
+        items.push_back (MenuItem::item (browseTone3000, "Browse TONE3000 captures..."));
         items.push_back (MenuItem::item (prevModel, "Previous model in folder"));
         items.push_back (MenuItem::item (nextModel, "Next model in folder"));
     }
@@ -833,6 +854,7 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
             case remove:
                 if (engine.removeNode (id)) { selectedNode = 0; say ("Module removed"); }
                 break;
+            case browseTone3000: openToneBrowser (id); break;
             case prevModel: engine.sendNodeCommand (id, "prev-model"); break;
             case nextModel: engine.sendNodeCommand (id, "next-model"); break;
             case prevIr:    engine.sendNodeCommand (id, "prev-ir"); break;
@@ -2198,7 +2220,7 @@ void RackView::pollGamepad (double now)
     };
 
     // A menu, browser or prompt on top: the pad becomes a keyboard for it.
-    if (menu.isOpen() || browser.isOpen() || prompt.isOpen())
+    if (menu.isOpen() || browser.isOpen() || prompt.isOpen() || toneBrowser.isOpen())
     {
         if (prompt.isOpen())
         {
@@ -2227,7 +2249,7 @@ void RackView::pollGamepad (double now)
             key (GLFW_KEY_ENTER, true, 0);
         if (pressed (GLFW_GAMEPAD_BUTTON_B) && ! prompt.isOpen())
             key (GLFW_KEY_ESCAPE, true, 0);
-        if (pressed (GLFW_GAMEPAD_BUTTON_X) && browser.isOpen())
+        if (pressed (GLFW_GAMEPAD_BUTTON_X) && (browser.isOpen() || toneBrowser.isOpen()))
             key (GLFW_KEY_BACKSPACE, true, 0);
         rememberButtons();
         return;
@@ -3165,6 +3187,10 @@ void RackView::tick (double now)
         dirty = true;
     }
     pollGamepad (now);
+    if (toneBrowser.consumeDirty())
+        dirty = true;
+    if (toneBrowser.isOpen())
+        animating = true; // cursor blink and arriving results
     {
         // The foot controller shows the live slot and the rig name (engine diffs, so this is cheap).
         const auto rig = currentFile.existsAsFile() ? currentFile.getFileNameWithoutExtension() : juce::String ("SignalPatch");
@@ -3806,7 +3832,7 @@ void RackView::drawHud (int width, int height, double now)
     const auto hint = message.isNotEmpty() ? message
         : mode == Mode::board
             ? juce::String ("drag pedals to place them  |  Shift+click to select several, right-click to group them into one pedal  |  1-5 load a slot (knobs glide), Shift+1-5 store  |  Tab rack")
-            : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan, Shift+drag selects  |  wheel zooms  |  Del  Ctrl+A  Ctrl+Z  Ctrl+D  M mute  F fit  |  Ctrl +/- UI scale  |  Tab board");
+            : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan, Shift+drag selects  |  wheel zooms  |  Del  Ctrl+A  Ctrl+Z  Ctrl+D  Ctrl+T TONE3000  M mute  F fit  |  Ctrl +/- UI scale  |  Tab board");
     nvgText (vg, 16.0f, static_cast<float> (height) - 10.0f, hint.toRawUTF8(), nullptr);
 }
 
@@ -3865,6 +3891,7 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
         drawHud (width, height, now);
         menu.draw (width, height);
         browser.draw (width, height);
+        toneBrowser.draw (width, height, now);
         prompt.draw (width, height, now);
         nvgEndFrame (vg);
         lastFrameMs = juce::Time::getMillisecondCounterHiRes() - start;
@@ -3929,6 +3956,7 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
     drawHud (width, height, now);
     menu.draw (width, height);
     browser.draw (width, height);
+    toneBrowser.draw (width, height, now);
     prompt.draw (width, height, now);
     nvgEndFrame (vg);
 
@@ -3946,7 +3974,8 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
 
 void RackView::character (unsigned int codepoint)
 {
-    if (prompt.character (static_cast<juce::juce_wchar> (codepoint)) || browser.character (static_cast<juce::juce_wchar> (codepoint)))
+    if (prompt.character (static_cast<juce::juce_wchar> (codepoint)) || browser.character (static_cast<juce::juce_wchar> (codepoint))
+        || toneBrowser.character (static_cast<juce::juce_wchar> (codepoint)))
         dirty = true;
 }
 
@@ -3956,6 +3985,12 @@ void RackView::mouseMove (double x, double y)
     y /= uiScale;
     mouseX = x;
     mouseY = y;
+    if (toneBrowser.isOpen())
+    {
+        toneBrowser.mouseMove (static_cast<float> (x), static_cast<float> (y));
+        dirty = true;
+        return;
+    }
     if (browser.isOpen())
     {
         browser.mouseMove (static_cast<float> (x), static_cast<float> (y));
@@ -4078,6 +4113,12 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
     y /= uiScale;
     if (prompt.isOpen())
         return;
+    if (toneBrowser.isOpen())
+    {
+        toneBrowser.mouseButton (button, pressed, static_cast<float> (x), static_cast<float> (y), lastTick);
+        dirty = true;
+        return;
+    }
     if (browser.isOpen())
     {
         browser.mouseButton (button, pressed, static_cast<float> (x), static_cast<float> (y), lastTick);
@@ -4412,6 +4453,12 @@ void RackView::scroll (double dx, double dy, int mods, double x, double y)
 {
     x /= uiScale;
     y /= uiScale;
+    if (toneBrowser.isOpen())
+    {
+        toneBrowser.scroll (dy);
+        dirty = true;
+        return;
+    }
     if (browser.isOpen())
     {
         browser.scroll (dy);
@@ -4493,6 +4540,12 @@ void RackView::key (int keyCode, bool pressed, int mods)
         dirty = true;
         return;
     }
+    if (toneBrowser.isOpen())
+    {
+        toneBrowser.key (keyCode, mods);
+        dirty = true;
+        return;
+    }
     if (browser.isOpen())
     {
         browser.key (keyCode, mods);
@@ -4541,6 +4594,21 @@ void RackView::key (int keyCode, bool pressed, int mods)
         if (copy != 0)
             selectedNode = copy;
         say (copy != 0 ? "Duplicated" : "Select a module first");
+    }
+    else if (ctrl && keyCode == GLFW_KEY_T)
+    {
+        // TONE3000 for the selected neural module, else the first one in the patch.
+        NodeId target = 0;
+        auto isNeural = [] (const NodeModel& node) { return node.processor->getKind() == NodeKind::neuralAmpPlaceholder || node.processor->getKind() == NodeKind::neuralPedal; };
+        if (const auto* current = engine.getDocument().findNode (selectedNode); current != nullptr && isNeural (*current))
+            target = selectedNode;
+        else
+            for (const auto& node : engine.getDocument().getNodes())
+                if (isNeural (node)) { target = node.id; break; }
+        if (target != 0)
+            openToneBrowser (target);
+        else
+            say ("Add a Neural Amp or Neural Pedal first (Ctrl+T browses TONE3000 for it)");
     }
     else if (ctrl && keyCode == GLFW_KEY_A && mode == Mode::rack)
     {

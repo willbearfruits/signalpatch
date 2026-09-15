@@ -2,6 +2,7 @@
 
 #include "../audio/PatchEngine.h"
 #include "Menu.h"
+#include "ToneBrowser.h"
 
 #include <nanovg.h>
 
@@ -152,6 +153,8 @@ private:
     Menu menu;
     TextPrompt prompt;
     FileBrowser browser;
+    ToneBrowser toneBrowser;
+    void openToneBrowser (NodeId id);
     juce::File currentFile;
     int controllerSlotSent = -2;
     juce::String controllerRigSent;
