@@ -47,7 +47,7 @@ next swap; feedback-guard delay/reset semantics are pinned by tests.
 | Stress: rapid edits/recompiles | Partial — "recompile churn keeps rendering" test (25 add/connect/compile/remove rounds with parameter bursts); live UI-stall stress not automated |
 | Adversarial signals (NaN/Inf/full-scale/subnormal) | Partial — guard containment + all-kinds sweep tested; per-node NaN injection only for delay/guard |
 | Callback duration measurement | **Closed** — worst-case callback ratio latched in the callback, displayed as "DSP x% (pk y%)" with slow decay |
-| ASan/UBSan runs | **Closed** — full test suite passes under `-fsanitize=address,undefined -fno-sanitize-recover=all` (`build-asan/`) |
+| ASan/UBSan runs | **Closed** — full test suite passes under `-fsanitize=address,undefined -fno-sanitize-recover=all` (`build-asan/`; last run 2026-09-15 over 34 tests incl. looper, MIDI, controller feedback, compound undo) |
 | TSan run | **Open** — cross-thread engine paths not yet exercised under TSan |
 
 ## NAM status vs. NAM_ROADMAP.md

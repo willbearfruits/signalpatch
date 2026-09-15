@@ -113,7 +113,9 @@ demo.
 - **Ally X bring-up**: OS decision (Linux recommended: native Wayland, the
   PipeWire/JACK path we already qualify on; Windows kept building), USB
   interface latency qualification at 64/128, battery vs performance presets.
-- **Boot to Board**: `--board --kiosk --unmute`; the same UI at handheld
+- **Boot to Board**: `--board --kiosk --unmute` (flags done 2026-09-15:
+  fullscreen on the primary monitor without decorations, no auto-iconify,
+  fade in without a key press; `--help` lists them); the same UI at handheld
   scale, touch as a first-class pointer.
 - **7-inch preset**: a named scale/density profile for the Ally X screen
   (larger hit targets, fewer knobs per pedal by default, tighter Board

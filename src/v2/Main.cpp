@@ -60,7 +60,43 @@ int main (int argc, char** argv)
     glfwWindowHint (GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
     glfwWindowHint (GLFW_STENCIL_BITS, 8);
     glfwWindowHint (GLFW_SAMPLES, 0);
-    auto* window = glfwCreateWindow (1600, 1000, "SignalPatch", nullptr, nullptr);
+
+    // Flags that shape the window come first; the rest wait for the rack.
+    bool kiosk = false;
+    for (int index = 1; index < argc; ++index)
+    {
+        const juce::String argument (argv[index]);
+        if (argument == "--kiosk")
+            kiosk = true;
+        else if (argument == "--help" || argument == "-h")
+        {
+            std::printf ("SignalPatch [options] [patch.signalpatch | bundle.zip]\n"
+                         "  --board        start on the pedalboard view\n"
+                         "  --kiosk        fullscreen on the primary monitor, no decorations (handheld / stage)\n"
+                         "  --unmute       fade in right away instead of the safe muted start\n"
+                         "  --scale=1.25   UI scale (also SIGNALPATCH_SCALE, and Ctrl +/- in the app)\n");
+            glfwTerminate();
+            return 0;
+        }
+    }
+    GLFWmonitor* monitor = nullptr;
+    int windowW = 1600, windowH = 1000;
+    if (kiosk)
+    {
+        monitor = glfwGetPrimaryMonitor();
+        if (const auto* mode = monitor != nullptr ? glfwGetVideoMode (monitor) : nullptr)
+        {
+            windowW = mode->width;
+            windowH = mode->height;
+            glfwWindowHint (GLFW_RED_BITS, mode->redBits);
+            glfwWindowHint (GLFW_GREEN_BITS, mode->greenBits);
+            glfwWindowHint (GLFW_BLUE_BITS, mode->blueBits);
+            glfwWindowHint (GLFW_REFRESH_RATE, mode->refreshRate);
+        }
+        glfwWindowHint (GLFW_DECORATED, GLFW_FALSE);
+        glfwWindowHint (GLFW_AUTO_ICONIFY, GLFW_FALSE); // losing focus must not drop the rig off the screen
+    }
+    auto* window = glfwCreateWindow (windowW, windowH, "SignalPatch", monitor, nullptr);
     if (window == nullptr)
     {
         std::fprintf (stderr, "GLFW window creation failed\n");
@@ -92,15 +128,21 @@ int main (int argc, char** argv)
         if (const auto* env = std::getenv ("SIGNALPATCH_SCALE"))
             rack.setUiScale (static_cast<float> (std::atof (env)));
     }
+    bool unmute = false;
     for (int index = 1; index < argc; ++index)
     {
-        if (juce::String (argv[index]) == "--board")
+        const juce::String argument (argv[index]);
+        if (argument == "--board")
             startOnBoard = true;
-        else if (juce::String (argv[index]).startsWith ("--scale="))
-            rack.setUiScale (juce::String (argv[index]).fromFirstOccurrenceOf ("=", false, false).getFloatValue());
+        else if (argument == "--unmute")
+            unmute = true;
+        else if (argument.startsWith ("--scale="))
+            rack.setUiScale (argument.fromFirstOccurrenceOf ("=", false, false).getFloatValue());
         else if (argv[index][0] != '-')
             rack.loadPatchFromCommandLine (juce::File::getCurrentWorkingDirectory().getChildFile (argv[index]));
     }
+    if (unmute)
+        rack.unmuteAtStart(); // a stage boot: the rig should sound without a key press
     glfwSetWindowUserPointer (window, &rack);
     glfwSetCursorPosCallback (window, [] (GLFWwindow* w, double x, double y) { rackFor (w)->mouseMove (x, y); });
     glfwSetMouseButtonCallback (window, [] (GLFWwindow* w, int button, int action, int mods)

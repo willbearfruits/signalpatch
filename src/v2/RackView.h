@@ -42,6 +42,7 @@ public:
     void setUiScale (float scale);
     [[nodiscard]] float getUiScale() const noexcept { return uiScale; }
     void loadPatchFromCommandLine (const juce::File& file) { openPatchFile (file); }
+    void unmuteAtStart() { engine.setPanicMuted (false); dirty = true; }
     /** --board: open on the pedalboard instead of the rack. */
     void showBoard() { setMode (Mode::board); }
     /** Close request from the window or Ctrl+Q: asks about unsaved changes first. */
