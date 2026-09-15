@@ -1,5 +1,7 @@
 #include "ControllerFeedback.h"
 
+#include <initializer_list>
+
 namespace signalpatch::controller
 {
 namespace
