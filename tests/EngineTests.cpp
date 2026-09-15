@@ -751,7 +751,7 @@ void testAllNodeKindsRenderFiniteOutput()
         NodeKind::fourTrack, NodeKind::lfo, NodeKind::randomLfo, NodeKind::envelopeFollower,
         NodeKind::stepSequencer, NodeKind::macro, NodeKind::spectralFollower,
         NodeKind::script, NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal,
-        NodeKind::cabinet
+        NodeKind::cabinet, NodeKind::looper
     };
 
     for (const auto kind : kinds)
@@ -872,7 +872,7 @@ PatchDocument buildKitchenSinkDocument()
         NodeKind::bitcrusher, NodeKind::ringMod, NodeKind::vowelFilter,
         NodeKind::pitchShifter, NodeKind::pitchCorrector, NodeKind::granular,
         NodeKind::compressor, NodeKind::gate, NodeKind::limiter,
-        NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal, NodeKind::cabinet, NodeKind::script
+        NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal, NodeKind::cabinet, NodeKind::looper, NodeKind::script
     };
     NodeId previous = 0;
     for (const auto kind : chainKinds)
@@ -1511,6 +1511,56 @@ void testBoardPositionsAndGroupsRoundTrip()
     expect (reloaded.getGroups().empty(), "empty group survived");
 }
 
+void testLooperRecordsClosesOverdubsAndUndoes()
+{
+    auto node = createNodeProcessor (NodeKind::looper);
+    expect (node != nullptr, "looper not created");
+    const int block = 64;
+    node->prepare (48000.0, block);
+    node->getParameter (1).setValue (-60.0f); // dry down so the output is the loop alone
+    juce::AudioBuffer<float> inputs (node->getNumInputPorts(), block);
+    juce::AudioBuffer<float> outputs (node->getNumOutputPorts(), block);
+    auto render = [&] (float level)
+    {
+        inputs.clear();
+        for (int i = 0; i < block; ++i)
+            inputs.setSample (0, i, level);
+        node->render (inputs, outputs, block);
+        float peak = 0.0f;
+        for (int i = 0; i < block; ++i)
+            peak = juce::jmax (peak, std::abs (outputs.getSample (0, i)));
+        return peak;
+    };
+    for (int i = 0; i < 20; ++i) render (0.0f); // settle the dry smoother
+    expect (node->statusText().startsWith ("EMPTY"), "looper should start empty");
+
+    node->handleUiCommand ("rec");
+    for (int i = 0; i < 10; ++i) render (0.5f);          // record 10 blocks of 0.5
+    expect (node->uiToggleState ("rec"), "should be recording");
+    node->handleUiCommand ("rec");                        // close the loop
+    render (0.0f);
+    expect (node->statusText().startsWith ("PLAY"), "loop should play after closing: " + node->statusText().toStdString());
+    float playbackPeak = 0.0f;
+    for (int i = 0; i < 5; ++i) playbackPeak = juce::jmax (playbackPeak, render (0.0f));
+    expect (playbackPeak > 0.4f && playbackPeak < 0.6f, "playback level wrong: " + std::to_string (playbackPeak));
+
+    node->handleUiCommand ("rec");                        // overdub 0.25 on top for a full cycle
+    for (int i = 0; i < 12; ++i) render (0.25f);
+    node->handleUiCommand ("rec");                        // stop overdubbing
+    float overdubbed = 0.0f;
+    for (int i = 0; i < 12; ++i) overdubbed = juce::jmax (overdubbed, render (0.0f));
+    expect (overdubbed > 0.65f, "overdub not added: " + std::to_string (overdubbed));
+
+    node->handleUiCommand ("undo");
+    float undone = 0.0f;
+    for (int i = 0; i < 12; ++i) undone = juce::jmax (undone, render (0.0f));
+    expect (undone < 0.6f && undone > 0.4f, "undo did not restore the previous pass: " + std::to_string (undone));
+
+    node->handleUiCommand ("clear");
+    render (0.0f);
+    expect (node->statusText().startsWith ("EMPTY"), "clear should empty the loop");
+}
+
 int main()
 {
     // Flush every insertion so a crash on CI still shows which test was
@@ -1543,7 +1593,8 @@ int main()
         { "cabinet convolves an impulse", testCabinetConvolvesImpulse },
         { "merge patch adds nodes with fresh ids", testMergeJsonAddsNodesWithFreshIds },
         { "portable bundle round trip", testBundleRoundTripKeepsAssetsRelative },
-        { "board positions and groups round trip", testBoardPositionsAndGroupsRoundTrip }
+        { "board positions and groups round trip", testBoardPositionsAndGroupsRoundTrip },
+        { "looper records, closes, overdubs, undoes", testLooperRecordsClosesOverdubsAndUndoes }
     };
 
     int failures = 0;

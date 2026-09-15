@@ -45,6 +45,7 @@ juce::Colour kindAccent (NodeKind kind)
         case NodeKind::neuralAmpPlaceholder: return juce::Colour (0xffb0889a);
         case NodeKind::neuralPedal:          return juce::Colour (0xffe879b8);
         case NodeKind::cabinet:              return juce::Colour (0xffd9a066);
+        case NodeKind::looper:               return juce::Colour (0xffff8a80);
     }
 
     jassertfalse;
@@ -94,6 +95,7 @@ juce::String kindTag (NodeKind kind)
         case NodeKind::neuralAmpPlaceholder:
         case NodeKind::neuralPedal:          return "NAM";
         case NodeKind::cabinet:              return "CAB";
+        case NodeKind::looper:               return "LOOP";
     }
 
     jassertfalse;
@@ -450,6 +452,12 @@ void drawKindGlyph (juce::Graphics& graphics, NodeKind kind,
             graphics.fillEllipse (x + w * 0.5f - 1.5f, y + h * 0.18f - 1.5f, 3.0f, 3.0f);
             graphics.fillEllipse (x + w * 0.68f - 1.5f, y + h * 0.28f - 1.5f, 3.0f, 3.0f);
             return;
+        case NodeKind::looper:
+            graphics.drawEllipse (x + w * 0.15f, y + h * 0.15f, w * 0.7f, h * 0.7f, 1.6f);
+            path.startNewSubPath (x + w * 0.5f, y + h * 0.15f);
+            path.lineTo (x + w * 0.62f, y + h * 0.05f);
+            graphics.strokePath (path, stroke);
+            return;
         case NodeKind::cabinet:
             // Speaker box: enclosure, cone, dust cap.
             graphics.drawRoundedRectangle (x + w * 0.08f, y + h * 0.04f, w * 0.84f, h * 0.92f, 2.0f, 1.4f);
@@ -497,6 +505,7 @@ const std::vector<NodePaletteEntry>& nodePalette()
         { NodeKind::noiseSource,          "NOISE",          "INSTRUMENTS", "White, pink or brown noise source" },
         { NodeKind::drumMachine,          "DRUM MACHINE",   "INSTRUMENTS", "Kick/snare/hat step machine; click the grid" },
         { NodeKind::sampler,              "SAMPLER",        "INSTRUMENTS", "Records the input; retrigger, pitch and loop it" },
+        { NodeKind::looper,               "LOOPER",         "INSTRUMENTS", "Record, overdub, undo a pass, half speed, reverse; dry passes through" },
         { NodeKind::fourTrack,            "4-TRACK",        "INSTRUMENTS", "60 s tape loop with four armable tracks and varispeed" },
         { NodeKind::compressor,           "COMPRESSOR",     "DYNAMICS",    "Zero-lookahead dynamics" },
         { NodeKind::limiter,              "LIMITER",        "DYNAMICS",    "Zero-lookahead live safety limiter" },

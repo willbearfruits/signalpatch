@@ -59,7 +59,8 @@ enum class NodeKind
     script,
     neuralAmpPlaceholder,
     neuralPedal,
-    cabinet
+    cabinet,
+    looper
 };
 
 juce::String nodeKindName (NodeKind kind);

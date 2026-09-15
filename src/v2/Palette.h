@@ -102,6 +102,7 @@ inline NVGcolor accent (NodeKind kind) noexcept
         case NodeKind::neuralAmpPlaceholder: return rgb (0xffb0889a);
         case NodeKind::neuralPedal:          return rgb (0xffe879b8);
         case NodeKind::cabinet:              return rgb (0xffd9a066);
+        case NodeKind::looper:               return rgb (0xffff8a80);
     }
     return palette::selection;
 }
@@ -141,6 +142,7 @@ inline const std::vector<ModuleEntry>& moduleCatalogue()
         { NodeKind::noiseSource,          "NOISE",          "INSTRUMENTS" },
         { NodeKind::drumMachine,          "DRUM MACHINE",   "INSTRUMENTS" },
         { NodeKind::sampler,              "SAMPLER",        "INSTRUMENTS" },
+        { NodeKind::looper,               "LOOPER",         "INSTRUMENTS" },
         { NodeKind::fourTrack,            "4-TRACK",        "INSTRUMENTS" },
         { NodeKind::compressor,           "COMPRESSOR",     "DYNAMICS" },
         { NodeKind::limiter,              "LIMITER",        "DYNAMICS" },

@@ -165,6 +165,14 @@ void RackView::rebuildLayouts()
             case NodeKind::feedbackGuard:
                 button ("RESET LOOP", "reset-loop", palette::feedback);
                 break;
+            case NodeKind::looper:
+                button ("REC", "rec", palette::warning);
+                button ("PLAY", "play", palette::okay);
+                button ("UNDO", "undo", palette::mutedText);
+                button ("CLR", "clear", palette::mutedText);
+                button ("1/2", "half", palette::control, 1);
+                button ("REV", "reverse", palette::control, 1);
+                break;
             default: break;
         }
         const auto portRows = juce::jmax (layout.inputs, layout.outputs);
@@ -180,7 +188,7 @@ void RackView::rebuildLayouts()
         if (layout.kind == NodeKind::sampler || layout.kind == NodeKind::neuralAmpPlaceholder || layout.kind == NodeKind::neuralPedal
             || layout.kind == NodeKind::cabinet)
             height += 32.0f; // room for the button row under the knobs
-        if (layout.kind == NodeKind::fourTrack)
+        if (layout.kind == NodeKind::fourTrack || layout.kind == NodeKind::looper)
             height += 62.0f;
         layout.h = height;
         layouts.push_back (std::move (layout));
@@ -306,7 +314,7 @@ juce::Rectangle<float> RackView::buttonBounds (const Layout& layout, juce::Point
                 indexInRow = rowCount;
             ++rowCount;
         }
-    const auto rows = 1 + (layout.kind == NodeKind::fourTrack ? 1 : 0);
+    const auto rows = 1 + ((layout.kind == NodeKind::fourTrack || layout.kind == NodeKind::looper) ? 1 : 0);
     const auto bottom = origin.y + layout.h - railHeight - 6.0f - (layout.stomp ? stompZoneHeight : 0.0f);
     const auto y = bottom - 26.0f - static_cast<float> (rows - 1 - button.row) * 28.0f;
     const auto width = (layout.w - 24.0f - static_cast<float> (rowCount - 1) * 6.0f) / static_cast<float> (rowCount);
@@ -911,6 +919,30 @@ void RackView::drawPreviewContent (const Layout& layout, const NodeModel& model,
                     nvgStroke (vg);
                 }
             }
+        return;
+    }
+
+    if (kind == NodeKind::looper)
+    {
+        const auto progress = model.processor->currentStep(); // percent, -1 when empty
+        const auto bar = area.reduced (8.0f, 26.0f);
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, bar.getX(), bar.getY(), bar.getWidth(), bar.getHeight(), 3.0f);
+        nvgFillColor (vg, lighter (palette::nodeDark, 0.12f));
+        nvgFill (vg);
+        if (progress >= 0)
+        {
+            const bool rec = model.processor->uiToggleState ("rec");
+            nvgBeginPath (vg);
+            nvgRoundedRect (vg, bar.getX(), bar.getY(), bar.getWidth() * static_cast<float> (progress + 1) / 100.0f, bar.getHeight(), 3.0f);
+            nvgFillColor (vg, alpha (rec ? palette::warning : colour, 0.75f));
+            nvgFill (vg);
+        }
+        nvgFontFaceId (vg, font);
+        nvgFontSize (vg, 9.5f);
+        nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
+        nvgFillColor (vg, palette::text);
+        nvgText (vg, area.getCentreX(), area.getBottom() - 4.0f, model.processor->statusText().toRawUTF8(), nullptr);
         return;
     }
 

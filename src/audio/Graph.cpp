@@ -77,6 +77,7 @@ juce::String nodeKindName (NodeKind kind)
         case NodeKind::neuralAmpPlaceholder:return "Neural Amp";
         case NodeKind::neuralPedal:         return "Neural Pedal";
         case NodeKind::cabinet:             return "Cabinet";
+        case NodeKind::looper:              return "Looper";
     }
 
     return "Unknown";
@@ -125,6 +126,7 @@ juce::String nodeKindKey (NodeKind kind)
         case NodeKind::neuralAmpPlaceholder: return "neural-amp";
         case NodeKind::neuralPedal:          return "neural-pedal";
         case NodeKind::cabinet:              return "cabinet-ir";
+        case NodeKind::looper:               return "looper";
     }
 
     return "unknown";
@@ -145,7 +147,7 @@ std::optional<NodeKind> nodeKindFromKey (const juce::String& key)
                              NodeKind::randomLfo, NodeKind::envelopeFollower, NodeKind::stepSequencer,
                              NodeKind::macro, NodeKind::spectralFollower, NodeKind::script,
                              NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal,
-                             NodeKind::cabinet })
+                             NodeKind::cabinet, NodeKind::looper })
         if (key == nodeKindKey (kind))
             return kind;
 

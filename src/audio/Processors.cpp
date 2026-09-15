@@ -3800,6 +3800,290 @@ private:
     float lastLowCut = -1.0f, lastHighCut = -1.0f;
 };
 
+// Looper: record a loop, close it, overdub on top, undo the last pass, play
+// it back at half speed or in reverse. The dry signal always passes through.
+// Undo is real-time safe: the pre-overdub audio is saved one sample at a time
+// as the pass proceeds, never with a whole-buffer copy on the audio thread.
+class LooperNode final : public DspNode
+{
+public:
+    LooperNode() : DspNode (NodeKind::looper, nodeKindName (NodeKind::looper))
+    {
+        addInputPort ("In", SignalType::audio);
+        addOutputPort ("Out", SignalType::audio);
+        addParameter ("loop-level", "Loop", "dB", juce::NormalisableRange<float> (-60.0f, 6.0f, 0.1f), 0.0f, 0.25f);
+        addParameter ("dry-level", "Dry", "dB", juce::NormalisableRange<float> (-60.0f, 6.0f, 0.1f), 0.0f, 0.25f);
+        addParameter ("feedback", "Feedback", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 100.0f, 0.25f);
+        addParameter ("speed", "Speed", "%", juce::NormalisableRange<float> (25.0f, 200.0f, 0.1f), 100.0f, 0.35f);
+        addParameter ("bpm", "Tempo", "bpm", juce::NormalisableRange<float> (40.0f, 240.0f, 0.1f), 120.0f, 0.25f, false);
+        addParameter ("bars", "Bars", "", juce::NormalisableRange<float> (0.0f, 8.0f, 1.0f), 0.0f, 0.0f, false);
+    }
+
+    bool handleUiCommand (const juce::String& command) override
+    {
+        if (command == "rec")      { pendingCommand.store (commandRecord, std::memory_order_release); return true; }
+        if (command == "play")     { pendingCommand.store (commandPlay, std::memory_order_release); return true; }
+        if (command == "undo")     { pendingCommand.store (commandUndo, std::memory_order_release); return true; }
+        if (command == "clear")    { pendingCommand.store (commandClear, std::memory_order_release); return true; }
+        if (command == "half")     { halfSpeed.store (! halfSpeed.load (std::memory_order_relaxed), std::memory_order_relaxed); return true; }
+        if (command == "reverse")  { reversed.store (! reversed.load (std::memory_order_relaxed), std::memory_order_relaxed); return true; }
+        return false;
+    }
+
+    bool uiToggleState (const juce::String& command) const override
+    {
+        if (command == "rec")     return state.load (std::memory_order_relaxed) == recording || state.load (std::memory_order_relaxed) == overdubbing;
+        if (command == "play")    return state.load (std::memory_order_relaxed) == playing || state.load (std::memory_order_relaxed) == overdubbing;
+        if (command == "half")    return halfSpeed.load (std::memory_order_relaxed);
+        if (command == "reverse") return reversed.load (std::memory_order_relaxed);
+        return false;
+    }
+
+    /** Playhead position in percent (0-99) for the UI's loop bar. */
+    int currentStep() const noexcept override
+    {
+        const auto len = lengthSamples.load (std::memory_order_relaxed);
+        if (len <= 0)
+            return -1;
+        return juce::jlimit (0, 99, static_cast<int> (100.0 * playheadForUi.load (std::memory_order_relaxed) / len));
+    }
+
+    juce::String statusText() const override
+    {
+        const auto len = lengthSamples.load (std::memory_order_relaxed);
+        const auto seconds = juce::String (len / juce::jmax (1.0, sampleRate), 1) + "s";
+        switch (state.load (std::memory_order_relaxed))
+        {
+            case empty:      return "EMPTY - REC to start a loop";
+            case recording:  return "REC " + juce::String (recordedSamples.load (std::memory_order_relaxed) / juce::jmax (1.0, sampleRate), 1) + "s";
+            case playing:    return "PLAY " + seconds + "  " + juce::String (layers.load (std::memory_order_relaxed)) + (layers.load (std::memory_order_relaxed) == 1 ? " layer" : " layers");
+            case overdubbing:return "OVERDUB " + seconds + "  " + juce::String (layers.load (std::memory_order_relaxed)) + " layers";
+            case stopped:    return "STOP " + seconds + "  " + juce::String (layers.load (std::memory_order_relaxed)) + (layers.load (std::memory_order_relaxed) == 1 ? " layer" : " layers");
+        }
+        return {};
+    }
+
+    // Recording persistence hooks (message thread; the callback is stopped by the caller? No: we copy through a snapshot).
+    /** Loop audio as a fresh buffer plus its length; empty when there is no loop. */
+    juce::AudioBuffer<float> copyLoopForSaving() const
+    {
+        const auto len = lengthSamples.load (std::memory_order_acquire);
+        juce::AudioBuffer<float> out (1, juce::jmax (0, len));
+        for (int i = 0; i < len; ++i)
+            out.setSample (0, i, loop[static_cast<std::size_t> (i)]);
+        return out;
+    }
+
+    /** Installs loop audio (message thread, called while the device is stopped or right after prepare). */
+    void installLoop (const juce::AudioBuffer<float>& audio)
+    {
+        const auto len = juce::jmin (audio.getNumSamples(), static_cast<int> (loop.size()));
+        for (int i = 0; i < len; ++i)
+            loop[static_cast<std::size_t> (i)] = audio.getSample (0, i);
+        lengthSamples.store (len, std::memory_order_release);
+        layers.store (len > 0 ? 1 : 0, std::memory_order_relaxed);
+        state.store (len > 0 ? stopped : empty, std::memory_order_release);
+    }
+
+private:
+    enum State { empty = 0, recording, playing, overdubbing, stopped };
+    enum Command { commandNone = 0, commandRecord, commandPlay, commandUndo, commandClear };
+    static constexpr int maximumSeconds = 60;
+
+    void prepareDsp (double newSampleRate, int) override
+    {
+        sampleRate = newSampleRate;
+        const auto capacity = static_cast<std::size_t> (std::ceil (newSampleRate * maximumSeconds)) + 4u;
+        if (loop.size() != capacity)
+        {
+            loop.assign (capacity, 0.0f);
+            previous.assign (capacity, 0.0f);
+            lengthSamples.store (0, std::memory_order_relaxed);
+            state.store (empty, std::memory_order_relaxed);
+        }
+    }
+
+    void resetDsp() noexcept override
+    {
+        playhead = 0.0;
+        playheadForUi.store (0.0, std::memory_order_relaxed);
+    }
+
+    void applyCommand (Command command, float bpm, int bars) noexcept
+    {
+        const auto current = state.load (std::memory_order_relaxed);
+        const auto capacity = static_cast<int> (loop.size()) - 4;
+        switch (command)
+        {
+            case commandRecord:
+                if (current == empty || current == stopped)
+                {
+                    if (current == empty)
+                    {
+                        // Fresh loop; a bar count fixes the length up front.
+                        targetLength = bars > 0 ? juce::jmin (capacity, static_cast<int> (std::round (bars * 4.0 * 60.0 / juce::jmax (40.0f, bpm) * sampleRate))) : 0;
+                        recorded = 0;
+                        playhead = 0.0;
+                        state.store (recording, std::memory_order_release);
+                    }
+                    else
+                        beginOverdub();
+                }
+                else if (current == recording)
+                    closeLoop();
+                else if (current == playing)
+                    beginOverdub();
+                else if (current == overdubbing)
+                    state.store (playing, std::memory_order_release);
+                break;
+            case commandPlay:
+                if (current == playing || current == overdubbing)
+                    state.store (stopped, std::memory_order_release);
+                else if (current == stopped)
+                {
+                    playhead = 0.0;
+                    state.store (playing, std::memory_order_release);
+                }
+                else if (current == recording)
+                    closeLoop();
+                break;
+            case commandUndo:
+                if (undoAvailable && (current == playing || current == overdubbing || current == stopped))
+                {
+                    const auto len = lengthSamples.load (std::memory_order_relaxed);
+                    const auto restore = juce::jmin (len, savedInSession);
+                    // Restore the samples the last pass touched; the pass wrote
+                    // at most one full cycle before "previous" stopped updating.
+                    for (int i = 0; i < restore; ++i)
+                    {
+                        const auto index = static_cast<std::size_t> ((sessionStart + i) % juce::jmax (1, len));
+                        loop[index] = previous[index];
+                    }
+                    undoAvailable = false;
+                    layers.store (juce::jmax (1, layers.load (std::memory_order_relaxed) - 1), std::memory_order_relaxed);
+                    if (current == overdubbing)
+                        state.store (playing, std::memory_order_release);
+                }
+                break;
+            case commandClear:
+                lengthSamples.store (0, std::memory_order_release);
+                layers.store (0, std::memory_order_relaxed);
+                recorded = 0;
+                playhead = 0.0;
+                undoAvailable = false;
+                state.store (empty, std::memory_order_release);
+                break;
+            case commandNone: break;
+        }
+    }
+
+    void closeLoop() noexcept
+    {
+        const auto len = juce::jmax (0, juce::jmin (recorded, static_cast<int> (loop.size()) - 4));
+        lengthSamples.store (len, std::memory_order_release);
+        layers.store (len > 0 ? 1 : 0, std::memory_order_relaxed);
+        playhead = 0.0;
+        undoAvailable = false;
+        state.store (len > 0 ? playing : empty, std::memory_order_release);
+    }
+
+    void beginOverdub() noexcept
+    {
+        const auto len = lengthSamples.load (std::memory_order_relaxed);
+        if (len <= 0)
+            return;
+        sessionStart = juce::jlimit (0, len - 1, static_cast<int> (playhead));
+        savedInSession = 0;
+        undoAvailable = true;
+        layers.store (layers.load (std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        state.store (overdubbing, std::memory_order_release);
+    }
+
+    void processDsp (const juce::AudioBuffer<float>& inputs, juce::AudioBuffer<float>& outputs, int numSamples) noexcept override
+    {
+        const auto* input = inputs.getReadPointer (0);
+        auto* output = outputs.getWritePointer (0);
+        const auto capacity = static_cast<int> (loop.size()) - 4;
+        if (capacity < 64)
+        {
+            juce::FloatVectorOperations::copy (output, input, numSamples);
+            return;
+        }
+        const auto bpm = parameterValue (4, inputs, 0);
+        const auto bars = static_cast<int> (std::round (parameterValue (5, inputs, 0)));
+        if (const auto command = static_cast<Command> (pendingCommand.exchange (commandNone, std::memory_order_acq_rel)); command != commandNone)
+            applyCommand (command, bpm, bars);
+
+        const bool half = halfSpeed.load (std::memory_order_relaxed);
+        const bool backwards = reversed.load (std::memory_order_relaxed);
+
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const auto dryGain = juce::Decibels::decibelsToGain (parameterValue (1, inputs, sample));
+            const auto loopGain = juce::Decibels::decibelsToGain (parameterValue (0, inputs, sample));
+            const auto feedback = juce::jlimit (0.0f, 1.0f, parameterValue (2, inputs, sample) * 0.01f);
+            const auto speed = juce::jlimit (0.25f, 4.0f, parameterValue (3, inputs, sample) * 0.01f) * (half ? 0.5f : 1.0f);
+            const auto dry = std::isfinite (input[sample]) ? input[sample] : 0.0f;
+            float loopOut = 0.0f;
+            const auto current = state.load (std::memory_order_relaxed);
+
+            if (current == recording)
+            {
+                if (recorded < capacity)
+                    loop[static_cast<std::size_t> (recorded++)] = dry;
+                if (targetLength > 0 && recorded >= targetLength)
+                {
+                    recorded = targetLength;
+                    closeLoop();
+                }
+                else if (recorded >= capacity)
+                    closeLoop();
+                recordedSamples.store (recorded, std::memory_order_relaxed);
+            }
+            else if (current == playing || current == overdubbing)
+            {
+                const auto len = lengthSamples.load (std::memory_order_relaxed);
+                if (len > 0)
+                {
+                    const auto indexA = juce::jlimit (0, len - 1, static_cast<int> (playhead));
+                    const auto indexB = (indexA + 1) % len;
+                    const auto fraction = static_cast<float> (playhead - std::floor (playhead));
+                    loopOut = loop[static_cast<std::size_t> (indexA)] + fraction * (loop[static_cast<std::size_t> (indexB)] - loop[static_cast<std::size_t> (indexA)]);
+                    if (current == overdubbing)
+                    {
+                        auto& slot = loop[static_cast<std::size_t> (indexA)];
+                        if (savedInSession < len)
+                        {
+                            previous[static_cast<std::size_t> (indexA)] = slot;
+                            ++savedInSession;
+                        }
+                        slot = slot * feedback + dry;
+                    }
+                    playhead += backwards ? -speed : speed;
+                    if (playhead >= len) playhead -= len;
+                    if (playhead < 0.0) playhead += len;
+                }
+            }
+            output[sample] = dry * dryGain + loopOut * loopGain;
+        }
+        playheadForUi.store (playhead, std::memory_order_relaxed);
+    }
+
+    double sampleRate = 48000.0;
+    std::vector<float> loop, previous;
+    double playhead = 0.0;
+    int recorded = 0, targetLength = 0, sessionStart = 0, savedInSession = 0;
+    bool undoAvailable = false;
+    std::atomic<int> state { empty };
+    std::atomic<int> pendingCommand { commandNone };
+    std::atomic<int> lengthSamples { 0 };
+    std::atomic<int> recordedSamples { 0 };
+    std::atomic<int> layers { 0 };
+    std::atomic<double> playheadForUi { 0.0 };
+    std::atomic<bool> halfSpeed { false };
+    std::atomic<bool> reversed { false };
+};
+
 std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
 {
     switch (kind)
@@ -3841,6 +4125,7 @@ std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
         case NodeKind::neuralAmpPlaceholder: return std::make_shared<NeuralAmpNode> (NodeKind::neuralAmpPlaceholder);
         case NodeKind::neuralPedal:          return std::make_shared<NeuralAmpNode> (NodeKind::neuralPedal);
         case NodeKind::cabinet:              return std::make_shared<CabinetNode>();
+        case NodeKind::looper:               return std::make_shared<LooperNode>();
         case NodeKind::hardwareInput:
         case NodeKind::hardwareOutput:       break;
     }
