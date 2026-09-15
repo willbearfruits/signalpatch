@@ -93,7 +93,12 @@ demo.
   PipeWire/JACK path we already qualify on; Windows kept building), USB
   interface latency qualification at 64/128, battery vs performance presets.
 - **Boot to Board**: `--board --kiosk --unmute`; the same UI at handheld
-  scale (no separate layout), touch as a first-class pointer.
+  scale, touch as a first-class pointer.
+- **7-inch preset**: a named scale/density profile for the Ally X screen
+  (larger hit targets, fewer knobs per pedal by default, tighter Board
+  spacing) built on the global scale factor, selectable from the AUDIO/
+  settings menu and by `--profile handheld`. Deliberately later than the
+  scale factor itself.
 - **Gamepad-only recovery** from every state (menus, browser, prompts).
 - Packaging (AppImage/Flatpak, Windows zip), CI for the app on Linux and
   Windows.
