@@ -2312,7 +2312,12 @@ public:
         addParameter ("attack", "Attack", "ms", skewedRange (0.5f, 500.0f, 20.0f), 4.0f, 0.25f);
         addParameter ("decay", "Decay", "ms", skewedRange (5.0f, 2000.0f, 200.0f), 250.0f, 0.25f);
         addParameter ("hold", "Hold", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 100.0f, 0.5f);
+        // Exact pitch from outside (MIDI Note, a sequencer): 0..1 = four octaves, 48 st per unit,
+        // added to the Pitch knob. Added last so older cables keep their port indices.
+        addInputPort ("Pitch", SignalType::control);
+        pitchPort = getNumInputPorts() - 1;
     }
+    int pitchPort = -1;
 
 private:
     void prepareDsp (double newSampleRate, int) override
@@ -2342,7 +2347,13 @@ private:
         for (int sample = 0; sample < numSamples; ++sample)
         {
             const auto wave = juce::roundToInt (parameterValue (0, inputs, sample));
-            const auto pitch = parameterValue (1, inputs, sample);
+            auto pitch = parameterValue (1, inputs, sample);
+            if (pitchPort >= 0 && inputs.getNumChannels() > pitchPort)
+            {
+                const auto external = inputs.getSample (pitchPort, sample);
+                if (std::isfinite (external))
+                    pitch += external * 48.0f;
+            }
             const auto glideMs = parameterValue (2, inputs, sample);
             const auto cutoff = parameterValue (3, inputs, sample);
             const auto resonance = juce::jlimit (0.0f, 1.0f, parameterValue (4, inputs, sample) * 0.01f);
@@ -2491,7 +2502,10 @@ public:
         addParameter ("damp", "Damp", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 30.0f, 0.35f);
         addParameter ("bright", "Bright", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 70.0f, 0.35f);
         addParameter ("level", "Level", "dB", juce::NormalisableRange<float> (-24.0f, 6.0f, 0.1f), -3.0f, 0.25f);
+        addInputPort ("Pitch", SignalType::control); // 0..1 = four octaves, 48 st per unit, on top of the Pitch knob
+        pitchPort = getNumInputPorts() - 1;
     }
+    int pitchPort = -1;
 
 private:
     static constexpr int maximumDelay = 4096;
@@ -2520,7 +2534,13 @@ private:
                                   ? inputs.getReadPointer (triggerPort) : nullptr;
         for (int sample = 0; sample < numSamples; ++sample)
         {
-            const auto pitch = parameterValue (0, inputs, sample);
+            auto pitch = parameterValue (0, inputs, sample);
+            if (pitchPort >= 0 && inputs.getNumChannels() > pitchPort)
+            {
+                const auto external = inputs.getSample (pitchPort, sample);
+                if (std::isfinite (external))
+                    pitch += external * 48.0f;
+            }
             const auto damp = juce::jlimit (0.0f, 1.0f, parameterValue (1, inputs, sample) * 0.01f);
             const auto bright = juce::jlimit (0.0f, 1.0f, parameterValue (2, inputs, sample) * 0.01f);
             const auto level = juce::Decibels::decibelsToGain (parameterValue (3, inputs, sample));

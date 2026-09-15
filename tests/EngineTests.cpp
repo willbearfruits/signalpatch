@@ -928,7 +928,7 @@ PatchDocument buildKitchenSinkDocument()
     auto* pluckNode = document.findNode (pluck);
     expect (pluckNode != nullptr, "pluck disappeared");
     expectOk (document.addConnection ({ keys, 0, pluck, 0 }), "midi note gate -> pluck trigger");
-    expectOk (document.addConnection ({ keys, 1, pluck, pluckNode->processor->getParameter (0).inputPortIndex }), "midi note pitch -> pluck pitch mod");
+    expectOk (document.addConnection ({ keys, 1, pluck, pluckNode->processor->getNumInputPorts() - 1 }), "midi note pitch -> pluck Pitch input");
     expectOk (document.addConnection ({ randomLfo, 0, pluck, pluckNode->processor->getParameter (pluckNode->processor->getNumParameters() - 1).inputPortIndex }),
               "random -> pluck last knob mod");
     // One clock steps the drums (eighths), the sequencer (beats) and gates the looper's transport (bars).
@@ -2054,6 +2054,42 @@ void testNeuralAmpToneStackShapesTheSpectrum()
     expect (pedal->getParameter (0).name == "Drive" && pedal->getParameter (3).name == "Tone", "pedal knobs: Drive, Level, Mix, Tone");
 }
 
+void testSynthPitchInputIsExactOctaves()
+{
+    auto synth = createNodeProcessor (NodeKind::monoSynth);
+    const int block = 256;
+    synth->prepare (48000.0, block);
+    const auto pitchPort = synth->getNumInputPorts() - 1;
+    expect (synth->getInputPort (pitchPort).name == "Pitch", "the synth's last input should be the exact Pitch");
+    juce::AudioBuffer<float> inputs (synth->getNumInputPorts(), block), outputs (1, block);
+    auto zeroCrossingsPerSecond = [&] (float pitchControl)
+    {
+        synth->reset();
+        inputs.clear();
+        for (int i = 0; i < block; ++i)
+        {
+            inputs.setSample (0, i, 1.0f);             // gate open
+            inputs.setSample (pitchPort, i, pitchControl);
+        }
+        int crossings = 0; float last = 0.0f;
+        for (int b = 0; b < 200; ++b)                  // ~1 s
+        {
+            synth->render (inputs, outputs, block);
+            if (b < 20) continue;                       // let the glide settle
+            for (int i = 0; i < block; ++i)
+            {
+                const auto v = outputs.getSample (0, i);
+                if (last <= 0.0f && v > 0.0f) ++crossings;
+                last = v;
+            }
+        }
+        return static_cast<double> (crossings) / (180.0 * block / 48000.0);
+    };
+    const auto base = zeroCrossingsPerSecond (0.0f);
+    const auto octave = zeroCrossingsPerSecond (0.25f); // 12 semitones
+    expect (base > 50.0 && std::abs (octave / base - 2.0) < 0.06, "0.25 on the Pitch input should be exactly one octave up: " + std::to_string (octave / base));
+}
+
 void testTone3000PiecesAreRight()
 {
     // RFC 7636 appendix B vector.
@@ -2160,6 +2196,7 @@ int main()
         { "clock pulses; drums and looper follow it", testClockPulsesAndFollowers },
         { "4-track monitors, syncs and varispeeds per track", testFourTrackMonitorsSyncsAndVarispeedsPerTrack },
         { "neural amp tone stack shapes the spectrum", testNeuralAmpToneStackShapesTheSpectrum },
+        { "synth Pitch input is exact octaves", testSynthPitchInputIsExactOctaves },
         { "TONE3000 pieces: PKCE, URLs, callback, JSON", testTone3000PiecesAreRight },
         { "MIDI Note node drives gate and pitch", testMidiNoteNodeDrivesGateAndPitch }
     };
