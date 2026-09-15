@@ -67,7 +67,10 @@ GLFW window (native Wayland when available) + OpenGL 3.3 + NanoVG; JUCE headless
 - Recorded audio: `hasAudioContent / exportAudioContent / importAudioContent / audioContentVersion` on `DspNode` (looper, 4-track, sampler); `bundle::toJsonWithAudio` writes `assets/audio/<patch>-<id>.wav` next to the patch, only when the version moved; autosave carries audio too.
 - Board state in the document: `NodeModel::boardPosition` (bx/by), `PedalGroup`s (`"groups"`).
 - Stereo is L/R port pairs (Pan, Stereo Merge/Delay/Chorus/Reverb, cabinet `R (IR B)`); buffers stay mono. The rack cables the R pair in the same drag when an "... L" output meets an "... L" input.
-- Looper (undo kept RT-safe by saving pre-overdub samples during the pass), Tuner (YIN on the message thread over a ring-buffer snapshot).
+- Looper (undo kept RT-safe by saving pre-overdub samples during the pass), Tuner (YIN on the message thread over a ring-buffer snapshot), drum machine `tap` command.
+- `MidiMapping` extras: `relative` (CC 64±n nudges), `low`/`high` (expression span, `normalised()`); `ControllerFeedback.*` builds the SysEx state (LEDs/labels/slot/rig) for the foot controller, `PatchEngine` opens a same-named output after a controller hello and diffs on its timer (`docs/CONTROLLER.md`).
+- `PatchHistory::beginCompoundGesture` groups several edits (multi-module drag/delete) into one undo step; `closeGesture` ends it.
+- The callback thread's scheduler is sampled once (`EngineStatus::realtimeThread`); the HUD warns when it is not SCHED_FIFO/RR (needs rtkit or realtime-privileges on Linux).
 
 ## Real-time safety is a release gate
 
@@ -77,9 +80,8 @@ GLFW window (native Wayland when available) + OpenGL 3.3 + NanoVG; JUCE headless
 
 - Effect nodes are mono; MIDI/OSC mapping and plug-in hosting are roadmap items, not omissions.
 - Undo/redo lives in `src/audio/PatchHistory.{h,cpp}` (headless, tested): entries are recorded *after* the document changed, deleted nodes keep their processor alive so undo restores the same object, knob/node drags coalesce until `closeGesture()`. Every `PatchEngine` mutation records; `loadPatch`/`newPatch`/device relayout clear the stack.
-- Portable projects live in `src/audio/PatchBundle.{h,cpp}` (headless, tested): asset paths (`extra.model`, `extra.ir`, `extra.irB`) are saved relative to the patch folder when inside it, else absolute; export = `<name>/<name>.signalpatch + assets/` zipped; Open/Import accept `.zip`. Sampler/4-track audio still is not persisted (roadmap 0.3).
+- Portable projects live in `src/audio/PatchBundle.{h,cpp}` (headless, tested): asset paths (`extra.model`, `extra.ir`, `extra.irB`) are saved relative to the patch folder when inside it, else absolute; export = `<name>/<name>.signalpatch + assets/` zipped; Open/Import accept `.zip`. Recorded audio (looper, 4-track, sampler) rides along as `assets/audio/*.wav` (see below).
 - `PatchEngine::connect` rolls the cable back out of the document when the compile rejects it (unguarded cycle) — otherwise every later edit failed to compile too.
-- Sampler/4-track audio content is not saved with patches (roadmap 0.3).
 - First-launch device preference: `PatchEngine::applyPreferredCaptureDevice` picks a Zoom F4 / H-series interface when no saved `audio-device.xml` exists; saved state always wins afterwards. Delete `~/.config/SignalPatch/audio-device.xml` to re-trigger.
 - Autosave restores on startup, muted — that's the spec'd safety behaviour, not a bug.
 
