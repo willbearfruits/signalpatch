@@ -3,7 +3,13 @@
 Newest first. Versions are git tags; "Unreleased" is what `main` carries
 beyond the last tag.
 
-## Unreleased (since v0.2.1, 2026-09-15)
+## v0.3.0 — 2026-09-15
+
+The revert point before the neural-module dials and the 4-track overhaul.
+Everything below landed between v0.2.1 and this tag, plus: TONE3000
+inside the app (log in once, search, download into a Neural module —
+Ctrl+T), a Clock node, node colours by family, `run-from-build.sh` for a
+desktop entry, and libcurl for https on Linux.
 
 **The app is the GLFW/OpenGL/NanoVG one now.** `signalpatch` builds the
 executable `SignalPatch`; the JUCE rack is kept behind

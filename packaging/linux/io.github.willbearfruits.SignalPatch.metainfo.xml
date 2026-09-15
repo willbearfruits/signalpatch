@@ -39,6 +39,11 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.0" date="2026-09-15">
+      <description>
+        <p>The GLFW/OpenGL app: rack and pedalboard, pedal groups, five rig slots with knob glides, looper, recordings saved with the patch, MIDI learn and foot-controller feedback, stereo modules, tuner, Clock, TONE3000 browsing, gamepad control, family-coloured modules.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-09-14">
       <description>
         <p>Undo/redo, Cabinet impulse-response node, File menu with recent files and portable project bundles (patch + models + IRs as a zip), context menus on modules, knobs, ports, cables and the canvas, and a much lighter rack UI.</p>
