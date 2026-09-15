@@ -18,7 +18,7 @@ juce::String PatchHistory::nodeLabel (NodeId id) const
 
 bool PatchHistory::isContinuous (Kind kind) noexcept
 {
-    return kind == Kind::parameter || kind == Kind::modulationDepth || kind == Kind::move;
+    return kind == Kind::parameter || kind == Kind::modulationDepth || kind == Kind::move || kind == Kind::boardMove;
 }
 
 void PatchHistory::recordNodeAdded (NodeId id)
@@ -163,6 +163,31 @@ void PatchHistory::recordRename (NodeId id, const juce::String& before, const ju
     push (std::move (entry));
 }
 
+void PatchHistory::recordBoardMove (NodeId id, std::optional<juce::Point<float>> before, std::optional<juce::Point<float>> after)
+{
+    if (before == after)
+        return;
+    Entry entry;
+    entry.kind = Kind::boardMove;
+    entry.node = id;
+    entry.description = "move " + nodeLabel (id) + " on the board";
+    entry.hadPointBefore = before.has_value();
+    entry.hasPointAfter = after.has_value();
+    entry.pointBefore = before.value_or (juce::Point<float>());
+    entry.pointAfter = after.value_or (juce::Point<float>());
+    push (std::move (entry));
+}
+
+void PatchHistory::recordGroups (juce::var before, juce::var after)
+{
+    Entry entry;
+    entry.kind = Kind::groups;
+    entry.description = "change pedal groups";
+    entry.varBefore = std::move (before);
+    entry.varAfter = std::move (after);
+    push (std::move (entry));
+}
+
 bool PatchHistory::tryCoalesce (const Entry& entry)
 {
     if (! gestureOpen || undoStack.empty() || ! isContinuous (entry.kind))
@@ -176,6 +201,7 @@ bool PatchHistory::tryCoalesce (const Entry& entry)
 
     top.floatAfter = entry.floatAfter;
     top.pointAfter = entry.pointAfter;
+    top.hasPointAfter = entry.hasPointAfter;
     top.lastEditMs = entry.lastEditMs;
     return true;
 }
@@ -305,6 +331,21 @@ PatchHistory::Applied PatchHistory::apply (Entry& entry, bool forward)
             node->processor->setName ((forward ? entry.varAfter : entry.varBefore).toString());
             return Applied::values;
         }
+        case Kind::boardMove:
+        {
+            auto* node = document.findNode (entry.node);
+            if (node == nullptr)
+                return Applied::none;
+            const bool has = forward ? entry.hasPointAfter : entry.hadPointBefore;
+            if (has)
+                node->boardPosition = forward ? entry.pointAfter : entry.pointBefore;
+            else
+                node->boardPosition.reset();
+            return Applied::values;
+        }
+        case Kind::groups:
+            document.groupsFromJson (forward ? entry.varAfter : entry.varBefore);
+            return Applied::values;
     }
     return Applied::none;
 }

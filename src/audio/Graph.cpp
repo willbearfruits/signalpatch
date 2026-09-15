@@ -613,7 +613,92 @@ bool PatchDocument::removeNode (NodeId id)
     {
         return connection.sourceNode == id || connection.destinationNode == id;
     }), connections.end());
+    for (auto& group : groups)
+    {
+        group.members.erase (std::remove (group.members.begin(), group.members.end(), id), group.members.end());
+        group.knobs.erase (std::remove_if (group.knobs.begin(), group.knobs.end(),
+                                           [id] (const auto& knob) { return knob.first == id; }), group.knobs.end());
+    }
+    groups.erase (std::remove_if (groups.begin(), groups.end(), [] (const PedalGroup& group) { return group.members.empty(); }), groups.end());
     return true;
+}
+
+void PatchDocument::setGroups (std::vector<PedalGroup> newGroups)
+{
+    for (auto& group : newGroups)
+    {
+        if (group.id <= 0)
+            group.id = nextGroupId++;
+        nextGroupId = juce::jmax (nextGroupId, group.id + 1);
+        group.members.erase (std::remove_if (group.members.begin(), group.members.end(),
+                                             [this] (NodeId id) { return findNode (id) == nullptr; }), group.members.end());
+        group.knobs.erase (std::remove_if (group.knobs.begin(), group.knobs.end(), [this] (const auto& knob)
+        {
+            const auto* node = findNode (knob.first);
+            return node == nullptr || ! juce::isPositiveAndBelow (knob.second, node->processor->getNumParameters());
+        }), group.knobs.end());
+    }
+    newGroups.erase (std::remove_if (newGroups.begin(), newGroups.end(), [] (const PedalGroup& group) { return group.members.empty(); }), newGroups.end());
+    groups = std::move (newGroups);
+}
+
+juce::var PatchDocument::groupsToJson() const
+{
+    juce::Array<juce::var> values;
+    for (const auto& group : groups)
+    {
+        auto object = std::make_unique<juce::DynamicObject>();
+        object->setProperty ("id", group.id);
+        object->setProperty ("name", group.name);
+        juce::Array<juce::var> members;
+        for (const auto member : group.members)
+            members.add (static_cast<juce::int64> (member));
+        object->setProperty ("members", members);
+        juce::Array<juce::var> knobs;
+        for (const auto& knob : group.knobs)
+        {
+            auto knobObject = std::make_unique<juce::DynamicObject>();
+            knobObject->setProperty ("node", static_cast<juce::int64> (knob.first));
+            knobObject->setProperty ("parameter", knob.second);
+            knobs.add (juce::var (knobObject.release()));
+        }
+        object->setProperty ("knobs", knobs);
+        if (group.boardPosition.has_value())
+        {
+            object->setProperty ("bx", group.boardPosition->x);
+            object->setProperty ("by", group.boardPosition->y);
+        }
+        values.add (juce::var (object.release()));
+    }
+    return values;
+}
+
+void PatchDocument::groupsFromJson (const juce::var& value)
+{
+    std::vector<PedalGroup> loaded;
+    if (const auto* array = value.getArray())
+        for (const auto& entry : *array)
+        {
+            const auto* object = entry.getDynamicObject();
+            if (object == nullptr)
+                continue;
+            PedalGroup group;
+            group.id = static_cast<int> (object->getProperty ("id"));
+            group.name = object->getProperty ("name").toString();
+            if (const auto* members = object->getProperty ("members").getArray())
+                for (const auto& member : *members)
+                    group.members.push_back (static_cast<NodeId> (static_cast<juce::int64> (member)));
+            if (const auto* knobs = object->getProperty ("knobs").getArray())
+                for (const auto& knob : *knobs)
+                    if (const auto* knobObject = knob.getDynamicObject())
+                        group.knobs.emplace_back (static_cast<NodeId> (static_cast<juce::int64> (knobObject->getProperty ("node"))),
+                                                  static_cast<int> (knobObject->getProperty ("parameter")));
+            if (object->hasProperty ("bx"))
+                group.boardPosition = juce::Point<float> (static_cast<float> (object->getProperty ("bx")),
+                                                          static_cast<float> (object->getProperty ("by")));
+            loaded.push_back (std::move (group));
+        }
+    setGroups (std::move (loaded));
 }
 
 bool PatchDocument::insertNode (NodeModel model, double preparedSampleRate, int preparedMaximumBlockSize)
@@ -657,6 +742,7 @@ bool PatchDocument::removeConnection (const Connection& connection)
 
 void PatchDocument::clearUserPatch()
 {
+    groups.clear();
     nodes.erase (std::remove_if (nodes.begin(), nodes.end(), [] (const NodeModel& node) { return ! node.hardware; }),
                  nodes.end());
     connections.clear();
@@ -689,6 +775,11 @@ juce::var PatchDocument::toJson() const
         nodeObject->setProperty ("name", node.processor->getName());
         nodeObject->setProperty ("x", node.position.x);
         nodeObject->setProperty ("y", node.position.y);
+        if (node.boardPosition.has_value())
+        {
+            nodeObject->setProperty ("bx", node.boardPosition->x);
+            nodeObject->setProperty ("by", node.boardPosition->y);
+        }
 
         if (node.hardware)
         {
@@ -740,6 +831,8 @@ juce::var PatchDocument::toJson() const
         connectionValues.add (juce::var (connectionObject.release()));
     }
     root->setProperty ("connections", connectionValues);
+    if (! groups.empty())
+        root->setProperty ("groups", groupsToJson());
     return juce::var (root.release());
 }
 
@@ -924,6 +1017,9 @@ juce::Result PatchDocument::loadJson (const juce::var& value)
                 continue;
             model->position = { static_cast<float> (object->getProperty ("x")),
                                 static_cast<float> (object->getProperty ("y")) };
+            if (object->hasProperty ("bx"))
+                model->boardPosition = juce::Point<float> (static_cast<float> (object->getProperty ("bx")),
+                                                           static_cast<float> (object->getProperty ("by")));
             const auto savedName = object->getProperty ("name").toString();
             if (savedName.isNotEmpty())
                 model->processor->setName (savedName);
@@ -970,6 +1066,7 @@ juce::Result PatchDocument::loadJson (const juce::var& value)
             addConnection (connection);
         }
     }
+    groupsFromJson (root->getProperty ("groups"));
 
     return juce::Result::ok();
 }

@@ -90,6 +90,14 @@ public:
     [[nodiscard]] bool hasUnsavedChanges() const noexcept { return modifiedSinceSave; }
 
     juce::Result renameNode (NodeId id, const juce::String& newName);
+    /** Pedalboard placement; nullopt returns the module to the auto layout. */
+    void setBoardPosition (NodeId id, std::optional<juce::Point<float>> position);
+    /** Replaces the pedal groups (undoable, broadcasts). */
+    void setGroups (std::vector<PedalGroup> groups);
+    void applyGroupsJson (const juce::var& groups);
+    /** Parameter change that leaves no undo entry: for glides and automation. */
+    void setParameterNoHistory (NodeId id, int parameterIndex, float value);
+    void setModulationDepthNoHistory (NodeId id, int parameterIndex, float depth);
     /** Copies a node (parameters, mod depths, bypass, extra state) next to the
         original. Returns the new id, or 0. */
     NodeId duplicateNode (NodeId id);

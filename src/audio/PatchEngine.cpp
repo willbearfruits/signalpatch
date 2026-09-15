@@ -582,6 +582,54 @@ juce::Result PatchEngine::renameNode (NodeId id, const juce::String& newName)
     return juce::Result::ok();
 }
 
+void PatchEngine::setBoardPosition (NodeId id, std::optional<juce::Point<float>> position)
+{
+    if (auto* node = document.findNode (id))
+    {
+        history.recordBoardMove (id, node->boardPosition, position);
+        node->boardPosition = position;
+        markDocumentEdited();
+    }
+}
+
+void PatchEngine::setGroups (std::vector<PedalGroup> groups)
+{
+    const auto before = document.groupsToJson();
+    document.setGroups (std::move (groups));
+    history.recordGroups (before, document.groupsToJson());
+    markDocumentEdited();
+    sendChangeMessage();
+}
+
+void PatchEngine::applyGroupsJson (const juce::var& groups)
+{
+    const auto before = document.groupsToJson();
+    document.groupsFromJson (groups);
+    history.recordGroups (before, document.groupsToJson());
+    markDocumentEdited();
+    sendChangeMessage();
+}
+
+void PatchEngine::setParameterNoHistory (NodeId id, int parameterIndex, float value)
+{
+    if (auto* node = document.findNode (id))
+        if (juce::isPositiveAndBelow (parameterIndex, node->processor->getNumParameters()))
+        {
+            node->processor->getParameter (parameterIndex).setValue (value);
+            markDocumentEdited();
+        }
+}
+
+void PatchEngine::setModulationDepthNoHistory (NodeId id, int parameterIndex, float depth)
+{
+    if (auto* node = document.findNode (id))
+        if (juce::isPositiveAndBelow (parameterIndex, node->processor->getNumParameters()))
+        {
+            node->processor->getParameter (parameterIndex).setModulationDepth (depth);
+            markDocumentEdited();
+        }
+}
+
 NodeId PatchEngine::duplicateNode (NodeId id)
 {
     const auto* source = document.findNode (id);

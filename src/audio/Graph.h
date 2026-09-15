@@ -255,8 +255,21 @@ struct NodeModel
 {
     NodeId id = 0;
     std::shared_ptr<DspNode> processor;
-    juce::Point<float> position;
+    juce::Point<float> position; // rack
     bool hardware = false;
+    std::optional<juce::Point<float>> boardPosition; // pedalboard; unset = auto-arranged
+};
+
+// A board-only pedal made of several modules: one footswitch bypasses all
+// members, and up to a few of their knobs are exposed on its face. The rack
+// is untouched; this is presentation and control, not a sub-graph.
+struct PedalGroup
+{
+    int id = 0;
+    juce::String name;
+    std::vector<NodeId> members;
+    std::vector<std::pair<NodeId, int>> knobs; // (node, parameter index)
+    std::optional<juce::Point<float>> boardPosition;
 };
 
 struct Connection
@@ -311,12 +324,20 @@ public:
     juce::Result mergeJson (const juce::var& value, juce::Point<float> offset,
                             std::vector<NodeId>& addedNodes, std::vector<Connection>& addedCables);
 
+    [[nodiscard]] const std::vector<PedalGroup>& getGroups() const noexcept { return groups; }
+    /** Replaces the group list (ids assigned to groups that have none). */
+    void setGroups (std::vector<PedalGroup> newGroups);
+    [[nodiscard]] juce::var groupsToJson() const;
+    void groupsFromJson (const juce::var& value);
+
     [[nodiscard]] double getSampleRate() const noexcept { return currentSampleRate; }
     [[nodiscard]] int getMaximumBlockSize() const noexcept { return currentMaximumBlockSize; }
 
 private:
     std::vector<NodeModel> nodes;
     std::vector<Connection> connections;
+    std::vector<PedalGroup> groups;
+    int nextGroupId = 1;
     NodeId nextNodeId = 100;
     double currentSampleRate = 48000.0;
     int currentMaximumBlockSize = 128;

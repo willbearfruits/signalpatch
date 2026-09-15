@@ -178,13 +178,45 @@ private:
     enum class Mode { rack, board };
     struct Pedal
     {
-        NodeId id = 0;
+        NodeId id = 0;        // module id, or 0 for a group pedal
+        int groupId = -1;     // >= 0 for a group pedal
         NodeKind kind = NodeKind::gain;
         float x = 0.0f, y = 0.0f, w = 150.0f, h = 210.0f;
         int column = 0;
-        std::vector<int> knobs; // up to four parameter indices
+        std::vector<std::pair<NodeId, int>> knobs; // (module, parameter), up to four
+        std::vector<NodeId> members;               // group pedals
         bool hardware = false, stomp = false, tray = false;
     };
+    struct BoardDrag
+    {
+        NodeId node = 0;
+        int groupId = -1;
+        juce::Point<float> offset;
+        bool moved = false;
+    };
+    // Slot change with the same modules and cables: knob values glide.
+    struct GlideItem
+    {
+        NodeId node = 0;
+        int parameter = -1;
+        float fromValue = 0.0f, toValue = 0.0f, fromDepth = 0.0f, toDepth = 0.0f;
+    };
+    struct Glide
+    {
+        double start = 0.0, duration = 0.3;
+        std::vector<GlideItem> items;
+    };
+    std::optional<BoardDrag> boardDrag;
+    std::optional<Glide> glide;
+    std::vector<NodeId> boardSelection; // multi-select for grouping
+    int selectedGroup = -1;
+    [[nodiscard]] bool isBoardSelected (NodeId id) const noexcept;
+    void showBoardPedalMenu (const Pedal& pedal, double x, double y);
+    void showGroupMenu (const Pedal& pedal, double x, double y);
+    void groupSelection();
+    void toggleGroupBypass (const Pedal& pedal);
+    bool tryGlideToPatch (const juce::var& target);
+    void finishGlide();
     Mode mode = Mode::rack;
     std::vector<Pedal> pedals;
     float boardScale = 1.0f;

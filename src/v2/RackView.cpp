@@ -8,6 +8,7 @@
 #include <nanovg_gl_utils.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace signalpatch::v2
@@ -1151,6 +1152,7 @@ void RackView::setMode (Mode newMode)
     draggingNode.reset();
     knobDrag.reset();
     cableDrag.reset();
+    boardDrag.reset();
     panning = false;
     if (mode == Mode::board)
     {
@@ -1258,7 +1260,7 @@ void RackView::rebuildBoard()
             {
                 if (pedal.kind == NodeKind::stepSequencer && index >= 2) continue;
                 if (pedal.kind == NodeKind::drumMachine && index >= 5) continue;
-                pedal.knobs.push_back (index);
+                pedal.knobs.emplace_back (node->id, index);
             }
             const auto knobRows = (static_cast<int> (pedal.knobs.size()) + 1) / 2;
             pedal.h = node->hardware ? 150.0f : 96.0f + static_cast<float> (juce::jmax (1, knobRows)) * 72.0f + (wide ? 18.0f : 0.0f);
@@ -1269,6 +1271,51 @@ void RackView::rebuildBoard()
             pedals.push_back (std::move (pedal));
         }
         x += columnWidth + gapX;
+    }
+    // Modules the user placed by hand keep their spot.
+    for (auto& pedal : pedals)
+        if (const auto* node = document.findNode (pedal.id); node != nullptr && node->boardPosition.has_value())
+        {
+            pedal.x = node->boardPosition->x;
+            pedal.y = node->boardPosition->y;
+        }
+    // Groups: members leave the board, one pedal takes their place.
+    for (const auto& group : document.getGroups())
+    {
+        Pedal pedal;
+        pedal.groupId = group.id;
+        pedal.members = group.members;
+        pedal.knobs = group.knobs;
+        if (pedal.knobs.size() > 4)
+            pedal.knobs.resize (4);
+        pedal.stomp = true;
+        if (const auto* first = document.findNode (group.members.empty() ? 0 : group.members.front()))
+            pedal.kind = first->processor->getKind();
+        float minX = 1.0e9f, minY = 1.0e9f;
+        for (const auto& member : pedals)
+            if (std::find (group.members.begin(), group.members.end(), member.id) != group.members.end())
+            {
+                minX = juce::jmin (minX, member.x);
+                minY = juce::jmin (minY, member.y);
+            }
+        pedals.erase (std::remove_if (pedals.begin(), pedals.end(), [&group] (const Pedal& candidate)
+        {
+            return candidate.groupId < 0 && std::find (group.members.begin(), group.members.end(), candidate.id) != group.members.end();
+        }), pedals.end());
+        pedal.w = pedal.knobs.size() > 1 ? 176.0f : 140.0f;
+        const auto knobRows = (static_cast<int> (pedal.knobs.size()) + 1) / 2;
+        pedal.h = 96.0f + static_cast<float> (juce::jmax (1, knobRows)) * 72.0f;
+        if (group.boardPosition.has_value())
+        {
+            pedal.x = group.boardPosition->x;
+            pedal.y = group.boardPosition->y;
+        }
+        else
+        {
+            pedal.x = minX < 1.0e8f ? minX : 0.0f;
+            pedal.y = minY < 1.0e8f ? minY : 0.0f;
+        }
+        pedals.push_back (std::move (pedal));
     }
     // Tray: everything that never touches audio, in one row below the board.
     float trayX = 0.0f, boardBottom = 0.0f;
@@ -1394,14 +1441,29 @@ void RackView::drawBoard (int width, int height, double now)
 
     for (const auto& pedal : pedals)
     {
-        const auto* model = document.findNode (pedal.id);
-        if (model == nullptr)
+        const bool isGroup = pedal.groupId >= 0;
+        const auto* model = isGroup ? nullptr : document.findNode (pedal.id);
+        if (! isGroup && model == nullptr)
+            continue;
+        const PedalGroup* group = nullptr;
+        if (isGroup)
+            for (const auto& candidate : document.getGroups())
+                if (candidate.id == pedal.groupId)
+                    group = &candidate;
+        if (isGroup && group == nullptr)
             continue;
         const auto colour = accent (pedal.kind);
-        const bool bypassed = model->processor->isBypassed();
-        const bool selected = selectedNode == pedal.id;
+        bool anyEnabled = false;
+        if (isGroup)
+        {
+            for (const auto member : pedal.members)
+                if (const auto* node = document.findNode (member); node != nullptr && ! node->processor->isBypassed())
+                    anyEnabled = true;
+        }
+        const bool bypassed = isGroup ? ! anyEnabled : model->processor->isBypassed();
+        const bool selected = isGroup ? selectedGroup == pedal.groupId : (selectedNode == pedal.id || isBoardSelected (pedal.id));
 
-        if (pedal.tray)
+        if (pedal.tray && model != nullptr)
         {
             nvgBeginPath (vg);
             nvgRoundedRect (vg, pedal.x, pedal.y, pedal.w, pedal.h, 6.0f);
@@ -1438,7 +1500,8 @@ void RackView::drawBoard (int width, int height, double now)
         nvgTextLetterSpacing (vg, 0.8f);
         nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
         nvgFillColor (vg, alpha (palette::text, bypassed ? 0.55f : 1.0f));
-        const auto title = pedal.hardware ? juce::String (pedal.kind == NodeKind::hardwareInput ? "IN" : "OUT")
+        const auto title = isGroup ? group->name.toUpperCase()
+                         : pedal.hardware ? juce::String (pedal.kind == NodeKind::hardwareInput ? "IN" : "OUT")
                                           : model->processor->getName().toUpperCase();
         nvgText (vg, pedal.x + pedal.w * 0.5f, pedal.y + 22.0f, title.toRawUTF8(), nullptr);
         nvgTextLetterSpacing (vg, 0.0f);
@@ -1470,11 +1533,24 @@ void RackView::drawBoard (int width, int height, double now)
         {
             for (std::size_t knob = 0; knob < pedal.knobs.size(); ++knob)
             {
-                const auto& parameter = model->processor->getParameter (pedal.knobs[knob]);
-                drawKnob (pedalKnobCentre (pedal, static_cast<int> (knob)), 19.0f, parameter.getNormalisedValue(), colour,
-                          parameter.name.toUpperCase(), formatValue (parameter));
+                const auto* owner = document.findNode (pedal.knobs[knob].first);
+                if (owner == nullptr || ! juce::isPositiveAndBelow (pedal.knobs[knob].second, owner->processor->getNumParameters()))
+                    continue;
+                const auto& parameter = owner->processor->getParameter (pedal.knobs[knob].second);
+                const auto label = isGroup && pedal.members.size() > 1
+                    ? owner->processor->getName().toUpperCase().substring (0, 6) + " " + parameter.name.toUpperCase()
+                    : parameter.name.toUpperCase();
+                drawKnob (pedalKnobCentre (pedal, static_cast<int> (knob)), 19.0f, parameter.getNormalisedValue(),
+                          isGroup ? accent (owner->processor->getKind()) : colour, label, formatValue (parameter));
             }
-            const auto status = model->processor->statusText();
+            if (isGroup)
+            {
+                nvgFontSize (vg, 8.5f);
+                nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                nvgFillColor (vg, alpha (palette::mutedText, 0.9f));
+                nvgText (vg, pedal.x + pedal.w * 0.5f, pedal.y + 40.0f, (juce::String (pedal.members.size()) + " modules").toRawUTF8(), nullptr);
+            }
+            const auto status = isGroup ? juce::String() : model->processor->statusText();
             if (status.isNotEmpty() && (pedal.kind == NodeKind::neuralAmpPlaceholder || pedal.kind == NodeKind::neuralPedal || pedal.kind == NodeKind::cabinet))
             {
                 nvgFontSize (vg, 8.5f);
@@ -1560,6 +1636,21 @@ void RackView::loadSlot (int slot)
         say ("Slot " + juce::String (slot + 1) + " is empty - Shift+click (or Shift+" + juce::String (slot + 1) + ") stores the current rig there");
         return;
     }
+    auto parsed = juce::JSON::parse (file);
+    if (parsed.isVoid())
+    {
+        say ("Slot " + juce::String (slot + 1) + " is not a valid patch");
+        return;
+    }
+    bundle::rebaseAssetPaths (parsed, file.getParentDirectory(), false);
+    if (tryGlideToPatch (parsed))
+    {
+        activeSlot = slot;
+        boardDirty = true;
+        say ("Slot " + juce::String (slot + 1) + ": gliding to " + file.getFileNameWithoutExtension());
+        dirty = true;
+        return;
+    }
     const auto result = engine.loadPatch (file);
     if (result.failed())
     {
@@ -1570,10 +1661,11 @@ void RackView::loadSlot (int slot)
     activeSlot = slot;
     selectedNode = 0;
     selectedCable.reset();
+    boardSelection.clear();
     structureDirty = true;
     boardDirty = true;
     engine.setPanicMuted (false); // a rig change on stage fades straight in
-    say ("Slot " + juce::String (slot + 1) + ": " + file.getFileNameWithoutExtension());
+    say ("Slot " + juce::String (slot + 1) + ": " + file.getFileNameWithoutExtension() + " (different modules - loaded)");
     if (mode == Mode::board)
     {
         rebuildBoard();
@@ -1595,6 +1687,327 @@ void RackView::storeSlot (int slot)
         say (result.getErrorMessage());
 }
 
+bool RackView::isBoardSelected (NodeId id) const noexcept
+{
+    return std::find (boardSelection.begin(), boardSelection.end(), id) != boardSelection.end();
+}
+
+void RackView::toggleGroupBypass (const Pedal& pedal)
+{
+    bool anyEnabled = false;
+    for (const auto member : pedal.members)
+        if (const auto* node = engine.getDocument().findNode (member); node != nullptr && ! node->processor->isBypassed())
+            anyEnabled = true;
+    for (const auto member : pedal.members)
+        engine.setNodeBypassed (member, anyEnabled);
+    dirty = true;
+}
+
+void RackView::groupSelection()
+{
+    if (boardSelection.size() < 2)
+    {
+        say ("Shift+click two or more pedals first");
+        return;
+    }
+    const auto members = boardSelection;
+    prompt.open ("Name the new pedal", "MY PEDAL", [this, members] (const juce::String& name)
+    {
+        auto groups = engine.getDocument().getGroups();
+        PedalGroup group;
+        group.name = name.trim().isEmpty() ? juce::String ("PEDAL") : name.trim();
+        group.members = members;
+        for (const auto member : members)
+            if (const auto* node = engine.getDocument().findNode (member))
+                for (int index = 0; index < node->processor->getNumParameters() && group.knobs.size() < 4; ++index)
+                {
+                    const auto kind = node->processor->getKind();
+                    if ((kind == NodeKind::stepSequencer && index >= 2) || (kind == NodeKind::drumMachine && index >= 5))
+                        continue;
+                    group.knobs.emplace_back (member, index);
+                    break; // one knob per member to start with; pick more from the pedal's menu
+                }
+        for (const auto& pedal : pedals)
+            if (std::find (members.begin(), members.end(), pedal.id) != members.end())
+            {
+                group.boardPosition = juce::Point<float> (pedal.x, pedal.y);
+                break;
+            }
+        groups.push_back (std::move (group));
+        engine.setGroups (std::move (groups));
+        boardSelection.clear();
+        selectedNode = 0;
+        say ("Grouped " + juce::String (members.size()) + " modules into one pedal - right-click it to pick its knobs");
+    });
+}
+
+void RackView::showBoardPedalMenu (const Pedal& pedal, double x, double y)
+{
+    const auto* model = engine.getDocument().findNode (pedal.id);
+    if (model == nullptr)
+        return;
+    enum { bypass = 1, groupSelected, autoPlace, openInRack, rename, remove };
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::sectionHeader (model->processor->getName().toUpperCase()));
+    if (boardSelection.size() >= 2)
+        items.push_back (MenuItem::item (groupSelected, "Group the " + juce::String (boardSelection.size()) + " selected pedals into one..."));
+    if (pedal.stomp)
+        items.push_back (MenuItem::item (bypass, model->processor->isBypassed() ? "Enable (unbypass)" : "Bypass", "stomp"));
+    items.push_back (MenuItem::item (openInRack, "Open in the rack", "dbl-click"));
+    items.push_back (MenuItem::item (autoPlace, "Return to auto layout", {}, model->boardPosition.has_value()));
+    if (! pedal.hardware)
+    {
+        items.push_back (MenuItem::item (rename, "Rename..."));
+        items.push_back (MenuItem::line());
+        items.push_back (MenuItem::item (remove, "Delete module", "Del"));
+    }
+    const auto id = pedal.id;
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, id] (int picked)
+    {
+        const auto* current = engine.getDocument().findNode (id);
+        if (current == nullptr)
+            return;
+        switch (picked)
+        {
+            case bypass: engine.setNodeBypassed (id, ! current->processor->isBypassed()); break;
+            case groupSelected: groupSelection(); break;
+            case autoPlace: engine.setBoardPosition (id, std::nullopt); boardDirty = true; break;
+            case openInRack:
+                setMode (Mode::rack);
+                if (const auto* layout = layoutFor (id))
+                {
+                    const auto origin = nodePosition (id);
+                    targetZoom = zoom = 1.0;
+                    panX = (windowW + (paletteVisible ? paletteWidth : 0.0f)) * 0.5 - (origin.x + layout->w * 0.5f);
+                    panY = windowH * 0.5 - (origin.y + layout->h * 0.5f);
+                    selectedNode = id;
+                }
+                break;
+            case rename:
+                prompt.open ("Rename module", current->processor->getName(), [this, id] (const juce::String& name)
+                {
+                    const auto result = engine.renameNode (id, name);
+                    say (result.wasOk() ? "Renamed" : result.getErrorMessage());
+                });
+                break;
+            case remove:
+                if (engine.removeNode (id)) { selectedNode = 0; say ("Module removed"); }
+                break;
+            default: break;
+        }
+        dirty = true;
+    });
+    dirty = true;
+}
+
+void RackView::showGroupMenu (const Pedal& pedal, double x, double y)
+{
+    const PedalGroup* group = nullptr;
+    for (const auto& candidate : engine.getDocument().getGroups())
+        if (candidate.id == pedal.groupId)
+            group = &candidate;
+    if (group == nullptr)
+        return;
+    enum { bypass = 1, rename, ungroup, autoPlace };
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::sectionHeader (group->name.toUpperCase() + "  (" + juce::String (group->members.size()) + " modules)"));
+    items.push_back (MenuItem::item (bypass, "Toggle all members", "stomp"));
+    // Knob picker: every member parameter, ticked when exposed (max four).
+    std::vector<MenuItem> knobItems;
+    int knobId = 2000;
+    for (const auto member : group->members)
+    {
+        const auto* node = engine.getDocument().findNode (member);
+        if (node == nullptr)
+            continue;
+        knobItems.push_back (MenuItem::sectionHeader (node->processor->getName().toUpperCase()));
+        for (int index = 0; index < node->processor->getNumParameters(); ++index)
+        {
+            const auto kind = node->processor->getKind();
+            if ((kind == NodeKind::stepSequencer && index >= 2) || (kind == NodeKind::drumMachine && index >= 5))
+                continue;
+            const bool exposed = std::find (group->knobs.begin(), group->knobs.end(), std::make_pair (member, index)) != group->knobs.end();
+            knobItems.push_back (MenuItem::item (knobId, (exposed ? juce::String (juce::CharPointer_UTF8 ("\xe2\x97\x8f  ")) : juce::String ("    ")) + node->processor->getParameter (index).name,
+                                                 exposed ? "shown" : juce::String(), exposed || group->knobs.size() < 4));
+            ++knobId;
+        }
+    }
+    items.push_back (MenuItem::sub ("Knobs on this pedal", std::move (knobItems)));
+    items.push_back (MenuItem::item (rename, "Rename..."));
+    items.push_back (MenuItem::item (autoPlace, "Return to auto layout", {}, group->boardPosition.has_value()));
+    items.push_back (MenuItem::line());
+    items.push_back (MenuItem::item (ungroup, "Ungroup (back to separate pedals)"));
+    const auto groupId = pedal.groupId;
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, groupId] (int picked)
+    {
+        auto groups = engine.getDocument().getGroups();
+        auto found = std::find_if (groups.begin(), groups.end(), [groupId] (const PedalGroup& g) { return g.id == groupId; });
+        if (found == groups.end())
+            return;
+        if (picked == bypass)
+        {
+            for (const auto& candidate : pedals)
+                if (candidate.groupId == groupId)
+                    toggleGroupBypass (candidate);
+            return;
+        }
+        if (picked == rename)
+        {
+            prompt.open ("Rename pedal", found->name, [this, groupId] (const juce::String& name)
+            {
+                auto edited = engine.getDocument().getGroups();
+                for (auto& g : edited)
+                    if (g.id == groupId && name.trim().isNotEmpty())
+                        g.name = name.trim();
+                engine.setGroups (std::move (edited));
+            });
+            return;
+        }
+        if (picked == ungroup)
+        {
+            groups.erase (found);
+            selectedGroup = -1;
+            engine.setGroups (std::move (groups));
+            say ("Ungrouped");
+            return;
+        }
+        if (picked == autoPlace)
+        {
+            found->boardPosition.reset();
+            engine.setGroups (std::move (groups));
+            return;
+        }
+        if (picked >= 2000)
+        {
+            // Walk the same order the picker used to find which knob was chosen.
+            int knobId = 2000;
+            for (const auto member : found->members)
+            {
+                const auto* node = engine.getDocument().findNode (member);
+                if (node == nullptr)
+                    continue;
+                for (int index = 0; index < node->processor->getNumParameters(); ++index)
+                {
+                    const auto kind = node->processor->getKind();
+                    if ((kind == NodeKind::stepSequencer && index >= 2) || (kind == NodeKind::drumMachine && index >= 5))
+                        continue;
+                    if (knobId == picked)
+                    {
+                        const auto knob = std::make_pair (member, index);
+                        const auto existing = std::find (found->knobs.begin(), found->knobs.end(), knob);
+                        if (existing != found->knobs.end())
+                            found->knobs.erase (existing);
+                        else if (found->knobs.size() < 4)
+                            found->knobs.push_back (knob);
+                        engine.setGroups (std::move (groups));
+                        return;
+                    }
+                    ++knobId;
+                }
+            }
+        }
+    });
+    dirty = true;
+}
+
+bool RackView::tryGlideToPatch (const juce::var& target)
+{
+    // Same modules (ids and kinds) and same cables: glide knobs instead of
+    // rebuilding the graph, so a slot change never interrupts the sound.
+    const auto* root = target.getDynamicObject();
+    if (root == nullptr)
+        return false;
+    const auto& document = engine.getDocument();
+    const auto* nodeArray = root->getProperty ("nodes").getArray();
+    const auto* connectionArray = root->getProperty ("connections").getArray();
+    if (nodeArray == nullptr)
+        return false;
+    std::vector<std::pair<NodeId, juce::String>> targetNodes, currentNodes;
+    for (const auto& value : *nodeArray)
+        if (const auto* object = value.getDynamicObject())
+            targetNodes.emplace_back (static_cast<NodeId> (static_cast<juce::int64> (object->getProperty ("id"))), object->getProperty ("kind").toString());
+    for (const auto& node : document.getNodes())
+        currentNodes.emplace_back (node.id, nodeKindKey (node.processor->getKind()));
+    std::sort (targetNodes.begin(), targetNodes.end());
+    std::sort (currentNodes.begin(), currentNodes.end());
+    if (targetNodes != currentNodes)
+        return false;
+    std::vector<std::array<juce::int64, 4>> targetCables, currentCables;
+    if (connectionArray != nullptr)
+        for (const auto& value : *connectionArray)
+            if (const auto* object = value.getDynamicObject())
+                targetCables.push_back ({ static_cast<juce::int64> (object->getProperty ("sourceNode")), static_cast<juce::int64> (static_cast<int> (object->getProperty ("sourcePort"))),
+                                          static_cast<juce::int64> (object->getProperty ("destinationNode")), static_cast<juce::int64> (static_cast<int> (object->getProperty ("destinationPort"))) });
+    for (const auto& cable : document.getConnections())
+        currentCables.push_back ({ static_cast<juce::int64> (cable.sourceNode), cable.sourcePort, static_cast<juce::int64> (cable.destinationNode), cable.destinationPort });
+    std::sort (targetCables.begin(), targetCables.end());
+    std::sort (currentCables.begin(), currentCables.end());
+    if (targetCables != currentCables)
+        return false;
+
+    Glide plan;
+    plan.start = lastTick;
+    for (const auto& value : *nodeArray)
+    {
+        const auto* object = value.getDynamicObject();
+        if (object == nullptr)
+            continue;
+        const auto id = static_cast<NodeId> (static_cast<juce::int64> (object->getProperty ("id")));
+        const auto* node = document.findNode (id);
+        if (node == nullptr)
+            continue;
+        // Switches and models jump; only continuous values glide.
+        engine.setNodeBypassed (id, static_cast<bool> (object->getProperty ("bypassed")));
+        if (object->hasProperty ("extra"))
+        {
+            auto extra = object->getProperty ("extra");
+            if (juce::JSON::toString (extra) != juce::JSON::toString (node->processor->getExtraState()))
+                engine.applyNodeExtraState (id, extra);
+        }
+        if (object->hasProperty ("bx"))
+            engine.setBoardPosition (id, juce::Point<float> (static_cast<float> (object->getProperty ("bx")), static_cast<float> (object->getProperty ("by"))));
+        if (const auto* parameters = object->getProperty ("parameters").getArray())
+            for (const auto& parameterValue : *parameters)
+                if (const auto* parameterObject = parameterValue.getDynamicObject())
+                {
+                    const auto parameterId = parameterObject->getProperty ("id").toString();
+                    for (int index = 0; index < node->processor->getNumParameters(); ++index)
+                    {
+                        const auto& parameter = node->processor->getParameter (index);
+                        if (parameter.id != parameterId)
+                            continue;
+                        GlideItem item;
+                        item.node = id;
+                        item.parameter = index;
+                        item.fromValue = parameter.getValue();
+                        item.toValue = static_cast<float> (parameterObject->getProperty ("value"));
+                        item.fromDepth = parameter.getModulationDepth();
+                        item.toDepth = static_cast<float> (parameterObject->getProperty ("depth"));
+                        if (item.fromValue != item.toValue || item.fromDepth != item.toDepth)
+                            plan.items.push_back (item);
+                    }
+                }
+    }
+    if (root->hasProperty ("groups") || ! document.getGroups().empty())
+        engine.applyGroupsJson (root->getProperty ("groups"));
+    glide = std::move (plan);
+    return true;
+}
+
+void RackView::finishGlide()
+{
+    if (! glide.has_value())
+        return;
+    for (const auto& item : glide->items)
+    {
+        engine.setParameterNoHistory (item.node, item.parameter, item.toValue);
+        engine.setModulationDepthNoHistory (item.node, item.parameter, item.toDepth);
+    }
+    for (const auto& item : glide->items)
+        invalidatePlate (item.node);
+    glide.reset();
+}
+
 bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, double y)
 {
     const bool shift = (mods & GLFW_MOD_SHIFT) != 0;
@@ -1614,6 +2027,22 @@ bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, d
     {
         if (knobDrag.has_value())
             engine.closeEditGesture();
+        if (boardDrag.has_value())
+        {
+            if (boardDrag->groupId >= 0 && boardDrag->moved)
+            {
+                auto groups = engine.getDocument().getGroups();
+                for (auto& group : groups)
+                    if (group.id == boardDrag->groupId)
+                        for (const auto& pedal : pedals)
+                            if (pedal.groupId == group.id)
+                                group.boardPosition = juce::Point<float> (pedal.x, pedal.y);
+                engine.setGroups (std::move (groups));
+            }
+            else if (boardDrag->moved)
+                engine.closeEditGesture();
+            boardDrag.reset();
+        }
         knobDrag.reset();
         panning = false;
         dirty = true;
@@ -1628,23 +2057,69 @@ bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, d
     const auto* pedal = pedalAt (board);
     if (pedal == nullptr)
     {
+        if (button == GLFW_MOUSE_BUTTON_RIGHT)
+        {
+            std::vector<MenuItem> items;
+            items.push_back (MenuItem::item (1, boardSelection.size() >= 2 ? "Group the " + juce::String (boardSelection.size()) + " selected pedals into one..." : juce::String ("Group selected pedals (Shift+click to select)"), {}, boardSelection.size() >= 2));
+            items.push_back (MenuItem::item (2, "Auto-arrange every pedal"));
+            items.push_back (MenuItem::item (3, "Fit board to window", "F"));
+            items.push_back (MenuItem::line());
+            items.push_back (MenuItem::item (4, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute", "M"));
+            menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this] (int picked)
+            {
+                if (picked == 1) groupSelection();
+                else if (picked == 2)
+                {
+                    for (const auto& node : engine.getDocument().getNodes())
+                        if (node.boardPosition.has_value())
+                            engine.setBoardPosition (node.id, std::nullopt);
+                    auto groups = engine.getDocument().getGroups();
+                    for (auto& group : groups)
+                        group.boardPosition.reset();
+                    if (! groups.empty())
+                        engine.setGroups (std::move (groups));
+                    boardDirty = true;
+                    rebuildBoard();
+                    fitBoard();
+                }
+                else if (picked == 3) fitBoard();
+                else if (picked == 4) { engine.togglePanic(); say (engine.isPanicMuted() ? "Muted" : "Fading in"); }
+                dirty = true;
+            });
+            return true;
+        }
         if (button == GLFW_MOUSE_BUTTON_LEFT)
         {
-            selectedNode = 0;
+            if (! shift)
+            {
+                selectedNode = 0;
+                selectedGroup = -1;
+                boardSelection.clear();
+            }
             panning = true;
             panStartX = x; panStartY = y; panOriginX = boardPanX; panOriginY = boardPanY;
         }
         dirty = true;
         return true;
     }
-    const auto* model = engine.getDocument().findNode (pedal->id);
-    if (model == nullptr)
+    const bool isGroup = pedal->groupId >= 0;
+    const auto* model = isGroup ? nullptr : engine.getDocument().findNode (pedal->id);
+    if (! isGroup && model == nullptr)
         return true;
     if (button == GLFW_MOUSE_BUTTON_RIGHT)
     {
-        selectedNode = pedal->id;
-        if (const auto* layout = layoutFor (pedal->id))
-            showModuleMenu (*layout, x, y);
+        if (isGroup)
+        {
+            selectedGroup = pedal->groupId;
+            showGroupMenu (*pedal, x, y);
+        }
+        else
+        {
+            selectedNode = pedal->id;
+            if (! isBoardSelected (pedal->id))
+                boardSelection = { pedal->id };
+            showBoardPedalMenu (*pedal, x, y);
+        }
         return true;
     }
     const bool doubleClick = lastTick - lastClickTime < 0.35 && juce::Point<double> (x, y).getDistanceFrom ({ lastClickX, lastClickY }) < 6.0;
@@ -1654,28 +2129,51 @@ bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, d
         for (std::size_t knob = 0; knob < pedal->knobs.size(); ++knob)
             if (pedalKnobCentre (*pedal, static_cast<int> (knob)).getDistanceFrom (board) <= 24.0f)
             {
-                const auto parameterIndex = pedal->knobs[knob];
+                const auto [ownerId, parameterIndex] = pedal->knobs[knob];
+                const auto* owner = engine.getDocument().findNode (ownerId);
+                if (owner == nullptr)
+                    return true;
                 if (doubleClick)
                 {
-                    engine.setParameter (pedal->id, parameterIndex, model->processor->getParameter (parameterIndex).defaultValue);
+                    engine.setParameter (ownerId, parameterIndex, owner->processor->getParameter (parameterIndex).defaultValue);
                     engine.closeEditGesture();
-                    invalidatePlate (pedal->id);
+                    invalidatePlate (ownerId);
                 }
                 else
-                    knobDrag = KnobDrag { pedal->id, parameterIndex, y, model->processor->getParameter (parameterIndex).getNormalisedValue() };
-                selectedNode = pedal->id;
+                    knobDrag = KnobDrag { ownerId, parameterIndex, y, owner->processor->getParameter (parameterIndex).getNormalisedValue() };
                 dirty = true;
                 return true;
             }
         if (pedal->stomp && pedalStompCentre (*pedal).getDistanceFrom (board) <= 18.0f)
         {
-            engine.setNodeBypassed (pedal->id, ! model->processor->isBypassed());
+            if (isGroup)
+                toggleGroupBypass (*pedal);
+            else
+                engine.setNodeBypassed (pedal->id, ! model->processor->isBypassed());
             dirty = true;
             return true;
         }
     }
-    selectedNode = pedal->id;
-    if (doubleClick)
+    if (isGroup)
+    {
+        selectedGroup = pedal->groupId;
+        selectedNode = 0;
+    }
+    else
+    {
+        selectedGroup = -1;
+        selectedNode = pedal->id;
+        if (shift)
+        {
+            if (isBoardSelected (pedal->id))
+                boardSelection.erase (std::remove (boardSelection.begin(), boardSelection.end(), pedal->id), boardSelection.end());
+            else
+                boardSelection.push_back (pedal->id);
+        }
+        else if (! isBoardSelected (pedal->id))
+            boardSelection = { pedal->id };
+    }
+    if (doubleClick && ! isGroup)
     {
         // Jump to the module in the rack.
         const auto id = pedal->id;
@@ -1687,7 +2185,12 @@ bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, d
             panX = (windowW + (paletteVisible ? paletteWidth : 0.0f)) * 0.5 - (origin.x + layout->w * 0.5f);
             panY = windowH * 0.5 - (origin.y + layout->h * 0.5f);
         }
+        dirty = true;
+        return true;
     }
+    if (! pedal->tray || true)
+        boardDrag = BoardDrag { isGroup ? 0 : pedal->id, isGroup ? pedal->groupId : -1,
+                                juce::Point<float> (board.x - pedal->x, board.y - pedal->y), false };
     dirty = true;
     return true;
 }
@@ -1848,6 +2351,21 @@ void RackView::tick (double now)
     if (prompt.isOpen())
     {
         animating = true; // caret blink
+        dirty = true;
+    }
+    if (glide.has_value())
+    {
+        const auto t = juce::jlimit (0.0, 1.0, (now - glide->start) / glide->duration);
+        const auto eased = static_cast<float> (t * t * (3.0 - 2.0 * t));
+        for (const auto& item : glide->items)
+        {
+            engine.setParameterNoHistory (item.node, item.parameter, item.fromValue + (item.toValue - item.fromValue) * eased);
+            engine.setModulationDepthNoHistory (item.node, item.parameter, item.fromDepth + (item.toDepth - item.fromDepth) * eased);
+            invalidatePlate (item.node);
+        }
+        if (t >= 1.0)
+            finishGlide();
+        animating = true;
         dirty = true;
     }
 }
@@ -2402,7 +2920,9 @@ void RackView::drawHud (int width, int height, double now)
     nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
     nvgFillColor (vg, alpha (palette::mutedText, 0.75f));
     const auto hint = message.isNotEmpty() ? message
-        : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan  |  wheel zooms  |  Del  Ctrl+Z  Ctrl+D  M mute  F fit");
+        : mode == Mode::board
+            ? juce::String ("drag pedals to place them  |  Shift+click to select several, right-click to group them into one pedal  |  1-5 load a slot (knobs glide), Shift+1-5 store  |  Tab rack")
+            : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan  |  wheel zooms  |  Del  Ctrl+Z  Ctrl+D  M mute  F fit  |  Tab board");
     nvgText (vg, 16.0f, static_cast<float> (height) - 10.0f, hint.toRawUTF8(), nullptr);
 }
 
@@ -2562,6 +3082,22 @@ void RackView::mouseMove (double x, double y)
             paletteHover = hovered;
             dirty = true;
         }
+    }
+    if (boardDrag.has_value())
+    {
+        const auto board = toBoard (x, y);
+        const auto position = board - boardDrag->offset;
+        boardDrag->moved = true;
+        for (auto& pedal : pedals)
+            if ((boardDrag->groupId >= 0 && pedal.groupId == boardDrag->groupId) || (boardDrag->groupId < 0 && pedal.groupId < 0 && pedal.id == boardDrag->node))
+            {
+                pedal.x = position.x;
+                pedal.y = position.y;
+            }
+        if (boardDrag->groupId < 0)
+            engine.setBoardPosition (boardDrag->node, position);
+        dirty = true;
+        return;
     }
     if (draggingNode.has_value())
     {

@@ -46,6 +46,8 @@ public:
     void recordBypass (NodeId id, bool before, bool after);
     void recordExtraState (NodeId id, juce::var before, juce::var after);
     void recordRename (NodeId id, const juce::String& before, const juce::String& after);
+    void recordBoardMove (NodeId id, std::optional<juce::Point<float>> before, std::optional<juce::Point<float>> after);
+    void recordGroups (juce::var before, juce::var after);
 
     Applied undo();
     Applied redo();
@@ -74,7 +76,9 @@ private:
         move,
         bypass,
         extraState,
-        rename
+        rename,
+        boardMove,
+        groups
     };
 
     struct Entry
@@ -87,6 +91,7 @@ private:
 
         float floatBefore = 0.0f, floatAfter = 0.0f;
         juce::Point<float> pointBefore, pointAfter;
+        bool hadPointBefore = true, hasPointAfter = true;
         bool boolBefore = false, boolAfter = false;
         juce::var varBefore, varAfter;
 

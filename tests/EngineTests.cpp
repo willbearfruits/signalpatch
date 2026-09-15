@@ -1477,6 +1477,40 @@ void testBundleRoundTripKeepsAssetsRelative()
     temp.deleteRecursively();
 }
 
+void testBoardPositionsAndGroupsRoundTrip()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    const auto drive = document.addNode (NodeKind::distortion, { 10.0f, 10.0f }, 500);
+    const auto delay = document.addNode (NodeKind::delay, { 300.0f, 10.0f }, 501);
+    document.findNode (drive)->boardPosition = juce::Point<float> (120.0f, 40.0f);
+    PedalGroup group;
+    group.name = "Dirt";
+    group.members = { drive, delay };
+    group.knobs = { { drive, 0 }, { delay, 1 } };
+    group.boardPosition = juce::Point<float> (5.0f, 6.0f);
+    document.setGroups ({ group });
+    expect (document.getGroups().size() == 1 && document.getGroups().front().id > 0, "group did not get an id");
+
+    PatchDocument reloaded;
+    reloaded.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    expectOk (reloaded.loadJson (document.toJson()), "reload with groups");
+    const auto* reloadedDrive = reloaded.findNode (drive);
+    expect (reloadedDrive != nullptr && reloadedDrive->boardPosition.has_value()
+            && reloadedDrive->boardPosition->x == 120.0f, "board position lost");
+    expect (reloaded.findNode (delay)->boardPosition.has_value() == false, "unset board position became set");
+    expect (reloaded.getGroups().size() == 1, "group lost in the round trip");
+    const auto& back = reloaded.getGroups().front();
+    expect (back.name == "Dirt" && back.members.size() == 2 && back.knobs.size() == 2 && back.knobs[1] == std::make_pair (delay, 1)
+            && back.boardPosition.has_value() && back.boardPosition->y == 6.0f, "group contents changed in the round trip");
+
+    // Deleting a member scrubs it from the group; a group with no members goes away.
+    reloaded.removeNode (delay);
+    expect (reloaded.getGroups().front().members.size() == 1 && reloaded.getGroups().front().knobs.size() == 1, "removed node still referenced by the group");
+    reloaded.removeNode (drive);
+    expect (reloaded.getGroups().empty(), "empty group survived");
+}
+
 int main()
 {
     // Flush every insertion so a crash on CI still shows which test was
@@ -1508,7 +1542,8 @@ int main()
         { "raw juce convolution sanity", testRawJuceConvolutionSanity },
         { "cabinet convolves an impulse", testCabinetConvolvesImpulse },
         { "merge patch adds nodes with fresh ids", testMergeJsonAddsNodesWithFreshIds },
-        { "portable bundle round trip", testBundleRoundTripKeepsAssetsRelative }
+        { "portable bundle round trip", testBundleRoundTripKeepsAssetsRelative },
+        { "board positions and groups round trip", testBoardPositionsAndGroupsRoundTrip }
     };
 
     int failures = 0;
