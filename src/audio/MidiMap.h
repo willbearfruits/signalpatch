@@ -23,6 +23,7 @@ struct MidiMapping
     int groupId = -1;     // groupBypass target
     int slot = -1;        // slot target (0-based)
     juce::String command; // command target (e.g. "rec")
+    bool relative = false; // CC 64 +/- n nudges the knob instead of setting it (encoders)
 
     [[nodiscard]] bool matches (Source messageSource, int messageChannel, int messageNumber) const noexcept
     {

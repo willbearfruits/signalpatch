@@ -1629,20 +1629,23 @@ void testMidiMappingsRoundTripAndScrub()
     MidiMapping slot;
     slot.source = MidiMapping::Source::programChange; slot.number = 2;
     slot.target = MidiMapping::Target::slot; slot.slot = 2;
+    MidiMapping encoder = knob;
+    encoder.number = 20; encoder.relative = true;
     MidiMapping dangling = knob;
     dangling.node = 999; // no such node: dropped on set
-    document.setMidiMappings ({ knob, stomp, rec, slot, dangling });
-    expect (document.getMidiMappings().size() == 4, "dangling mapping should be dropped");
+    document.setMidiMappings ({ knob, stomp, rec, slot, encoder, dangling });
+    expect (document.getMidiMappings().size() == 5, "dangling mapping should be dropped");
 
     PatchDocument reloaded;
     reloaded.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
     expectOk (reloaded.loadJson (document.toJson()), "reload with midi");
     const auto& back = reloaded.getMidiMappings();
-    expect (back.size() == 4, "mappings lost in the round trip");
+    expect (back.size() == 5, "mappings lost in the round trip");
     expect (back[0].matches (MidiMapping::Source::controlChange, 5, 21) && back[0].target == MidiMapping::Target::parameter && back[0].parameter == 0, "knob mapping changed");
     expect (back[1].matches (MidiMapping::Source::note, 10, 60) && ! back[1].matches (MidiMapping::Source::note, 1, 60), "channel filter lost");
     expect (back[2].command == "rec" && back[2].node == loop, "command mapping changed");
     expect (back[3].target == MidiMapping::Target::slot && back[3].slot == 2 && back[3].sourceLabel() == "PC2", "slot mapping changed");
+    expect (back[4].relative && ! back[0].relative, "relative flag lost in the round trip");
 
     reloaded.removeNode (drive);
     expect (reloaded.getMidiMappings().size() == 2, "mappings to a deleted node should be scrubbed");

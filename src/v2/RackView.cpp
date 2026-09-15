@@ -866,7 +866,7 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
         for (const auto& connection : engine.getDocument().getConnections())
             if (connection.destinationNode == layout.id && connection.destinationPort == parameter.inputPortIndex)
                 modulation = connection;
-    enum { reset = 1, setValue, zeroDepth, fullDepth, removeModulation, midiLearn, midiRemove };
+    enum { reset = 1, setValue, zeroDepth, fullDepth, removeModulation, midiLearn, midiRemove, midiLearnRelative };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (parameter.name.toUpperCase()));
     items.push_back (MenuItem::item (reset, "Reset to default (" + juce::String (parameter.defaultValue, 2) + ")", "dbl-click"));
@@ -879,6 +879,7 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
         items.push_back (MenuItem::line());
         for (auto& item : midiMenuItems (target, parameter.name, midiLearn, midiRemove))
             items.push_back (std::move (item));
+        items.push_back (MenuItem::item (midiLearnRelative, "MIDI learn as relative encoder"));
     }
     if (parameter.inputPortIndex >= 0)
     {
@@ -918,12 +919,14 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
                     engine.disconnect (*modulation);
                 break;
             case midiLearn:
+            case midiLearnRelative:
             {
                 MidiMapping target;
                 target.target = MidiMapping::Target::parameter;
                 target.node = id;
                 target.parameter = parameterIndex;
-                beginMidiLearn (target, current_parameter.name);
+                target.relative = picked == midiLearnRelative;
+                beginMidiLearn (target, current_parameter.name + (target.relative ? " (relative)" : ""));
                 return;
             }
             case midiRemove:

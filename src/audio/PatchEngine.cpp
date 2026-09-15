@@ -708,7 +708,16 @@ void PatchEngine::applyMidiMapping (const MidiMapping& mapping, const juce::Midi
             if (node == nullptr || ! juce::isPositiveAndBelow (mapping.parameter, node->processor->getNumParameters()))
                 return;
             auto& parameter = node->processor->getParameter (mapping.parameter);
-            parameter.setValue (parameter.range.convertFrom0to1 (static_cast<float> (message.getControllerValue()) / 127.0f));
+            if (mapping.relative)
+            {
+                // Relative encoder ("64 +/- n"): 65..127 = +1..+63, 63..0 = -1..-64.
+                // One detent moves the knob ~1/128 of its range; fast spins send bigger n.
+                const auto delta = message.getControllerValue() - 64;
+                const auto step = static_cast<float> (delta) / 128.0f;
+                parameter.setNormalisedValue (juce::jlimit (0.0f, 1.0f, parameter.getNormalisedValue() + step));
+            }
+            else
+                parameter.setValue (parameter.range.convertFrom0to1 (static_cast<float> (message.getControllerValue()) / 127.0f));
             markDocumentEdited();
             if (onParameterChangedByMidi)
                 onParameterChangedByMidi (mapping.node);

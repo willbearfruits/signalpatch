@@ -23,7 +23,7 @@ works with anything else that speaks MIDI.
 | Footswitch n (1-8) | Note On 60+n-1 (press), Note Off (release), channel 10 | Momentary. SignalPatch toggles a stomp on Note On, fires a command on the rising edge, loads a slot on Note On. |
 | Bank / slot buttons| Program Change 0-4             | Direct slot select.                    |
 | Expression 1 / 2   | CC 11 / CC 4                   | 0-127, 7-bit is enough for a pedal.    |
-| Encoder 1-4        | CC 20-23, relative (64 ± delta)| SignalPatch treats CC on a knob as absolute today; relative encoders are a follow-up (see below). |
+| Encoder 1-4        | CC 20-23, relative (64 ± delta)| Learn the knob with "MIDI learn as relative encoder": each detent nudges it 1/128 of its range, n > 1 for fast spins. |
 | Tap tempo          | Note On 48, channel 10         | Mapped like any footswitch (e.g. looper REC). |
 
 Channel 10 keeps the controller's notes away from anything driving a synth.
@@ -55,16 +55,14 @@ to `0x7F` with its own `0x7F` so both sides know the other is listening.
   bindings saved in the patch.
 - Note On toggles a stomp, CC >= 64 sets it, commands fire on the rising
   edge, program changes select slots.
+- Relative encoders (CC 64 ± n) per mapping; the flag is saved with the patch.
+- A MIDI Note node: notes reach the synth and pluck through the audio
+  callback's queue (Gate / Pitch / Velocity outputs).
 
 ## Follow-ups on the SignalPatch side
 
-- **Relative encoders**: a mapping flag so CC 64±n nudges the knob instead of
-  setting it.
 - **SysEx feedback**: the 0x01-0x04 messages above, sent from the message
   thread when mapped state changes.
-- **A MIDI Note node** in the engine so the synth and pluck are playable from
-  a keyboard sample-accurately (events through the callback's queue), rather
-  than through the message-thread control path.
 
 ## Hardware sketch (for the firmware repo)
 

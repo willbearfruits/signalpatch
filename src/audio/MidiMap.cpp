@@ -44,6 +44,8 @@ juce::var midiMappingsToJson (const std::vector<MidiMapping>& mappings)
         object->setProperty ("group", mapping.groupId);
         object->setProperty ("slot", mapping.slot);
         object->setProperty ("command", mapping.command);
+        if (mapping.relative)
+            object->setProperty ("relative", true);
         values.add (juce::var (object.release()));
     }
     return values;
@@ -78,6 +80,7 @@ std::vector<MidiMapping> midiMappingsFromJson (const juce::var& value)
         mapping.groupId = static_cast<int> (object->getProperty ("group"));
         mapping.slot = static_cast<int> (object->getProperty ("slot"));
         mapping.command = object->getProperty ("command").toString();
+        mapping.relative = static_cast<bool> (object->getProperty ("relative"));
         mappings.push_back (std::move (mapping));
     }
     return mappings;
