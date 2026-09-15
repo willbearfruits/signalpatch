@@ -1979,6 +1979,45 @@ void testClockPulsesAndFollowers()
     expect (looper->uiToggleState ("rec"), "recording should start on the pulse");
 }
 
+void testFourTrackMonitorsSyncsAndVarispeedsPerTrack()
+{
+    auto deck = createNodeProcessor (NodeKind::fourTrack);
+    const int block = 480;
+    deck->prepare (48000.0, block);
+    juce::AudioBuffer<float> inputs (deck->getNumInputPorts(), block), outputs (1, block);
+    inputs.clear();
+    for (int i = 0; i < block; ++i)
+        inputs.setSample (0, i, 0.25f);
+    deck->render (inputs, outputs, block);
+    expect (std::abs (outputs.getSample (0, 10) - 0.25f) < 1.0e-5f, "a stopped deck must still pass the input through (monitoring)");
+    expect (deck->lanePosition (0) < 0.0f, "lanes idle while stopped");
+
+    // Record a DC take on track 1 for one second, then play it back at double speed on that track only.
+    deck->handleUiCommand ("arm1");
+    deck->handleUiCommand ("rec");
+    deck->handleUiCommand ("play");
+    for (int b = 0; b < 100; ++b)
+        deck->render (inputs, outputs, block); // 1 s at 48 kHz
+    deck->handleUiCommand ("rec");
+    deck->handleUiCommand ("rtz");
+    inputs.clear();
+    deck->render (inputs, outputs, block);
+    expect (std::abs (outputs.getSample (0, 100) - 0.25f) < 1.0e-4f, "the take should play back at unity: " + std::to_string (outputs.getSample (0, 100)));
+    expect (deck->uiToggleState ("sync") && deck->lanePosition (1) >= 0.0f && std::abs (deck->lanePosition (1) - deck->lanePosition (0)) < 1.0e-6f, "synced lanes move together");
+
+    deck->handleUiCommand ("sync"); // free-running
+    deck->getParameter (deck->getNumParameters() - 4).setValue (200.0f); // Speed 1 = 200 %
+    deck->handleUiCommand ("rtz");
+    for (int b = 0; b < 50; ++b)
+        deck->render (inputs, outputs, block); // 0.5 s of real time
+    const auto lane0 = deck->lanePosition (0), lane1 = deck->lanePosition (1);
+    expect (std::abs (lane0 * 60.0f - 1.0f) < 0.02f, "track 1 at 200 % should have covered 1 s of tape in 0.5 s: " + std::to_string (lane0 * 60.0f));
+    expect (std::abs (lane1 * 60.0f - 0.5f) < 0.02f, "track 2 at 100 % should be at 0.5 s: " + std::to_string (lane1 * 60.0f));
+    deck->handleUiCommand ("play2");
+    deck->render (inputs, outputs, block);
+    expect (deck->lanePosition (1) < 0.0f && deck->lanePosition (0) >= 0.0f, "a stopped track goes idle while the others run");
+}
+
 void testNeuralAmpToneStackShapesTheSpectrum()
 {
     // Without a model the amp is trim + tone stack; a full bass cut must lose low end and keep highs.
@@ -2119,6 +2158,7 @@ int main()
         { "stereo nodes: pan, ping-pong delay, cabinet R, reverb/chorus", testStereoNodes },
         { "tuner detects pitch", testTunerDetectsPitch },
         { "clock pulses; drums and looper follow it", testClockPulsesAndFollowers },
+        { "4-track monitors, syncs and varispeeds per track", testFourTrackMonitorsSyncsAndVarispeedsPerTrack },
         { "neural amp tone stack shapes the spectrum", testNeuralAmpToneStackShapesTheSpectrum },
         { "TONE3000 pieces: PKCE, URLs, callback, JSON", testTone3000PiecesAreRight },
         { "MIDI Note node drives gate and pitch", testMidiNoteNodeDrivesGateAndPitch }

@@ -214,8 +214,11 @@ void RackView::rebuildLayouts()
                 button ("PLAY", "play", palette::okay);
                 button ("REC", "rec", palette::warning);
                 button ("RTZ", "rtz", palette::mutedText);
+                button ("SYNC", "sync", palette::control);
                 for (int track = 1; track <= 4; ++track)
-                    button (juce::String (track).toRawUTF8(), ("arm" + juce::String (track)).toRawUTF8(), palette::warning, 1);
+                    button (("R" + juce::String (track)).toRawUTF8(), ("arm" + juce::String (track)).toRawUTF8(), palette::warning, 1);
+                for (int track = 1; track <= 4; ++track)
+                    button (("P" + juce::String (track)).toRawUTF8(), ("play" + juce::String (track)).toRawUTF8(), palette::okay, 2);
                 break;
             case NodeKind::neuralAmpPlaceholder:
             case NodeKind::neuralPedal:
@@ -252,11 +255,11 @@ void RackView::rebuildLayouts()
         }
         const auto portRows = juce::jmax (layout.inputs, layout.outputs);
         layout.previewY = previewTop;
-        layout.previewH = previewHeight;
-        layout.controlsTop = controlsTop;
+        layout.previewH = layout.kind == NodeKind::fourTrack ? previewHeight + 60.0f : previewHeight;
+        layout.controlsTop = controlsTop + (layout.previewH - previewHeight); // knobs follow a taller scope
         const auto knobRows = (static_cast<int> (layout.knobParameters.size()) + 1) / 2;
         const auto portsHeight = firstPortY + static_cast<float> (portRows) * portSpacing + 18.0f;
-        const auto controlsHeight = controlsTop + static_cast<float> (knobRows) * knobRowHeight + 12.0f;
+        const auto controlsHeight = layout.controlsTop + static_cast<float> (knobRows) * knobRowHeight + 12.0f;
         auto height = juce::jmax (layout.hardware ? 150.0f : 210.0f, portsHeight, controlsHeight);
         if (layout.kind == NodeKind::script)
             height += 92.0f;
@@ -440,7 +443,9 @@ juce::Rectangle<float> RackView::buttonBounds (const Layout& layout, juce::Point
                 indexInRow = rowCount;
             ++rowCount;
         }
-    const auto rows = 1 + ((layout.kind == NodeKind::fourTrack || layout.kind == NodeKind::looper) ? 1 : 0);
+    int rows = 1;
+    for (const auto& other : layout.buttons)
+        rows = juce::jmax (rows, other.row + 1);
     const auto bottom = origin.y + layout.h - railHeight - 6.0f - (layout.stomp ? stompZoneHeight : 0.0f);
     const auto y = bottom - 26.0f - static_cast<float> (rows - 1 - button.row) * 28.0f;
     const auto width = (layout.w - 24.0f - static_cast<float> (rowCount - 1) * 6.0f) / static_cast<float> (rowCount);
@@ -1140,11 +1145,100 @@ juce::Rectangle<float> RackView::previewArea (const Layout& layout, juce::Point<
     return { origin.x + 68.0f, origin.y + layout.previewY, layout.w - 136.0f, layout.previewH };
 }
 
+// Two reels that turn with track 1's tape position and four lanes with a
+// playhead each: red while armed and recording, the accent while running,
+// dim when the track is stopped. Shared by the plate and the Board pedal.
+void RackView::drawTapeDeck (juce::Rectangle<float> area, const DspNode& deck, NVGcolor colour, double now)
+{
+    juce::ignoreUnused (now);
+    const bool recording = deck.uiToggleState ("rec");
+    const bool playing = deck.uiToggleState ("play");
+    auto lane = [&] (int index)
+    {
+        const auto raw = deck.lanePosition (index);
+        const bool running = raw >= 0.0f;
+        return std::make_pair (running, running ? raw : juce::jlimit (0.0f, 1.0f, -1.0f - raw));
+    };
+    const auto reelZone = area.withHeight (juce::jmax (30.0f, area.getHeight() * 0.55f));
+    const auto laneZone = area.withTop (reelZone.getBottom() + 2.0f).reduced (6.0f, 2.0f);
+    const auto radius = juce::jmin (reelZone.getHeight() * 0.42f, reelZone.getWidth() * 0.18f);
+    const auto position = lane (0).second;
+    // 60 s of tape is a few dozen turns; the take-up reel spins a touch faster as it fills.
+    const auto angle = static_cast<float> (position * 60.0 * 0.9 * juce::MathConstants<double>::twoPi);
+    for (int reel = 0; reel < 2; ++reel)
+    {
+        const auto centre = juce::Point<float> (reelZone.getX() + reelZone.getWidth() * (reel == 0 ? 0.3f : 0.7f), reelZone.getCentreY());
+        const auto tape = reel == 0 ? 1.0f - position * 0.7f : 0.3f + position * 0.7f; // tape moves from supply to take-up
+        nvgBeginPath (vg);
+        nvgCircle (vg, centre.x, centre.y, radius);
+        nvgFillColor (vg, nvgRGBAf (0.08f, 0.07f, 0.06f, 1.0f));
+        nvgFill (vg);
+        nvgBeginPath (vg);
+        nvgCircle (vg, centre.x, centre.y, radius * (0.35f + 0.6f * tape));
+        nvgFillColor (vg, nvgRGBAf (0.22f, 0.16f, 0.10f, 1.0f));
+        nvgFill (vg);
+        nvgStrokeColor (vg, alpha (colour, playing ? 0.9f : 0.45f));
+        nvgStrokeWidth (vg, 1.5f);
+        nvgBeginPath (vg);
+        nvgCircle (vg, centre.x, centre.y, radius * 0.34f);
+        nvgStroke (vg);
+        const auto spin = angle * (reel == 0 ? 1.0f : 1.25f);
+        for (int spoke = 0; spoke < 3; ++spoke)
+        {
+            const auto a = spin + static_cast<float> (spoke) * juce::MathConstants<float>::twoPi / 3.0f;
+            nvgBeginPath (vg);
+            nvgMoveTo (vg, centre.x + std::cos (a) * radius * 0.1f, centre.y + std::sin (a) * radius * 0.1f);
+            nvgLineTo (vg, centre.x + std::cos (a) * radius * 0.33f, centre.y + std::sin (a) * radius * 0.33f);
+            nvgStrokeWidth (vg, 2.0f);
+            nvgStroke (vg);
+        }
+    }
+    // The tape path between the reels, with a head in the middle.
+    nvgBeginPath (vg);
+    nvgMoveTo (vg, reelZone.getX() + reelZone.getWidth() * 0.3f, reelZone.getBottom() - 4.0f);
+    nvgLineTo (vg, reelZone.getX() + reelZone.getWidth() * 0.7f, reelZone.getBottom() - 4.0f);
+    nvgStrokeColor (vg, nvgRGBAf (0.35f, 0.26f, 0.16f, 1.0f));
+    nvgStrokeWidth (vg, 2.0f);
+    nvgStroke (vg);
+    nvgBeginPath (vg);
+    nvgRect (vg, reelZone.getCentreX() - 4.0f, reelZone.getBottom() - 9.0f, 8.0f, 6.0f);
+    nvgFillColor (vg, recording && playing ? palette::warning : alpha (palette::mutedText, 0.7f));
+    nvgFill (vg);
+
+    const auto laneHeight = (laneZone.getHeight() - 3.0f * 2.0f) / 4.0f;
+    for (int track = 0; track < 4; ++track)
+    {
+        const auto [running, pos] = lane (track);
+        const bool armed = deck.uiToggleState ("arm" + juce::String (track + 1));
+        const juce::Rectangle<float> bar (laneZone.getX(), laneZone.getY() + static_cast<float> (track) * (laneHeight + 2.0f), laneZone.getWidth(), laneHeight);
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, bar.getX(), bar.getY(), bar.getWidth(), bar.getHeight(), 2.0f);
+        nvgFillColor (vg, armed ? alpha (palette::warning, 0.22f) : nvgRGBAf (1, 1, 1, 0.05f));
+        nvgFill (vg);
+        const auto headColour = armed && recording && running ? palette::warning : running ? colour : alpha (palette::mutedText, 0.6f);
+        nvgBeginPath (vg);
+        nvgRect (vg, bar.getX() + pos * (bar.getWidth() - 2.0f), bar.getY(), 2.0f, bar.getHeight());
+        nvgFillColor (vg, headColour);
+        nvgFill (vg);
+        nvgFontFaceId (vg, font);
+        nvgFontSize (vg, 7.0f);
+        nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvgFillColor (vg, alpha (palette::text, running ? 0.9f : 0.5f));
+        nvgText (vg, bar.getX() + 4.0f, bar.getCentreY(), juce::String (track + 1).toRawUTF8(), nullptr);
+    }
+}
+
 void RackView::drawPreviewContent (const Layout& layout, const NodeModel& model, juce::Point<float> origin)
 {
     const auto area = previewArea (layout, origin);
     const auto colour = accent (layout.kind);
     const auto kind = layout.kind;
+
+    if (kind == NodeKind::fourTrack)
+    {
+        drawTapeDeck (area.withTrimmedBottom (14.0f), *model.processor, colour, lastTick); // the caption strip lives below
+        return;
+    }
 
     if (kind == NodeKind::stepSequencer)
     {
@@ -1644,6 +1738,7 @@ void RackView::rebuildBoard()
                         pedal.buttons.push_back (button);
             const auto knobRows = (static_cast<int> (pedal.knobs.size()) + 1) / 2;
             pedal.h = node->hardware ? 150.0f : 96.0f + static_cast<float> (juce::jmax (1, knobRows)) * 72.0f + (wide ? 18.0f : 0.0f)
+                                               + (pedal.kind == NodeKind::fourTrack ? 58.0f : 0.0f) // the deck's reels
                                                + static_cast<float> (pedalButtonRows (pedal)) * 28.0f;
             pedal.x = x;
             pedal.y = y;
@@ -1757,7 +1852,8 @@ juce::Point<float> RackView::pedalKnobCentre (const Pedal& pedal, int knobIndex)
     const auto column = knobIndex % 2, row = knobIndex / 2;
     const auto columnWidth = pedal.w / static_cast<float> (juce::jmax (1, columns));
     const bool wide = pedal.kind == NodeKind::neuralAmpPlaceholder || pedal.kind == NodeKind::neuralPedal || pedal.kind == NodeKind::cabinet;
-    return { pedal.x + columnWidth * (static_cast<float> (column) + 0.5f), pedal.y + 80.0f + (wide ? 18.0f : 0.0f) + static_cast<float> (row) * 72.0f };
+    const auto deck = pedal.kind == NodeKind::fourTrack ? 58.0f : 0.0f;
+    return { pedal.x + columnWidth * (static_cast<float> (column) + 0.5f), pedal.y + 80.0f + (wide ? 18.0f : 0.0f) + deck + static_cast<float> (row) * 72.0f };
 }
 
 juce::Point<float> RackView::pedalStompCentre (const Pedal& pedal) const noexcept
@@ -1986,6 +2082,8 @@ void RackView::drawBoard (int width, int height, double now)
             }
         }
 
+        if (pedal.kind == NodeKind::fourTrack && model != nullptr)
+            drawTapeDeck ({ pedal.x + 10.0f, pedal.y + 36.0f, pedal.w - 20.0f, 56.0f }, *model->processor, colour, now);
         for (std::size_t index = 0; index < pedal.buttons.size() && model != nullptr; ++index)
         {
             const auto& button = pedal.buttons[index];
@@ -3177,7 +3275,11 @@ void RackView::tick (double now)
     // Live signal: scopes, LEDs and cable comets move while anything is audible.
     juce::uint32 telemetry = 0;
     for (const auto& node : engine.getDocument().getNodes())
+    {
         telemetry += node.processor->telemetryVersion();
+        if (node.processor->getKind() == NodeKind::fourTrack && node.processor->uiToggleState ("play"))
+            animating = true; // reels turn
+    }
     if (telemetry != lastTelemetry)
     {
         lastTelemetry = telemetry;
@@ -3464,7 +3566,9 @@ void RackView::drawPlateStatic (const Layout& layout, const NodeModel& model)
             nvgFontSize (vg, crowded ? 7.5f : 8.5f);
             nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
             nvgFillColor (vg, alpha (palette::mutedText, crowded ? 0.8f : 0.9f));
-            nvgText (vg, centre.x + 9.0f, centre.y, info.name.toRawUTF8(), nullptr);
+            // The diamond already says "mod"; crowded plates drop the suffix so the knob's name fits.
+            const auto shownName = crowded && info.name.endsWith (" mod") ? info.name.dropLastCharacters (4) : info.name;
+            nvgText (vg, centre.x + 9.0f, centre.y, shownName.toRawUTF8(), nullptr);
             nvgRestore (vg);
         }
     }

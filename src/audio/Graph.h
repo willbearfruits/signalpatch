@@ -220,6 +220,8 @@ public:
     [[nodiscard]] juce::uint32 outputTelemetryVersion (int port) const noexcept;
 
     [[nodiscard]] virtual int currentStep() const noexcept { return -1; }
+    /** Transports with several lanes (the 4-track): lane position 0..1 while running, -1 - position when idle, -1 for no such lane. Message thread. */
+    [[nodiscard]] virtual float lanePosition (int) const noexcept { return -1.0f; }
     [[nodiscard]] virtual float gainReductionDb() const noexcept { return 0.0f; }
     [[nodiscard]] virtual bool safetyTripped() const noexcept { return false; }
     virtual void resetSafety() noexcept {}

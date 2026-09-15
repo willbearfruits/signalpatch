@@ -133,6 +133,7 @@ private:
 
     // Context menus, all built from the same MenuItem vocabulary.
     void showCanvasMenu (double x, double y);
+    void drawTapeDeck (juce::Rectangle<float> area, const DspNode& deck, NVGcolor colour, double now);
     [[nodiscard]] std::vector<MenuItem> moduleCatalogueMenu() const; // ids 1000 + kind
     void showModuleMenu (const Layout& layout, double x, double y);
     void showKnobMenu (const Layout& layout, int parameterIndex, double x, double y);

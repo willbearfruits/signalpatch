@@ -2968,8 +2968,17 @@ public:
                           juce::NormalisableRange<float> (-60.0f, 6.0f, 0.1f), 0.0f, 0.25f);
         addParameter ("master", "Master", "dB", juce::NormalisableRange<float> (-60.0f, 6.0f, 0.1f), 0.0f, 0.25f);
         addParameter ("speed", "Speed", "%", juce::NormalisableRange<float> (50.0f, 200.0f, 0.1f), 100.0f, 0.35f);
+        // Per-track speed came later, so it sits after the older knobs (saved patches store values by index).
+        for (int track = 0; track < trackCount; ++track)
+            addParameter ("speed-" + juce::String (track + 1), "Speed " + juce::String (track + 1), "%",
+                          juce::NormalisableRange<float> (25.0f, 400.0f, 0.1f), 100.0f, 0.35f);
+        for (auto& running : trackRunning)
+            running.store (true, std::memory_order_relaxed);
     }
 
+    // Transport: PLAY runs the machine, REC writes the armed tracks, RTZ rewinds
+    // every track, SYNC locks the four playheads to track 1 (free-running with
+    // their own speed when off). Per track: R (arm) and P (that track runs).
     bool handleUiCommand (const juce::String& command) override
     {
         if (command == "play")
@@ -2988,35 +2997,60 @@ public:
             returnToZero.store (true, std::memory_order_release);
             return true;
         }
+        if (command == "sync")
+        {
+            synced.store (! synced.load (std::memory_order_relaxed), std::memory_order_relaxed);
+            return true;
+        }
         for (int track = 0; track < trackCount; ++track)
+        {
+            const auto index = static_cast<std::size_t> (track);
             if (command == "arm" + juce::String (track + 1))
             {
-                armed[static_cast<std::size_t> (track)].store (
-                    ! armed[static_cast<std::size_t> (track)].load (std::memory_order_relaxed),
-                    std::memory_order_relaxed);
+                armed[index].store (! armed[index].load (std::memory_order_relaxed), std::memory_order_relaxed);
                 return true;
             }
+            if (command == "play" + juce::String (track + 1))
+            {
+                trackRunning[index].store (! trackRunning[index].load (std::memory_order_relaxed), std::memory_order_relaxed);
+                return true;
+            }
+        }
         return false;
     }
 
     bool uiToggleState (const juce::String& command) const override
     {
-        if (command == "play")
-            return playing.load (std::memory_order_relaxed);
-        if (command == "rec")
-            return recording.load (std::memory_order_relaxed);
+        if (command == "play") return playing.load (std::memory_order_relaxed);
+        if (command == "rec")  return recording.load (std::memory_order_relaxed);
+        if (command == "sync") return synced.load (std::memory_order_relaxed);
         for (int track = 0; track < trackCount; ++track)
-            if (command == "arm" + juce::String (track + 1))
-                return armed[static_cast<std::size_t> (track)].load (std::memory_order_relaxed);
+        {
+            const auto index = static_cast<std::size_t> (track);
+            if (command == "arm" + juce::String (track + 1))  return armed[index].load (std::memory_order_relaxed);
+            if (command == "play" + juce::String (track + 1)) return trackRunning[index].load (std::memory_order_relaxed);
+        }
         return false;
     }
 
     juce::String statusText() const override
     {
-        const auto seconds = playheadSeconds.load (std::memory_order_relaxed);
+        const auto seconds = playheadSeconds[0].load (std::memory_order_relaxed);
         juce::String state = playing.load (std::memory_order_relaxed)
             ? (recording.load (std::memory_order_relaxed) ? "REC" : "PLAY") : "STOP";
-        return state + "  " + juce::String (seconds, 1) + "s / " + juce::String (tapeSeconds) + "s";
+        return state + "  " + juce::String (seconds, 1) + "s / " + juce::String (tapeSeconds) + "s" + (synced.load (std::memory_order_relaxed) ? "  SYNC" : "  FREE");
+    }
+
+    /** Lane position 0..1 while the track runs; an idle track reports -1 - position so the reels still show where it stands. */
+    float lanePosition (int lane) const noexcept override
+    {
+        if (! juce::isPositiveAndBelow (lane, trackCount))
+            return -1.0f;
+        const auto index = static_cast<std::size_t> (lane);
+        const auto position = juce::jlimit (0.0f, 1.0f, playheadSeconds[index].load (std::memory_order_relaxed) / static_cast<float> (tapeSeconds));
+        if (! playing.load (std::memory_order_relaxed) || ! trackRunning[index].load (std::memory_order_relaxed))
+            return -1.0f - position;
+        return position;
     }
 
     // Recording persistence: the four tapes as four channels, trimmed to the
@@ -3079,8 +3113,9 @@ private:
     {
         playing.store (false, std::memory_order_relaxed);
         recording.store (false, std::memory_order_relaxed);
-        playhead = 0.0;
-        playheadSeconds.store (0.0f, std::memory_order_relaxed);
+        for (auto& head : playhead) head = 0.0;
+        for (auto& slot : lastRecordSlot) slot = -1;
+        for (auto& seconds : playheadSeconds) seconds.store (0.0f, std::memory_order_relaxed);
     }
 
     void processDsp (const juce::AudioBuffer<float>& inputs,
@@ -3091,80 +3126,90 @@ private:
         auto* output = outputs.getWritePointer (0);
         const auto capacity = static_cast<int> (tracks[0].size());
         if (capacity < 64)
+        {
+            juce::FloatVectorOperations::copy (output, input, numSamples);
             return;
+        }
 
         if (returnToZero.exchange (false, std::memory_order_acq_rel))
-            playhead = 0.0;
+            for (auto& head : playhead)
+                head = 0.0;
+        const bool sync = synced.load (std::memory_order_relaxed);
+        if (sync)
+            for (int track = 1; track < trackCount; ++track)
+                playhead[static_cast<std::size_t> (track)] = playhead[0];
 
+        const bool run = playing.load (std::memory_order_relaxed);
+        const bool doRecord = run && recording.load (std::memory_order_relaxed);
         for (int sample = 0; sample < numSamples; ++sample)
         {
             const auto master = juce::Decibels::decibelsToGain (parameterValue (trackCount, inputs, sample));
-            const auto speed = juce::jlimit (0.25f, 4.0f, parameterValue (trackCount + 1, inputs, sample) * 0.01f);
+            const auto masterSpeed = juce::jlimit (0.25f, 4.0f, parameterValue (trackCount + 1, inputs, sample) * 0.01f);
+            const auto dry = std::isfinite (input[sample]) ? input[sample] : 0.0f;
 
             float mixed = 0.0f;
-            if (playing.load (std::memory_order_relaxed))
+            for (int track = 0; track < trackCount; ++track)
             {
-                const auto writeSlot = juce::jlimit (0, capacity - 1, static_cast<int> (playhead));
-                const auto indexA = juce::jlimit (0, capacity - 2, static_cast<int> (playhead));
-                const auto fraction = static_cast<float> (playhead - std::floor (playhead));
-                const bool doRecord = recording.load (std::memory_order_relaxed);
-                const auto safeInput = std::isfinite (input[sample]) ? input[sample] : 0.0f;
-
-                // Varispeed advances more than one slot per sample; fill the
-                // whole span so fast-tape recordings have no silent gaps.
-                auto recordFrom = writeSlot;
-                if (doRecord && lastRecordSlot >= 0)
-                    recordFrom = (lastRecordSlot + 1) % capacity;
-
-                for (int track = 0; track < trackCount; ++track)
+                const auto index = static_cast<std::size_t> (track);
+                auto& tape = tracks[index];
+                auto& head = playhead[index];
+                if (! run || ! trackRunning[index].load (std::memory_order_relaxed))
                 {
-                    auto& tape = tracks[static_cast<std::size_t> (track)];
-                    if (doRecord && armed[static_cast<std::size_t> (track)].load (std::memory_order_relaxed))
+                    lastRecordSlot[index] = -1;
+                    continue;
+                }
+                const auto trackSpeed = sync ? masterSpeed
+                                             : masterSpeed * juce::jlimit (0.25f, 4.0f, parameterValue (trackCount + 2 + track, inputs, sample) * 0.01f);
+                const auto writeSlot = juce::jlimit (0, capacity - 1, static_cast<int> (head));
+                const auto indexA = juce::jlimit (0, capacity - 2, static_cast<int> (head));
+                const auto fraction = static_cast<float> (head - std::floor (head));
+                if (doRecord && armed[index].load (std::memory_order_relaxed))
+                {
+                    // Varispeed advances more than one slot per sample; fill the
+                    // whole span so fast-tape recordings have no silent gaps.
+                    auto slot = lastRecordSlot[index] >= 0 ? (lastRecordSlot[index] + 1) % capacity : writeSlot;
+                    for (int guard = 0; guard < 8; ++guard)
                     {
-                        auto slot = recordFrom;
-                        for (int guard = 0; guard < 8; ++guard)
-                        {
-                            tape[static_cast<std::size_t> (slot)] = safeInput;
-                            if (slot == writeSlot)
-                                break;
-                            slot = (slot + 1) % capacity;
-                        }
+                        tape[static_cast<std::size_t> (slot)] = dry;
+                        if (slot == writeSlot)
+                            break;
+                        slot = (slot + 1) % capacity;
                     }
-                    const auto trackLevel = juce::Decibels::decibelsToGain (
-                        parameterValue (track, inputs, sample));
-                    const auto value = tape[static_cast<std::size_t> (indexA)]
-                                     + fraction * (tape[static_cast<std::size_t> (indexA + 1)]
-                                                   - tape[static_cast<std::size_t> (indexA)]);
-                    mixed += value * trackLevel;
+                    lastRecordSlot[index] = writeSlot;
                 }
-                lastRecordSlot = doRecord ? writeSlot : -1;
+                else
+                    lastRecordSlot[index] = -1;
+                const auto trackLevel = juce::Decibels::decibelsToGain (parameterValue (track, inputs, sample));
+                const auto value = tape[static_cast<std::size_t> (indexA)]
+                                 + fraction * (tape[static_cast<std::size_t> (indexA + 1)] - tape[static_cast<std::size_t> (indexA)]);
+                mixed += value * trackLevel;
 
-                playhead += speed;
-                if (playhead >= capacity - 1)
+                head += trackSpeed;
+                if (head >= capacity - 1)
                 {
-                    playhead = 0.0; // tape loop
-                    lastRecordSlot = -1;
+                    head = 0.0; // tape loop
+                    lastRecordSlot[index] = -1;
                 }
             }
-            else
-            {
-                lastRecordSlot = -1;
-            }
-            output[sample] = mixed * master;
+            // A tape machine monitors its input: the dry signal always passes, the tapes add to it.
+            output[sample] = dry + mixed * master;
         }
-        playheadSeconds.store (static_cast<float> (playhead / juce::jmax (1.0, sampleRate)),
-                               std::memory_order_relaxed);
+        for (int track = 0; track < trackCount; ++track)
+            playheadSeconds[static_cast<std::size_t> (track)].store (static_cast<float> (playhead[static_cast<std::size_t> (track)] / juce::jmax (1.0, sampleRate)),
+                                                                     std::memory_order_relaxed);
     }
 
     double sampleRate = 48000.0;
     std::array<std::vector<float>, trackCount> tracks;
-    double playhead = 0.0;
-    int lastRecordSlot = -1;
-    std::atomic<float> playheadSeconds { 0.0f };
+    std::array<double, trackCount> playhead {};
+    std::array<int, trackCount> lastRecordSlot { -1, -1, -1, -1 };
+    std::array<std::atomic<float>, trackCount> playheadSeconds {};
     std::atomic<bool> playing { false };
     std::atomic<bool> recording { false };
     std::atomic<bool> returnToZero { false };
+    std::atomic<bool> synced { true };
     std::array<std::atomic<bool>, trackCount> armed {};
+    std::array<std::atomic<bool>, trackCount> trackRunning {};
     std::atomic<juce::uint32> recordedContentVersion { 0 };
 };
 class SpectralFollowerNode final : public DspNode
