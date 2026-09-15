@@ -51,11 +51,11 @@ Cross-cutting from 0.3 on:
   they undo: `cmake -B build -DSIGNALPATCH_BUILD_JUCE_UI=ON` (both apps on
   the current engine); `git checkout juce-ui` (the last both-UIs tree, tagged
   `v0.2.1`, builds forever); `git revert` of the retirement commit.
-- **Looper node**: record / overdub / undo-last-layer / half-speed / reverse;
-  loop length settable by first take or locked to the drum machine's bar.
-- **Recording persistence**: sampler, 4-track and looper audio saved as WAV
-  under the project's `assets/audio/` and loaded back with the patch; bundles
-  carry them.
+- **Looper node** (done 2026-09-15): record / overdub / undo-last-pass /
+  half-speed / reverse; length from the first take or a bar count at a tempo.
+- **Recording persistence** (done 2026-09-15): sampler, 4-track and looper
+  audio saved as WAV under the project's `assets/audio/`, loaded back with
+  the patch, carried by bundles and autosave.
 - **Tuner** (a control node with a Board face).
 
 Exit: record a loop, save, reopen tomorrow, and it plays.
@@ -65,10 +65,13 @@ Exit: record a loop, save, reopen tomorrow, and it plays.
 The engine's event-queue design becomes real: every external input is a
 timestamped event on a bounded queue into the callback.
 
-- **MIDI input** (JUCE MidiInput, its own thread, SPSC queue): notes drive
-  the synth/pluck; CC and program change drive the rest.
-- **MIDI learn** on stomps, knobs, group pedals and rig slots, with a
-  learn-mode overlay on the Board; mappings saved in the patch.
+- **MIDI input** (done 2026-09-15 for control): every input opened, hot-plug
+  scanned, messages applied on the message thread. Still open: notes driving
+  the synth/pluck sample-accurately through an engine event queue (a MIDI
+  Note node).
+- **MIDI learn** (done 2026-09-15) on knobs, stomps, module buttons, group
+  pedals and rig slots; bindings saved in the patch, shown on the Board and
+  in the rack, adopted by slot glides.
 - **Gamepad map** (GLFW): d-pad walks pedals, sticks turn the focused knob,
   triggers stomp, shoulders change slot, a button opens the palette. The
   Board must be fully operable with no pointer.
@@ -83,11 +86,16 @@ Exit: a whole song with hands on the guitar only.
 
 ## 0.5 — Stereo
 
-- Per-port channel policy in the compiler (mono / stereo / match-upstream),
-  buffers and cables that carry two channels; mono nodes stay valid forever.
-- Stereo delay, reverb, chorus, cabinet (dual IR), pan / split / merge,
-  dual-mono NAM with explicit CPU accounting.
-- Board and rack show channel count on ports and cables.
+- **Stage 1 (done 2026-09-15): stereo as L/R port pairs.** Pan, Stereo
+  Merge, Stereo Delay (ping-pong, R offset), Stereo Chorus (phase spread),
+  Stereo Reverb (width), and a right output on the Cabinet (IR B); one drag
+  cables an L/R pair. The graph's buffers stay mono, so nothing in the
+  real-time path changed.
+- Stage 2: per-port channel policy in the compiler (mono / stereo /
+  match-upstream) so one cable can carry two channels and mono nodes stay
+  valid forever; dual-mono NAM with explicit CPU accounting; channel count
+  shown on ports and cables. Worth doing only if the pair-based rigs feel
+  clumsy in practice.
 
 Exit: the rig into the interface's two outputs sounds like a record, not a
 demo.
