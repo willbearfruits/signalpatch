@@ -101,6 +101,8 @@ public:
     [[nodiscard]] juce::String getRedoDescription() const { return history.getRedoDescription(); }
     void closeEditGesture() noexcept { history.closeGesture(); }
     void beginCompoundEditGesture (const juce::String& description) { history.beginCompoundGesture (description); }
+    /** A slot glide's knob change as one history entry (the glide itself animates without history). */
+    void recordGlide (NodeId id, int parameterIndex, float before, float after, float depthBefore, float depthAfter);
 
     // Patch files store asset paths (NAM models, cab impulses) relative to
     // the patch's folder when they live under it, absolute otherwise. A
@@ -208,6 +210,7 @@ private:
     std::map<std::pair<NodeId, juce::String>, bool> midiCommandGate; // CC rising-edge detection per (node, command)
     std::unordered_map<NodeId, juce::uint32> seenAudioVersions;        // recordings noticed by the timer
     std::atomic<bool> midiNotesLost { false };                          // MIDI thread sets, audio thread releases all notes
+    juce::StringArray knownMidiInputs;                                  // identifiers present at the last refresh
     void openControllerOutput (const juce::String& inputName);
     void sendControllerFeedback (bool full);
     std::vector<std::unique_ptr<juce::MidiOutput>> controllerOutputs;

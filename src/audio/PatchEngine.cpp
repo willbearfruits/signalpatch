@@ -143,10 +143,14 @@ void PatchEngine::applyPreferredCaptureDevice()
     // Try JACK before raw ALSA: on a PipeWire desktop the interface's ALSA
     // playback side is held by the sound server, so a raw ALSA open "succeeds"
     // with inputs only and the rig is silent.
+    const auto originalType = deviceManager.getCurrentAudioDeviceType();
+    const auto originalSetup = deviceManager.getAudioDeviceSetup();
+    const bool originalWasOpen = deviceManager.getCurrentAudioDevice() != nullptr;
     juce::Array<juce::AudioIODeviceType*> orderedTypes;
     for (auto* type : deviceManager.getAvailableDeviceTypes())
         if (type != nullptr)
             (type->getTypeName() == "JACK" ? orderedTypes.insert (0, type) : orderedTypes.add (type));
+    bool triedAny = false;
 
     for (auto* type : orderedTypes)
     {
@@ -156,6 +160,7 @@ void PatchEngine::applyPreferredCaptureDevice()
             if (! looksLikePreferredInterface (inputName))
                 continue;
 
+            triedAny = true;
             deviceManager.setCurrentAudioDeviceType (type->getTypeName(), true);
             auto setup = deviceManager.getAudioDeviceSetup();
             setup.inputDeviceName = inputName;
@@ -175,6 +180,13 @@ void PatchEngine::applyPreferredCaptureDevice()
                 deviceManager.closeAudioDevice(); // Inputs only: keep looking on another backend.
             }
         }
+    }
+    // Nothing preferred worked: go back to the device that was open before the search
+    // rather than staying offline (and saving "offline" as the user's choice).
+    if (triedAny && originalWasOpen && originalType.isNotEmpty())
+    {
+        deviceManager.setCurrentAudioDeviceType (originalType, true);
+        deviceManager.setAudioDeviceSetup (originalSetup, true);
     }
 }
 
@@ -448,6 +460,14 @@ void PatchEngine::setNodeBypassed (NodeId id, bool bypassed)
     }
 }
 
+void PatchEngine::recordGlide (NodeId id, int parameterIndex, float before, float after, float depthBefore, float depthAfter)
+{
+    if (before != after)
+        history.recordParameter (id, parameterIndex, before, after);
+    if (depthBefore != depthAfter)
+        history.recordModulationDepth (id, parameterIndex, depthBefore, depthAfter);
+}
+
 bool PatchEngine::sendNodeCommand (NodeId id, const juce::String& command)
 {
     if (command == "reset-loop")
@@ -663,14 +683,32 @@ void PatchEngine::refreshMidiInputs()
     // Open everything that is plugged in; a hot-plugged controller shows up
     // on the next refresh (timer, every few seconds).
     int open = 0;
+    juce::StringArray present;
     for (const auto& device : juce::MidiInput::getAvailableDevices())
     {
+        present.add (device.identifier);
+        // A device that disappeared and came back keeps its "enabled" flag while
+        // its port was closed underneath: close and reopen it so it plays again.
+        if (! knownMidiInputs.contains (device.identifier) && deviceManager.isMidiInputDeviceEnabled (device.identifier))
+            deviceManager.setMidiInputDeviceEnabled (device.identifier, false);
         if (! deviceManager.isMidiInputDeviceEnabled (device.identifier))
             deviceManager.setMidiInputDeviceEnabled (device.identifier, true);
         if (deviceManager.isMidiInputDeviceEnabled (device.identifier))
             ++open;
     }
+    knownMidiInputs = present;
     midiInputsOpen = open;
+
+    // Controller feedback outputs whose device is gone are dropped; the
+    // controller's hello on reconnect opens a fresh one.
+    const auto outputs = juce::MidiOutput::getAvailableDevices();
+    controllerOutputs.erase (std::remove_if (controllerOutputs.begin(), controllerOutputs.end(), [&] (const std::unique_ptr<juce::MidiOutput>& output)
+    {
+        for (const auto& device : outputs)
+            if (device.identifier == output->getIdentifier())
+                return false;
+        return true;
+    }), controllerOutputs.end());
 }
 
 void PatchEngine::handleIncomingMidiMessage (juce::MidiInput* source, const juce::MidiMessage& message)
@@ -704,13 +742,10 @@ void PatchEngine::handleIncomingMidiMessage (juce::MidiInput* source, const juce
 
 void PatchEngine::openControllerOutput (const juce::String& inputName)
 {
-    for (const auto& output : controllerOutputs)
-        if (output->getName() == inputName)
-        {
-            output->sendMessageNow (controller::helloMessage (controller::fromSignalPatch));
-            sendControllerFeedback (true);
-            return;
-        }
+    // A hello always gets a freshly opened port: after a replug the old one is dead.
+    controllerOutputs.erase (std::remove_if (controllerOutputs.begin(), controllerOutputs.end(),
+                                             [&] (const std::unique_ptr<juce::MidiOutput>& output) { return output->getName() == inputName; }),
+                             controllerOutputs.end());
     for (const auto& device : juce::MidiOutput::getAvailableDevices())
     {
         if (device.name != inputName)
@@ -1199,6 +1234,8 @@ juce::File PatchEngine::audioStateFile() const
 
 void PatchEngine::saveAudioDeviceState()
 {
+    if (deviceManager.getCurrentAudioDevice() == nullptr)
+        return; // offline is a condition, not a choice: the next launch should look again
     const auto state = deviceManager.createStateXml();
     if (state == nullptr)
         return;

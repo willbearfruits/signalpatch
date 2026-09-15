@@ -156,6 +156,48 @@ RackView::~RackView()
     releasePlates();
 }
 
+void RackView::endInteractions()
+{
+    // An open drag or a running glide must not be half-inside an undo step.
+    if (draggingNode.has_value() || knobDrag.has_value() || sequencerDrag.has_value() || boardDrag.has_value() || marquee.has_value())
+    {
+        draggingNode.reset();
+        dragStartPositions.clear();
+        knobDrag.reset();
+        sequencerDrag.reset();
+        boardDrag.reset();
+        marquee.reset();
+        cableDrag.reset();
+        panning = false;
+    }
+    finishGlide();
+    engine.closeEditGesture();
+}
+
+bool RackView::undoNow()
+{
+    endInteractions();
+    const auto done = engine.undo();
+    structureDirty = boardDirty = true;
+    invalidateAllPlates();
+    return done;
+}
+
+bool RackView::redoNow()
+{
+    endInteractions();
+    const auto done = engine.redo();
+    structureDirty = boardDirty = true;
+    invalidateAllPlates();
+    return done;
+}
+
+void RackView::focusLost()
+{
+    endInteractions(); // a drag whose release never arrives (window switched) ends here
+    dirty = true;
+}
+
 void RackView::patchReplaced()
 {
     ++patchEpoch;
@@ -847,8 +889,8 @@ void RackView::showCanvasMenu (double x, double y)
                 say (nodeKindName (kind) + " added");
             }
         }
-        else if (id == 1) say (engine.undo() ? "Undo" : "Nothing to undo");
-        else if (id == 2) say (engine.redo() ? "Redo" : "Nothing to redo");
+        else if (id == 1) say (undoNow() ? "Undo" : "Nothing to undo");
+        else if (id == 2) say (redoNow() ? "Redo" : "Nothing to redo");
         else if (id == 3) { engine.togglePanic(); say (engine.isPanicMuted() ? "Muted" : "Fading in"); }
         else if (id == 4) fitToPatch (windowW, windowH);
         else if (id == 5) key (GLFW_KEY_T, true, GLFW_MOD_CONTROL);
@@ -2499,7 +2541,7 @@ void RackView::pollGamepad (double now)
     if (pressed (GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER))
         loadSlot (activeSlot < 0 ? 0 : (activeSlot + 1) % slotCount);
     if (pressed (GLFW_GAMEPAD_BUTTON_X))
-        say (engine.undo() ? "Undo" : "Nothing to undo");
+        say (undoNow() ? "Undo" : "Nothing to undo");
     if (pressed (GLFW_GAMEPAD_BUTTON_Y))
     {
         if (mode == Mode::board) fitBoard(); else fitToPatch (windowW, windowH);
@@ -2711,8 +2753,8 @@ void RackView::showBoardMenu (double x, double y)
         }
         else if (picked == 3) fitBoard();
         else if (picked == 4) { engine.togglePanic(); say (engine.isPanicMuted() ? "Muted" : "Fading in"); }
-        else if (picked == 5) say (engine.undo() ? "Undo" : "Nothing to undo");
-        else if (picked == 6) say (engine.redo() ? "Redo" : "Nothing to redo");
+        else if (picked == 5) say (undoNow() ? "Undo" : "Nothing to undo");
+        else if (picked == 6) say (redoNow() ? "Redo" : "Nothing to redo");
         dirty = true;
     });
     dirty = true;
@@ -2953,6 +2995,9 @@ bool RackView::tryGlideToPatch (const juce::var& target)
 
     Glide plan;
     plan.start = lastTick;
+    finishGlide();                 // a glide still running lands first
+    engine.closeEditGesture();
+    engine.beginCompoundEditGesture ("switch rig"); // everything below is one undo step
     for (const auto& value : *nodeArray)
     {
         const auto* object = value.getDynamicObject();
@@ -2962,16 +3007,27 @@ bool RackView::tryGlideToPatch (const juce::var& target)
         const auto* node = document.findNode (id);
         if (node == nullptr)
             continue;
-        // Switches and models jump; only continuous values glide.
-        engine.setNodeBypassed (id, static_cast<bool> (object->getProperty ("bypassed")));
-        if (object->hasProperty ("extra"))
+        // Switches and models jump; only continuous values glide. What the slot
+        // file leaves out is what the slot does not have: reset it, do not keep ours.
+        if (static_cast<bool> (object->getProperty ("bypassed")) != node->processor->isBypassed())
+            engine.setNodeBypassed (id, static_cast<bool> (object->getProperty ("bypassed")));
         {
-            auto extra = object->getProperty ("extra");
+            const auto extra = object->hasProperty ("extra") ? object->getProperty ("extra") : juce::var();
             if (juce::JSON::toString (extra) != juce::JSON::toString (node->processor->getExtraState()))
                 engine.applyNodeExtraState (id, extra);
         }
+        if (object->hasProperty ("name") && object->getProperty ("name").toString() != node->processor->getName())
+            engine.renameNode (id, object->getProperty ("name").toString());
+        if (object->hasProperty ("x"))
+        {
+            const juce::Point<float> rackPosition (static_cast<float> (object->getProperty ("x")), static_cast<float> (object->getProperty ("y")));
+            if (rackPosition != node->position)
+                engine.moveNode (id, rackPosition);
+        }
         if (object->hasProperty ("bx"))
             engine.setBoardPosition (id, juce::Point<float> (static_cast<float> (object->getProperty ("bx")), static_cast<float> (object->getProperty ("by"))));
+        else if (node->boardPosition.has_value())
+            engine.setBoardPosition (id, std::nullopt);
         if (const auto* parameters = object->getProperty ("parameters").getArray())
             for (const auto& parameterValue : *parameters)
                 if (const auto* parameterObject = parameterValue.getDynamicObject())
@@ -2990,7 +3046,10 @@ bool RackView::tryGlideToPatch (const juce::var& target)
                         item.fromDepth = parameter.getModulationDepth();
                         item.toDepth = static_cast<float> (parameterObject->getProperty ("depth"));
                         if (item.fromValue != item.toValue || item.fromDepth != item.toDepth)
+                        {
+                            engine.recordGlide (id, index, item.fromValue, item.toValue, item.fromDepth, item.toDepth);
                             plan.items.push_back (item);
+                        }
                     }
                 }
     }
@@ -2998,6 +3057,7 @@ bool RackView::tryGlideToPatch (const juce::var& target)
         engine.applyGroupsJson (root->getProperty ("groups"));
     if (root->hasProperty ("midi") || ! document.getMidiMappings().empty())
         engine.applyMidiMappingsJson (root->getProperty ("midi"));
+    engine.closeEditGesture();
     glide = std::move (plan);
     return true;
 }
@@ -4847,11 +4907,11 @@ void RackView::key (int keyCode, bool pressed, int mods)
     if (keyCode == GLFW_KEY_DELETE || keyCode == GLFW_KEY_BACKSPACE)
         deleteSelection();
     else if (ctrl && keyCode == GLFW_KEY_Z && shift)
-        say (engine.redo() ? "Redo" : "Nothing to redo");
+        say (redoNow() ? "Redo" : "Nothing to redo");
     else if (ctrl && keyCode == GLFW_KEY_Z)
-        say (engine.undo() ? "Undo" : "Nothing to undo");
+        say (undoNow() ? "Undo" : "Nothing to undo");
     else if (ctrl && keyCode == GLFW_KEY_Y)
-        say (engine.redo() ? "Redo" : "Nothing to redo");
+        say (redoNow() ? "Redo" : "Nothing to redo");
     else if (ctrl && keyCode == GLFW_KEY_D)
     {
         const auto copy = selectedNode != 0 ? engine.duplicateNode (selectedNode) : 0;

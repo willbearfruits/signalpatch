@@ -10,6 +10,24 @@
 
 namespace signalpatch
 {
+/** Resamples the first inLength samples of `in` (recorded at inRate) into a
+    fresh buffer of outCapacity samples at outRate. Returns the new length.
+    Used by prepareDsp when the device rate changes, so takes survive it. */
+int resampleRecording (const std::vector<float>& in, int inLength, double inRate, std::vector<float>& out, int outCapacity, double outRate)
+{
+    out.assign (static_cast<std::size_t> (juce::jmax (0, outCapacity)), 0.0f);
+    if (inLength <= 0 || inRate <= 0.0 || outRate <= 0.0 || in.empty())
+        return 0;
+    const auto ratio = inRate / outRate;
+    const auto available = juce::jmin (inLength, static_cast<int> (in.size()));
+    const auto outLength = juce::jlimit (0, outCapacity, static_cast<int> (std::floor (available / ratio)));
+    if (outLength > 0)
+    {
+        juce::LagrangeInterpolator interpolator;
+        interpolator.process (ratio, in.data(), out.data(), outLength, available, 0);
+    }
+    return outLength;
+}
 
 // A follower's view of a Clock input: rising edges, and whether pulses have
 // arrived recently enough to own the stepping (four seconds of silence hands
@@ -24,6 +42,7 @@ struct ClockFollower
 
     /** Call once per sample; returns true on a rising edge. */
     int lastInterval = 0;      // samples between the last two pulses
+    bool restart = false;      // the last edge was a Clock start/reset (a full-height pulse)
 
     bool tick (const float* clock, int sample, double sampleRate) noexcept
     {
@@ -35,6 +54,7 @@ struct ClockFollower
             if (samplesSincePulse < (1 << 30))
                 lastInterval = samplesSincePulse;
             samplesSincePulse = 0;
+            restart = clock[sample] > 0.95f; // regular pulses are 0.8 high, a start/reset pulse is 1.0
         }
         else if (samplesSincePulse < (1 << 30))
             ++samplesSincePulse;
@@ -640,6 +660,8 @@ private:
             bool advance = false;
             if (clock.external (sampleRate))
             {
+                if (clockEdge && clock.restart)
+                    stepIndex = 7; // a Clock start/reset: this pulse is step 1
                 advance = clockEdge;
                 stepPhase = 0.0;
             }
@@ -2526,6 +2548,7 @@ private:
         readIndex = 0;
         activeLength = 480;
         excitationFilter = 0.0f;
+        tuningCoefficient = allpassState = allpassInput = 0.0f;
         triggerWasHigh = false;
     }
 
@@ -2553,8 +2576,17 @@ private:
             if (triggerHigh && ! triggerWasHigh)
             {
                 const auto frequency = 110.0f * std::pow (2.0f, juce::jlimit (-24.0f, 36.0f, pitch) / 12.0f);
-                activeLength = juce::jlimit (16, maximumDelay - 2,
-                                             juce::roundToInt (sampleRate / frequency));
+                // The averaging filter reads the slot just written and the one before it,
+                // so an N-slot loop has a period of N - 0.5 samples; the allpass adds the
+                // fraction: N - 0.5 + frac = period, so high notes stay in tune.
+                const auto period = juce::jlimit (17.0, static_cast<double> (maximumDelay - 3), sampleRate / frequency);
+                const auto whole = static_cast<int> (std::floor (period + 0.5));
+                auto fraction = static_cast<float> (period + 0.5 - whole);
+                if (fraction < 0.1f) { fraction += 1.0f; } // keep the allpass well away from its unstable edge
+                activeLength = juce::jlimit (16, maximumDelay - 2, fraction >= 1.0f ? whole - 1 : whole);
+                tuningCoefficient = (1.0f - fraction) / (1.0f + fraction);
+                allpassState = 0.0f;
+                allpassInput = 0.0f;
                 // Excite with brightness-filtered noise.
                 float filterState = 0.0f;
                 for (int index = 0; index < activeLength; ++index)
@@ -2571,9 +2603,16 @@ private:
             const auto current = delayLine[static_cast<std::size_t> (readIndex)];
             const auto next = delayLine[static_cast<std::size_t> (nextIndex)];
             const auto feedback = 0.9995f - damp * 0.01f;
-            auto value = 0.5f * (current + next) * feedback;
+            const auto averaged = 0.5f * (current + next) * feedback;
+            // First-order allpass supplies the fractional part of the period.
+            auto value = tuningCoefficient * averaged + allpassInput - tuningCoefficient * allpassState;
+            allpassInput = averaged;
+            allpassState = value;
             if (! std::isfinite (value))
+            {
                 value = 0.0f;
+                allpassInput = allpassState = 0.0f;
+            }
             delayLine[static_cast<std::size_t> (readIndex)] = value;
             readIndex = nextIndex;
             output[sample] = current * level;
@@ -2586,6 +2625,7 @@ private:
     int readIndex = 0;
     int activeLength = 480;
     float excitationFilter = 0.0f;
+    float tuningCoefficient = 0.0f, allpassState = 0.0f, allpassInput = 0.0f;
     bool triggerWasHigh = false;
     juce::Random random;
 };
@@ -2690,6 +2730,8 @@ private:
 
             const bool clockEdge = clock.tick (clockIn, sample, sampleRate);
             const bool external = clock.external (sampleRate);
+            if (external && clockEdge && clock.restart)
+                stepIndex = 7; // a Clock start/reset: this pulse is step 1
             if (external ? clockEdge : stepSamplesLeft <= 0.0)
             {
                 stepIndex = (stepIndex + 1) % 8;
@@ -2855,8 +2897,11 @@ private:
         const auto capacity = static_cast<std::size_t> (std::ceil (newSampleRate * 10.0)) + 4u;
         if (capacity != buffer.size())
         {
-            buffer.assign (capacity, 0.0f);
-            recordedLength.store (0, std::memory_order_relaxed);
+            // A device rate change keeps the take: resample it.
+            std::vector<float> resampled;
+            const auto newLength = resampleRecording (buffer, recordedLength.load (std::memory_order_relaxed), sampleRate, resampled, static_cast<int> (capacity), newSampleRate);
+            buffer = std::move (resampled);
+            recordedLength.store (juce::jmin (newLength, static_cast<int> (capacity) - 4), std::memory_order_relaxed);
         }
         sampleRate = newSampleRate;
     }
@@ -3127,9 +3172,26 @@ private:
     void prepareDsp (double newSampleRate, int) override
     {
         const auto capacity = static_cast<std::size_t> (std::ceil (newSampleRate * tapeSeconds)) + 4u;
+        bool resized = false;
         for (auto& track : tracks)
             if (track.size() != capacity)
-                track.assign (capacity, 0.0f);
+            {
+                // A device rate change keeps the tape: resample what is on it.
+                std::vector<float> resampled;
+                const auto used = track.empty() ? 0 : static_cast<int> (track.size()) - 4;
+                resampleRecording (track, used, sampleRate, resampled, static_cast<int> (capacity), newSampleRate);
+                track = std::move (resampled);
+                resized = true;
+            }
+        if (resized)
+        {
+            const auto scale = newSampleRate / juce::jmax (1.0, sampleRate);
+            for (auto& head : playhead)
+                head *= scale;
+            transport *= scale;
+            if (! tracks[0].empty() && sampleRate != newSampleRate)
+                recordedContentVersion.fetch_add (1, std::memory_order_relaxed);
+        }
         sampleRate = newSampleRate;
     }
 
@@ -4316,11 +4378,23 @@ private:
         const auto capacity = static_cast<std::size_t> (std::ceil (newSampleRate * maximumSeconds)) + 4u;
         if (loop.size() != capacity)
         {
-            loop.assign (capacity, 0.0f);
+            // A device rate change keeps the loop: resample it (the callback is stopped here).
+            const auto oldLength = lengthSamples.load (std::memory_order_relaxed);
+            std::vector<float> resampled;
+            const auto newLength = resampleRecording (loop, oldLength, previousRate, resampled, static_cast<int> (capacity), newSampleRate);
+            loop = std::move (resampled);
             previous.assign (capacity, 0.0f);
-            lengthSamples.store (0, std::memory_order_relaxed);
-            state.store (empty, std::memory_order_relaxed);
+            undoAvailable = false;
+            restoreRemaining = 0;
+            lengthSamples.store (juce::jmin (newLength, static_cast<int> (capacity) - 4), std::memory_order_relaxed);
+            playhead = 0.0;
+            if (newLength <= 0)
+                state.store (empty, std::memory_order_relaxed);
+            else if (state.load (std::memory_order_relaxed) == recording)
+                state.store (stopped, std::memory_order_relaxed);
+            contentVersion.fetch_add (1, std::memory_order_relaxed);
         }
+        previousRate = newSampleRate;
     }
 
     void resetDsp() noexcept override
@@ -4344,7 +4418,11 @@ private:
                     if (current == empty)
                     {
                         // Fresh loop; a bar count fixes the length up front.
-                        targetLength = bars > 0 ? juce::jmin (capacity, static_cast<int> (std::round (bars * 4.0 * 60.0 / juce::jmax (40.0f, bpm) * sampleRate))) : 0;
+                        // Bars from the knob's tempo; with a Clock running, Bars counts its pulses
+                        // instead (cable the Clock's Bar output for whole bars).
+                        const bool clocked = clock.external (sampleRate);
+                        targetLength = bars > 0 && ! clocked ? juce::jmin (capacity, static_cast<int> (std::round (bars * 4.0 * 60.0 / juce::jmax (40.0f, bpm) * sampleRate))) : 0;
+                        pulsesToClose = bars > 0 && clocked ? bars : 0;
                         recorded = 0;
                         playhead = 0.0;
                         state.store (recording, std::memory_order_release);
@@ -4522,7 +4600,10 @@ private:
 
         for (int sample = 0; sample < numSamples; ++sample)
         {
-            if (clock.tick (clockIn, sample, sampleRate) && queuedCommand != commandNone)
+            const bool pulse = clock.tick (clockIn, sample, sampleRate);
+            if (pulse && pulsesToClose > 0 && state.load (std::memory_order_relaxed) == recording && recorded > 0 && --pulsesToClose == 0)
+                closeLoop(); // the Bars-th pulse after recording started
+            if (pulse && queuedCommand != commandNone)
             {
                 applyCommand (queuedCommand, bpm, bars);
                 queuedCommand = commandNone;
@@ -4587,10 +4668,11 @@ private:
     }
 
     double sampleRate = 48000.0;
+    double previousRate = 48000.0;
     std::vector<float> loop, previous;
     double playhead = 0.0;
     int recorded = 0, targetLength = 0, sessionStart = 0, savedInSession = 0;
-    int sessionDirection = 1, lastOverdubSlot = -1;
+    int sessionDirection = 1, lastOverdubSlot = -1, pulsesToClose = 0;
     bool sessionFrozen = false;
     int restoreRemaining = 0, restoreCursor = 0, restoreDirection = 1;
     static constexpr int maxRestorePerBlock = 32768;
@@ -4822,8 +4904,11 @@ private:
                 r = l;
             const auto wobbleL = static_cast<float> (std::sin (juce::MathConstants<double>::twoPi * phase));
             const auto wobbleR = static_cast<float> (std::sin (juce::MathConstants<double>::twoPi * (phase + spread)));
-            const auto msL = juce::jmax (1.0f, centreMs + wobbleL * depth * 8.0f) * static_cast<float> (sampleRate * 0.001);
-            const auto msR = juce::jmax (1.0f, centreMs + wobbleR * depth * 8.0f) * static_cast<float> (sampleRate * 0.001);
+            // Swing up to 8 ms but never further below the centre than it can go:
+            // a short delay gets a narrower, still sinusoidal sweep instead of a flat bottom.
+            const auto swing = depth * juce::jmin (8.0f, centreMs - 1.0f);
+            const auto msL = (centreMs + wobbleL * swing) * static_cast<float> (sampleRate * 0.001);
+            const auto msR = (centreMs + wobbleR * swing) * static_cast<float> (sampleRate * 0.001);
             const auto delayedL = lines.read (0, msL);
             const auto delayedR = lines.read (1, msR);
             lines.push (0, l);
@@ -4999,6 +5084,10 @@ private:
         windowSize = frameSize * decimation;
         ring.assign (static_cast<std::size_t> (windowSize), 0.0f);
         writeIndex.store (0, std::memory_order_relaxed);
+        for (auto& frame : frames)
+            frame.assign (frameSize, 0.0f);
+        slots.store (0 | (1 << 2) | (2 << 4), std::memory_order_relaxed); // write 0, fresh 1, read 2
+        samplesToPublish = windowSize / 4;
     }
     void resetDsp() noexcept override {}
 
@@ -5015,6 +5104,29 @@ private:
             index = (index + 1) % windowSize;
         }
         writeIndex.store (index, std::memory_order_release);
+        samplesToPublish -= numSamples;
+        if (samplesToPublish <= 0 && ! frames[0].empty())
+        {
+            // Copy the ring oldest-first, decimated, into the write frame and swap it
+            // with the fresh one: the message thread only ever reads a finished frame.
+            samplesToPublish += windowSize / 4;
+            auto packed = slots.load (std::memory_order_relaxed);
+            auto& frame = frames[static_cast<std::size_t> (packed & 3)];
+            for (int i = 0; i < frameSize; ++i)
+            {
+                float sum = 0.0f;
+                for (int k = 0; k < decimation; ++k)
+                    sum += ring[static_cast<std::size_t> ((index + decimation * i + k) % windowSize)];
+                frame[static_cast<std::size_t> (i)] = sum / static_cast<float> (decimation);
+            }
+            // write <-> fresh, mark fresh as new
+            int next;
+            do
+            {
+                const auto write = packed & 3, fresh = (packed >> 2) & 3, read = (packed >> 4) & 3;
+                next = fresh | (write << 2) | (read << 4) | (1 << 6);
+            } while (! slots.compare_exchange_weak (packed, next, std::memory_order_acq_rel));
+        }
     }
 
     // Message thread. Cached for 40 ms so a busy UI does not repeat the work.
@@ -5024,18 +5136,24 @@ private:
         if (now - lastAnalysis < 40.0 || ring.empty())
             return;
         lastAnalysis = now;
-        // Snapshot, decimated to about 24 kHz (plenty for guitar and bass).
-        std::array<float, frameSize> frame {};
-        const auto start = writeIndex.load (std::memory_order_acquire);
+        // The newest frame the audio thread published (decimated to about 24 kHz).
+        auto packed = slots.load (std::memory_order_acquire);
+        if ((packed & (1 << 6)) != 0)
+        {
+            int next;
+            do
+            {
+                const auto write = packed & 3, fresh = (packed >> 2) & 3, read = (packed >> 4) & 3;
+                next = write | (read << 2) | (fresh << 4); // read <-> fresh, clear "new"
+            } while (! slots.compare_exchange_weak (packed, next, std::memory_order_acq_rel));
+            packed = next;
+        }
+        const auto& frame = frames[static_cast<std::size_t> ((packed >> 4) & 3)];
+        if (frame.size() != static_cast<std::size_t> (frameSize))
+            return;
         float energy = 0.0f;
         for (int i = 0; i < frameSize; ++i)
-        {
-            float sum = 0.0f;
-            for (int k = 0; k < decimation; ++k)
-                sum += ring[static_cast<std::size_t> ((start + decimation * i + k) % windowSize)];
-            frame[static_cast<std::size_t> (i)] = sum / static_cast<float> (decimation);
             energy += frame[static_cast<std::size_t> (i)] * frame[static_cast<std::size_t> (i)];
-        }
         if (energy / frameSize < 1.0e-6f) // silence
         {
             detectedHz = 0.0f;
@@ -5105,6 +5223,9 @@ private:
     double sampleRate = 48000.0;
     std::vector<float> ring;
     std::atomic<int> writeIndex { 0 };
+    std::array<std::vector<float>, 3> frames;   // triple buffer: write / fresh / read
+    mutable std::atomic<int> slots { 0 | (1 << 2) | (2 << 4) };
+    int samplesToPublish = 1024;
     mutable double lastAnalysis = 0.0;
     mutable float detectedHz = 0.0f;
     mutable int cents = 0;
@@ -5184,7 +5305,7 @@ private:
     {
         beatPhase = 0.0;
         beatCount = 0;
-        beatPulse = eighthPulse = barPulse = 0;
+        beatPulse = eighthPulse = barPulse = restartPulse = 0;
         primed = false;
         beatForUi.store (0, std::memory_order_relaxed);
     }
@@ -5212,7 +5333,7 @@ private:
                 {
                     // The first sample after start / reset is the downbeat.
                     primed = true;
-                    beatPulse = eighthPulse = barPulse = pulseLength;
+                    beatPulse = eighthPulse = barPulse = restartPulse = pulseLength;
                     beatForUi.store (0, std::memory_order_relaxed);
                 }
                 else
@@ -5232,9 +5353,13 @@ private:
                     }
                 }
             }
-            beat[sample] = beatPulse > 0 ? 1.0f : 0.0f;
-            eighth[sample] = eighthPulse > 0 ? 1.0f : 0.0f;
-            bar[sample] = barPulse > 0 ? 1.0f : 0.0f;
+            // Regular pulses are 0.8 high; the downbeat after a start or reset is
+            // 1.0, which tells followers to go back to their first step.
+            const auto height = restartPulse > 0 ? 1.0f : 0.8f;
+            beat[sample] = beatPulse > 0 ? height : 0.0f;
+            eighth[sample] = eighthPulse > 0 ? height : 0.0f;
+            bar[sample] = barPulse > 0 ? height : 0.0f;
+            if (restartPulse > 0) --restartPulse;
             if (beatPulse > 0) --beatPulse;
             if (eighthPulse > 0) --eighthPulse;
             if (barPulse > 0) --barPulse;
@@ -5244,7 +5369,7 @@ private:
     double sampleRate = 48000.0;
     double beatPhase = 0.0;
     int beatCount = 0;
-    int beatPulse = 0, eighthPulse = 0, barPulse = 0;
+    int beatPulse = 0, eighthPulse = 0, barPulse = 0, restartPulse = 0;
     bool primed = false;
     std::atomic<bool> running { true };
     std::atomic<bool> resetRequested { false };

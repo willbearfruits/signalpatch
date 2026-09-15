@@ -53,30 +53,37 @@ dimensions); every critical and high one is fixed, as are most mediums.
   looper command could not be cancelled; Clock RUN resumed mid-beat; lost
   note-offs (queue full or audio stopped) now release every note.
 
-**Still open from pass 3** (medium/low, reachable but not stage-critical):
+**Closed in the follow-up** (the items first listed as still open):
 
-- Changing the device sample rate clears recorded looper and 4-track audio
-  (resampling on load exists; a live rate change does not preserve it).
-- Clock RESET does not realign drum machine and sequencer steps (they stay
-  on their step, just re-timed).
-- A replugged MIDI controller may not be reopened, and SysEx feedback can
-  keep targeting the dead output.
-- When every preferred audio device is rejected the app ends offline and
-  saves that choice.
-- Slot glides: undo records map/group changes but not the glided knob
-  values; properties the target slot omits are not reset; an undo during a
-  multi-module drag can split the gesture.
-- Stereo Chorus sweep flattens at very short delay and high depth; looper
-  Bars ignores a connected Clock's tempo; pluck high notes are slightly
-  sharp (integer delay length); the tuner reads its ring buffer without a
-  lock (benign torn read of floats).
-- A compound move gesture stays open if a drag is abandoned outside the
-  window.
+- A live sample-rate change resamples looper, 4-track and sampler audio
+  instead of clearing it (tested 48 -> 96 kHz).
+- The Clock's first pulse after a start or reset is full height (1.0,
+  regular pulses 0.8); drum machine and step sequencer go back to step 1 on
+  it. With a Clock running, looper Bars counts its pulses (cable the Bar
+  output for whole bars).
+- MIDI: an input that disappears and returns is closed and reopened;
+  controller feedback outputs whose device is gone are dropped and a hello
+  always opens a fresh port.
+- If every preferred audio device is rejected on first launch, the device
+  that was open before is restored, and "offline" is never saved as a
+  device choice.
+- A slot glide is one undo step with everything it changes (bypass, extra
+  state, names, rack and board positions, groups, MIDI map and every glided
+  knob), and properties the slot leaves out are reset instead of kept;
+  undo/redo first end any drag or running glide, so a gesture cannot be
+  split.
+- Stereo Chorus sweeps within the room below its centre delay (no flat
+  bottom); the pluck's loop is tuned with a first-order allpass for the
+  fractional period (within 3 cents from A2 to A4, tested); the tuner reads
+  frames the audio thread publishes through a lock-free triple buffer.
+- Losing window focus ends any open drag and its gesture.
 
 New tests from this pass: looper per-slot overdub and exact undo at half,
 reverse and 200 %; 4-track sync with track 1 stopped, single monitoring and
 take versions; stereo bypass; undo restoring MIDI bindings and groups; a
-take saved at 48 kHz reopened at 96 kHz. 44 tests.
+take saved at 48 kHz reopened at 96 kHz; live rate change keeping
+recordings; pluck tuning; Clock restart realigning the drum machine; looper
+Bars counting clock pulses. 46 tests.
 
 ## Pass 2 — 2026-07-11
 

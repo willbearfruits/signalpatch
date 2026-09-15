@@ -192,6 +192,12 @@ int main (int argc, char** argv)
             rackFor (w)->key (key, true, mods);
     });
     glfwSetCharCallback (window, [] (GLFWwindow* w, unsigned int codepoint) { rackFor (w)->character (codepoint); });
+    glfwSetWindowFocusCallback (window, [] (GLFWwindow* w, int focused)
+    {
+        if (! focused)
+            if (auto* view = rackFor (w))
+                view->focusLost();
+    });
     glfwSetWindowCloseCallback (window, [] (GLFWwindow* w)
     {
         glfwSetWindowShouldClose (w, GLFW_FALSE); // the rack decides after the unsaved-changes question

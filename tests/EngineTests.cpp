@@ -1657,6 +1657,72 @@ void testLooperRecordsClosesOverdubsAndUndoes()
     expect (node->statusText().startsWith ("EMPTY"), "clear should empty the loop");
 }
 
+void testLiveRateChangeKeepsRecordings()
+{
+    // Looper, 4-track and sampler keep their audio when the device switches from 48 to 96 kHz.
+    auto looper = createNodeProcessor (NodeKind::looper);
+    looper->prepare (48000.0, 64);
+    juce::AudioBuffer<float> take (1, 24000);
+    for (int i = 0; i < take.getNumSamples(); ++i) take.setSample (0, i, 0.5f * std::sin (static_cast<float> (i) * 0.02f));
+    looper->importAudioContent (take);
+    looper->prepare (96000.0, 64);
+    const auto after = looper->exportAudioContent().getNumSamples();
+    expect (std::abs (after - 48000) < 16, "a half-second loop must still be half a second at 96 kHz, got " + std::to_string (after));
+
+    auto deck = createNodeProcessor (NodeKind::fourTrack);
+    deck->prepare (48000.0, 64);
+    juce::AudioBuffer<float> tapes (4, 48000);
+    tapes.clear();
+    for (int i = 0; i < 48000; ++i) tapes.setSample (2, i, 0.25f);
+    deck->importAudioContent (tapes);
+    deck->prepare (96000.0, 64);
+    const auto deckAfter = deck->exportAudioContent();
+    expect (deckAfter.getNumChannels() == 4 && std::abs (deckAfter.getNumSamples() - 96000) < 32, "one second on track 3 must stay one second, got " + std::to_string (deckAfter.getNumSamples()));
+    expect (std::abs (deckAfter.getSample (2, 50000) - 0.25f) < 0.01f, "the tape content must survive the resample");
+}
+
+void testPluckIsInTune()
+{
+    auto pluck = createNodeProcessor (NodeKind::pluck);
+    const int block = 256;
+    pluck->prepare (48000.0, block);
+    const auto triggerPort = 0;
+    std::string report;
+    double worst = 0.0;
+    for (const auto semitones : { 0.0f, 12.0f, 19.0f, 24.0f }) // A2, A3, E4, A4 (the knob tops out at +24)
+    {
+        pluck->reset();
+        pluck->getParameter (0).setValue (semitones);
+        pluck->getParameter (1).setValue (0.0f); // no extra damping
+        juce::AudioBuffer<float> inputs (pluck->getNumInputPorts(), block), outputs (1, block);
+        std::vector<float> signal;
+        inputs.clear();
+        for (int b = 0; b < 60; ++b) pluck->render (inputs, outputs, block); // let the Pitch knob's smoother arrive before plucking
+        for (int b = 0; b < 40; ++b)
+        {
+            inputs.clear();
+            if (b == 0) for (int i = 0; i < 32; ++i) inputs.setSample (triggerPort, i, 1.0f);
+            for (int i = 0; i < block; ++i) inputs.setSample (0, i, inputs.getSample (triggerPort, i));
+            pluck->render (inputs, outputs, block);
+            for (int i = 0; i < block; ++i) signal.push_back (outputs.getSample (0, i));
+        }
+        // Period by autocorrelation around the expected lag, with parabolic refinement.
+        const auto expectedHz = 110.0 * std::pow (2.0, semitones / 12.0);
+        const auto expectedLag = 48000.0 / expectedHz;
+        const int from = static_cast<int> (expectedLag * 0.8), to = static_cast<int> (expectedLag * 1.2) + 2;
+        const int start = 2048, length = 4096;
+        auto correlation = [&] (int lag) { double sum = 0.0; for (int i = 0; i < length; ++i) sum += signal[static_cast<std::size_t> (start + i)] * signal[static_cast<std::size_t> (start + i + lag)]; return sum; };
+        int best = from; double bestValue = -1.0e9;
+        for (int lag = from; lag <= to; ++lag) { const auto c = correlation (lag); if (c > bestValue) { bestValue = c; best = lag; } }
+        const auto c0 = correlation (best - 1), c1 = correlation (best), c2 = correlation (best + 1);
+        const auto refined = best + 0.5 * (c0 - c2) / (c0 - 2.0 * c1 + c2);
+        const auto cents = 1200.0 * std::log2 (expectedLag / refined);
+        report += std::to_string (static_cast<int> (semitones)) + " st: " + std::to_string (cents) + " c; ";
+        worst = std::max (worst, std::abs (cents));
+    }
+    expect (worst < 3.0, "pluck tuning: " + report);
+}
+
 void testRecordedAudioAtAnotherRateKeepsItsLength()
 {
     const auto temp = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("signalpatch-rate-test-" + juce::Uuid().toString());
@@ -2123,7 +2189,7 @@ void testClockPulsesAndFollowers()
     {
         drumInputs.clear();
         for (int i = 0; i < 16; ++i)
-            drumInputs.setSample (drumClockPort, i, 1.0f);
+            drumInputs.setSample (drumClockPort, i, 0.8f); // regular pulses are 0.8 high
         drums->render (drumInputs, drumOut, block);
         drumInputs.clear();
         drums->render (drumInputs, drumOut, block);
@@ -2136,6 +2202,20 @@ void testClockPulsesAndFollowers()
         drums->render (drumInputs, drumOut, block); // four more seconds: the clock is gone, the internal tempo returns
     expect (drums->currentStep() != (startStep + 4) % 8, "internal stepping should resume after four silent seconds");
 
+    // A full-height pulse (Clock start/reset) puts the grid back on step 1 whatever step it was on.
+    for (int pulse = 0; pulse < 3; ++pulse)
+    {
+        drumInputs.clear();
+        for (int i = 0; i < 16; ++i) drumInputs.setSample (drumClockPort, i, 0.8f);
+        drums->render (drumInputs, drumOut, block);
+        drumInputs.clear();
+        drums->render (drumInputs, drumOut, block);
+    }
+    drumInputs.clear();
+    for (int i = 0; i < 16; ++i) drumInputs.setSample (drumClockPort, i, 1.0f);
+    drums->render (drumInputs, drumOut, block);
+    expect (drums->currentStep() == 0, "a restart pulse must realign the drum machine to step 1, got " + std::to_string (drums->currentStep()));
+
     // The looper waits for the pulse when a clock is present.
     auto looper = createNodeProcessor (NodeKind::looper);
     looper->prepare (48000.0, block);
@@ -2143,7 +2223,7 @@ void testClockPulsesAndFollowers()
     juce::AudioBuffer<float> loopInputs (looper->getNumInputPorts(), block), loopOut (1, block);
     loopInputs.clear();
     for (int i = 0; i < 16; ++i)
-        loopInputs.setSample (looperClockPort, i, 1.0f);
+        loopInputs.setSample (looperClockPort, i, 0.8f);
     looper->render (loopInputs, loopOut, block); // one pulse: the clock is now "present"
     loopInputs.clear();
     looper->render (loopInputs, loopOut, block);
@@ -2155,6 +2235,32 @@ void testClockPulsesAndFollowers()
         loopInputs.setSample (looperClockPort, i, 1.0f);
     looper->render (loopInputs, loopOut, block);
     expect (looper->uiToggleState ("rec"), "recording should start on the pulse");
+
+    // With a Clock, Bars counts its pulses: Bars 2 closes the loop on the second pulse after the start.
+    auto barLooper = createNodeProcessor (NodeKind::looper);
+    barLooper->prepare (48000.0, block);
+    barLooper->getParameter (5).setValue (2.0f);
+    const auto barPort = barLooper->getNumInputPorts() - 1;
+    juce::AudioBuffer<float> barIn (barLooper->getNumInputPorts(), block), barOut (1, block);
+    auto pulseBlock = [&] (bool pulse)
+    {
+        barIn.clear();
+        for (int i = 0; i < block; ++i) barIn.setSample (0, i, 0.3f);
+        if (pulse) for (int i = 0; i < 16; ++i) barIn.setSample (barPort, i, 0.8f);
+        barLooper->render (barIn, barOut, block);
+    };
+    for (int b = 0; b < 30; ++b) pulseBlock (false); // settle the Bars smoother
+    pulseBlock (true);                                // the clock is present
+    barLooper->handleUiCommand ("rec");
+    pulseBlock (false);                               // queued
+    pulseBlock (true);                                // recording starts on this pulse
+    expect (barLooper->uiToggleState ("rec"), "bar looper should be recording");
+    for (int b = 0; b < 10; ++b) pulseBlock (false);
+    pulseBlock (true);                                // first bar
+    expect (barLooper->statusText().startsWith ("REC"), "one pulse in: still recording: " + barLooper->statusText().toStdString());
+    for (int b = 0; b < 10; ++b) pulseBlock (false);
+    pulseBlock (true);                                // second bar closes it
+    expect (barLooper->statusText().startsWith ("PLAY"), "the second pulse must close a 2-bar loop: " + barLooper->statusText().toStdString());
 }
 
 void testFourTrackMonitorsSyncsAndVarispeedsPerTrack()
@@ -2372,6 +2478,8 @@ int main()
         { "looper records, closes, overdubs, undoes", testLooperRecordsClosesOverdubsAndUndoes },
         { "looper overdubs once per slot and undoes at any speed", testLooperOverdubOncePerSlotAndUndoAtAnySpeed },
         { "recorded audio at another rate keeps its length", testRecordedAudioAtAnotherRateKeepsItsLength },
+        { "a live sample-rate change keeps recordings", testLiveRateChangeKeepsRecordings },
+        { "pluck is in tune up to A4", testPluckIsInTune },
         { "4-track sync with track 1 stopped, no doubled monitor, take versions", testFourTrackSyncWithTrackOneStoppedAndNoDoubledMonitor },
         { "stereo bypass keeps both sides", testStereoBypassKeepsBothSides },
         { "recorded audio saves and loads with the patch", testRecordedAudioSavesAndLoadsWithThePatch },

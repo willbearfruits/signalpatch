@@ -48,6 +48,7 @@ public:
     void showBoard() { setMode (Mode::board); }
     /** Close request from the window or Ctrl+Q: asks about unsaved changes first. */
     void requestQuit();
+    void focusLost();
 
 private:
     struct Button
@@ -161,6 +162,9 @@ private:
     // from the old patch is dropped, and callbacks that captured an id check
     // the epoch before touching a node.
     void patchReplaced();
+    void endInteractions();
+    bool undoNow();
+    bool redoNow();
     int patchEpoch = 0;
     bool swallowSpaceCharacter = false;
     /** Runs proceed now, or after asking what to do with unsaved changes. */
