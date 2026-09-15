@@ -73,16 +73,21 @@ timestamped event on a bounded queue into the callback.
 - **MIDI learn** (done 2026-09-15) on knobs, stomps, module buttons, group
   pedals and rig slots; bindings saved in the patch, shown on the Board and
   in the rack, adopted by slot glides.
-- **Gamepad map** (first cut done 2026-09-15): d-pad walks pedals, A
-  stomps, B picks the knob, the left stick turns it, LB/RB change slot, X
-  undoes, Y fits, Start toggles views, Back mutes. Still open: menus, the
-  browser and prompts by gamepad, and adding modules from it.
+- **Gamepad map** (done 2026-09-15): d-pad walks pedals, A stomps, B picks
+  the knob, the left stick turns it, LB/RB change slot, X undoes, Y fits,
+  Start toggles views, Back mutes; the stick clicks open the board and pedal
+  menus (the board menu adds modules); inside a menu, browser or prompt the
+  d-pad, A and B are arrows, Enter and Escape. Menus also walk by keyboard,
+  and the Menu key opens the context menu at the pointer. Untested on a
+  real pad so far (none on the dev desk).
+- **Relative encoders** (done 2026-09-15): a mapping flag, "MIDI learn as
+  relative encoder" on any knob.
 - **The controller**: a purpose-built foot controller (ESP32-S3, class-
   compliant USB MIDI so any DAW also understands it): footswitches with LED
-  feedback, expression inputs, encoders, bank buttons. SignalPatch sends
-  LED/label state back over SysEx so the pedal shows what the Board shows.
-  Firmware lives in its own repo; this repo defines the protocol
-  (`docs/CONTROLLER.md`).
+  feedback, expression inputs, encoders, bank buttons. SignalPatch side done
+  2026-09-15: hello handshake, LED/label/slot/rig-name feedback over SysEx,
+  diffed on the engine timer, verified through Midi Through. Firmware lives
+  in its own repo; this repo defines the protocol (`docs/CONTROLLER.md`).
 
 Exit: a whole song with hands on the guitar only.
 
@@ -114,7 +119,11 @@ demo.
   spacing) built on the global scale factor, selectable from the AUDIO/
   settings menu and by `--profile handheld`. Deliberately later than the
   scale factor itself.
-- **Gamepad-only recovery** from every state (menus, browser, prompts).
+- **Gamepad-only recovery** from every state: menus, browser and prompts
+  are covered; still missing: the palette, the AUDIO/FILE menus (hold a
+  trigger + stick click?), and typing a name without a keyboard.
+- **Realtime scheduling check** on the target OS image: the HUD flags a
+  callback thread that is not SCHED_FIFO/RR (rtkit or realtime-privileges).
 - Packaging (AppImage/Flatpak, Windows zip), CI for the app on Linux and
   Windows.
 
