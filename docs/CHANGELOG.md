@@ -43,9 +43,13 @@ UI
   and gets an on-screen keyboard in prompts.
 - Global UI scale (Ctrl +/-/0, `--scale=`, `SIGNALPATCH_SCALE`).
 - `--board`, `--kiosk`, `--unmute`, `--help`.
+- OpenGL through a vendored glad loader, GLFW fetched when the system has
+  none: the app builds on Windows too (CI uploads SignalPatch.exe and the
+  Linux binary as artifacts).
 
 Tests: 34 headless engine tests including the allocation trap over the
-worst-case graph with MIDI notes dispatched, ASan/UBSan clean.
+worst-case graph with MIDI notes dispatched; ASan/UBSan and TSan clean;
+30-minute soak re-run.
 
 ## v0.2.1 — 2026-09-15
 
