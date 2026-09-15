@@ -151,6 +151,15 @@ into other rigs, shared with other people. Waits for stereo so ports are
 defined once. (Daisypatcher has subpatches already; the same shape will
 make the `.dpatch` export in 0.8 line up.)
 
+## 0.7b — The inspector (after the node-by-node review)
+
+Every node gets a pass with notes from playing it; then an inspector panel
+lets the ranges, defaults, skews and units of a node's knobs be edited per
+instance (saved with the patch), so a "Speed 25-400 %" can become "80-120
+%" on the pedal that needs finesse. The Pitch control inputs on the synth
+and pluck (48 st per unit, matching MIDI Note) are the first result of
+that review.
+
 ## 0.8 — Hardware: the controller and the rig that leaves the computer
 
 Two boards, two jobs, one bridge: **Daisypatcher** (the visual patcher for
