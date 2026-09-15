@@ -117,6 +117,16 @@ ctest --test-dir build --output-on-failure
 PIPEWIRE_QUANTUM=128/48000 pw-jack ./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch  # PipeWire
 ```
 
+`packaging/linux/run-from-build.sh` does the PipeWire line for you; point a
+desktop entry at it to launch from the app menu without installing:
+
+```sh
+sed "s|^Exec=.*|Exec=$PWD/packaging/linux/run-from-build.sh %f|" \
+  packaging/linux/io.github.willbearfruits.SignalPatch.desktop \
+  > ~/.local/share/applications/io.github.willbearfruits.SignalPatch.desktop
+cp packaging/linux/io.github.willbearfruits.SignalPatch.svg ~/.local/share/icons/hicolor/scalable/apps/
+```
+
 If the status bar says **NO RT PRIORITY**, the audio thread runs under the
 ordinary scheduler and every busy moment on the desktop becomes an xrun. On
 Arch: `pacman -S realtime-privileges && gpasswd -a $USER realtime`, then log
