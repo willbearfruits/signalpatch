@@ -86,6 +86,7 @@ juce::String nodeKindName (NodeKind kind)
         case NodeKind::stereoReverb:        return "Stereo Reverb";
         case NodeKind::tuner:               return "Tuner";
         case NodeKind::midiNote:            return "MIDI Note";
+        case NodeKind::clock:               return "Clock";
     }
 
     return "Unknown";
@@ -142,6 +143,7 @@ juce::String nodeKindKey (NodeKind kind)
         case NodeKind::stereoReverb:         return "stereo-reverb";
         case NodeKind::tuner:                return "tuner";
         case NodeKind::midiNote:             return "midi-note";
+        case NodeKind::clock:                return "clock";
     }
 
     return "unknown";
@@ -163,7 +165,8 @@ std::optional<NodeKind> nodeKindFromKey (const juce::String& key)
                              NodeKind::macro, NodeKind::spectralFollower, NodeKind::script,
                              NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal,
                              NodeKind::cabinet, NodeKind::looper, NodeKind::pan, NodeKind::stereoMerge,
-                             NodeKind::stereoDelay, NodeKind::stereoChorus, NodeKind::stereoReverb, NodeKind::tuner, NodeKind::midiNote })
+                             NodeKind::stereoDelay, NodeKind::stereoChorus, NodeKind::stereoReverb, NodeKind::tuner, NodeKind::midiNote,
+                             NodeKind::clock })
         if (key == nodeKindKey (kind))
             return kind;
 

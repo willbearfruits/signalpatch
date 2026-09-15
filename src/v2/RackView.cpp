@@ -235,6 +235,11 @@ void RackView::rebuildLayouts()
             case NodeKind::drumMachine:
                 button ("TAP", "tap", palette::control);
                 break;
+            case NodeKind::clock:
+                button ("RUN", "run", palette::okay);
+                button ("TAP", "tap", palette::control);
+                button ("RESET", "reset", palette::mutedText);
+                break;
             case NodeKind::looper:
                 button ("REC", "rec", palette::warning);
                 button ("PLAY", "play", palette::okay);

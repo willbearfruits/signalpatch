@@ -83,6 +83,10 @@ timestamped event on a bounded queue into the callback.
   real pad so far (none on the dev desk).
 - **Relative encoders** (done 2026-09-15): a mapping flag, "MIDI learn as
   relative encoder" on any knob.
+- **Clock** (done 2026-09-15): one tempo for the drum machine, the
+  sequencer and the looper's transport (loops start/close on the bar); tap
+  tempo on the Clock and on the drum machine. MIDI clock in (0xF8) is a
+  natural follow-up.
 - **The controller**: a purpose-built foot controller (ESP32-S3, class-
   compliant USB MIDI so any DAW also understands it): footswitches with LED
   feedback, expression inputs, encoders, bank buttons. SignalPatch side done

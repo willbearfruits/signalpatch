@@ -68,6 +68,7 @@ GLFW window (native Wayland when available) + OpenGL 3.3 + NanoVG; JUCE headless
 - Board state in the document: `NodeModel::boardPosition` (bx/by), `PedalGroup`s (`"groups"`).
 - Stereo is L/R port pairs (Pan, Stereo Merge/Delay/Chorus/Reverb, cabinet `R (IR B)`); buffers stay mono. The rack cables the R pair in the same drag when an "... L" output meets an "... L" input.
 - Looper (undo kept RT-safe by saving pre-overdub samples during the pass), Tuner (YIN on the message thread over a ring-buffer snapshot), drum machine `tap` command.
+- Clock node + `ClockFollower` (Processors.cpp): drum machine, step sequencer and looper carry a trailing "Clock" control input (added last so saved cable indices stay valid); pulses within the last 4 s make the follower external. Add the port last on any new follower.
 - `MidiMapping` extras: `relative` (CC 64±n nudges), `low`/`high` (expression span, `normalised()`); `ControllerFeedback.*` builds the SysEx state (LEDs/labels/slot/rig) for the foot controller, `PatchEngine` opens a same-named output after a controller hello and diffs on its timer (`docs/CONTROLLER.md`).
 - `PatchHistory::beginCompoundGesture` groups several edits (multi-module drag/delete) into one undo step; `closeGesture` ends it.
 - The callback thread's scheduler is sampled once (`EngineStatus::realtimeThread`); the HUD warns when it is not SCHED_FIFO/RR (needs rtkit or realtime-privileges on Linux).

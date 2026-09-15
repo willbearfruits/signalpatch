@@ -27,6 +27,11 @@ Engine
   Chorus, Stereo Reverb, a right output on the Cabinet (IR B); one drag
   cables an L/R pair.
 - Tuner node (YIN on the message thread); drum machine tap tempo.
+- Clock node (tempo, tap, run/reset; Beat / Eighth / Bar pulses). The drum
+  machine and the step sequencer step on a Clock cabled into their new
+  Clock input; the looper's REC/PLAY wait for the next pulse while a clock
+  runs, so loops start and close on the bar. Four seconds of silence hand
+  control back to each node's own tempo.
 - Undo: compound gestures (a multi-module drag or delete is one step).
 - HUD warns **NO RT PRIORITY** when the callback thread is not
   SCHED_FIFO/RR (install rtkit or realtime-privileges).

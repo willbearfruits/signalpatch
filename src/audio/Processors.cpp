@@ -10,6 +10,38 @@
 
 namespace signalpatch
 {
+
+// A follower's view of a Clock input: rising edges, and whether pulses have
+// arrived recently enough to own the stepping (four seconds of silence hands
+// control back to the node's own tempo). Audio-thread only.
+struct ClockFollower
+{
+    int port = -1;             // input port index, -1 when the node has none
+    bool wasHigh = false;
+    int samplesSincePulse = 1 << 30;
+
+    void reset() noexcept { wasHigh = false; samplesSincePulse = 1 << 30; }
+
+    /** Call once per sample; returns true on a rising edge. */
+    bool tick (const float* clock, int sample, double sampleRate) noexcept
+    {
+        const bool high = clock != nullptr && clock[sample] > 0.5f;
+        const bool edge = high && ! wasHigh;
+        wasHigh = high;
+        if (edge)
+            samplesSincePulse = 0;
+        else if (samplesSincePulse < (1 << 30))
+            ++samplesSincePulse;
+        juce::ignoreUnused (sampleRate);
+        return edge;
+    }
+    [[nodiscard]] bool external (double sampleRate) const noexcept { return samplesSincePulse < static_cast<int> (sampleRate * 4.0); }
+    [[nodiscard]] const float* pointer (const juce::AudioBuffer<float>& inputs) const noexcept
+    {
+        return port >= 0 && inputs.getNumChannels() > port ? inputs.getReadPointer (port) : nullptr;
+    }
+};
+
 namespace
 {
 juce::NormalisableRange<float> skewedRange (float minimum, float maximum, float centre, float interval = 0.0f)
@@ -557,6 +589,8 @@ public:
         for (int step = 0; step < 8; ++step)
             addParameter ("step-" + juce::String (step + 1), "Step " + juce::String (step + 1), "",
                           juce::NormalisableRange<float> (-1.0f, 1.0f, 0.01f), defaults[static_cast<std::size_t> (step)], 0.25f);
+        addInputPort ("Clock", SignalType::control); // last, so older cables keep their indices
+        clock.port = getNumInputPorts() - 1;
     }
 
     int currentStep() const noexcept override
@@ -572,6 +606,7 @@ private:
         stepPhase = 0.0;
         stepIndex = 0;
         smoothedOutput = 0.0f;
+        clock.reset();
         activeStep.store (0, std::memory_order_relaxed);
     }
 
@@ -580,6 +615,7 @@ private:
                      int numSamples) noexcept override
     {
         auto* output = outputs.getWritePointer (0);
+        const auto* clockIn = clock.pointer (inputs);
         for (int sample = 0; sample < numSamples; ++sample)
         {
             const auto rate = parameterValue (0, inputs, sample);
@@ -589,10 +625,24 @@ private:
             const auto coefficient = std::exp (-1.0 / (sampleRate * glideTime));
             smoothedOutput = static_cast<float> (coefficient * smoothedOutput + (1.0 - coefficient) * target);
             output[sample] = smoothedOutput;
-            stepPhase += rate / sampleRate;
-            if (stepPhase >= 1.0)
+            const bool clockEdge = clock.tick (clockIn, sample, sampleRate);
+            bool advance = false;
+            if (clock.external (sampleRate))
             {
-                stepPhase -= 1.0;
+                advance = clockEdge;
+                stepPhase = 0.0;
+            }
+            else
+            {
+                stepPhase += rate / sampleRate;
+                if (stepPhase >= 1.0)
+                {
+                    stepPhase -= 1.0;
+                    advance = true;
+                }
+            }
+            if (advance)
+            {
                 stepIndex = (stepIndex + 1) % 8;
                 activeStep.store (stepIndex, std::memory_order_relaxed);
             }
@@ -603,6 +653,7 @@ private:
     double stepPhase = 0.0;
     int stepIndex = 0;
     float smoothedOutput = 0.0f;
+    ClockFollower clock;
     std::atomic<int> activeStep { 0 };
 };
 
@@ -2442,6 +2493,10 @@ public:
         for (int step = 0; step < 8; ++step)
             addParameter ("h" + juce::String (step + 1), "H" + juce::String (step + 1), "",
                           juce::NormalisableRange<float> (0.0f, 1.0f, 1.0f), hatDefaults[step], 0.0f, false);
+        // Last input port so older cables keep their indices: a Clock's
+        // pulses step the grid instead of the internal tempo while they arrive.
+        addInputPort ("Clock", SignalType::control);
+        clock.port = getNumInputPorts() - 1;
     }
 
     int currentStep() const noexcept override
@@ -2475,6 +2530,7 @@ public:
 private:
     std::array<double, 4> tapTimes {};
     int tapCount = 0;
+    ClockFollower clock;
 
     void prepareDsp (double newSampleRate, int) override
     {
@@ -2486,6 +2542,7 @@ private:
     {
         stepSamplesLeft = 0.0;
         stepIndex = 7;
+        clock.reset();
         kickPhase = 0.0;
         kickEnvelope = 0.0f;
         snareEnvelope = 0.0f;
@@ -2500,6 +2557,7 @@ private:
                      int numSamples) noexcept override
     {
         auto* output = outputs.getWritePointer (0);
+        const auto* clockIn = clock.pointer (inputs);
         for (int sample = 0; sample < numSamples; ++sample)
         {
             const auto bpm = parameterValue (0, inputs, sample);
@@ -2508,13 +2566,20 @@ private:
             const auto snareLevel = juce::Decibels::decibelsToGain (parameterValue (3, inputs, sample));
             const auto hatLevel = juce::Decibels::decibelsToGain (parameterValue (4, inputs, sample));
 
-            if (stepSamplesLeft <= 0.0)
+            const bool clockEdge = clock.tick (clockIn, sample, sampleRate);
+            const bool external = clock.external (sampleRate);
+            if (external ? clockEdge : stepSamplesLeft <= 0.0)
             {
                 stepIndex = (stepIndex + 1) % 8;
                 activeStep.store (stepIndex, std::memory_order_relaxed);
-                const auto baseSamples = sampleRate * 60.0 / juce::jmax (40.0f, bpm) * 0.5; // eighths
-                const auto swung = stepIndex % 2 == 0 ? 1.0 + swing * 0.5 : 1.0 - swing * 0.5;
-                stepSamplesLeft += baseSamples * swung;
+                if (external)
+                    stepSamplesLeft = 0.0; // the next internal step is due the moment the clock goes away
+                else
+                {
+                    const auto baseSamples = sampleRate * 60.0 / juce::jmax (40.0f, bpm) * 0.5; // eighths
+                    const auto swung = stepIndex % 2 == 0 ? 1.0 + swing * 0.5 : 1.0 - swing * 0.5;
+                    stepSamplesLeft += baseSamples * swung;
+                }
 
                 if (getParameter (5 + stepIndex).getValue() > 0.5f)
                 {
@@ -2529,7 +2594,8 @@ private:
                 if (getParameter (21 + stepIndex).getValue() > 0.5f)
                     hatEnvelope = 1.0f;
             }
-            stepSamplesLeft -= 1.0;
+            if (! external)
+                stepSamplesLeft -= 1.0;
 
             // Kick: exponentially falling sine sweep.
             const auto kickFrequency = 45.0 + 110.0 * kickEnvelope * kickEnvelope;
@@ -3935,6 +4001,10 @@ public:
         addParameter ("speed", "Speed", "%", juce::NormalisableRange<float> (25.0f, 200.0f, 0.1f), 100.0f, 0.35f);
         addParameter ("bpm", "Tempo", "bpm", juce::NormalisableRange<float> (40.0f, 240.0f, 0.1f), 120.0f, 0.25f, false);
         addParameter ("bars", "Bars", "", juce::NormalisableRange<float> (0.0f, 8.0f, 1.0f), 0.0f, 0.0f, false);
+        // While a Clock feeds this port, REC / PLAY wait for its next pulse so
+        // loops start and close on the beat (a bar pulse gives whole bars).
+        addInputPort ("Clock", SignalType::control);
+        clock.port = getNumInputPorts() - 1;
     }
 
     bool handleUiCommand (const juce::String& command) override
@@ -3970,6 +4040,8 @@ public:
     {
         const auto len = lengthSamples.load (std::memory_order_relaxed);
         const auto seconds = juce::String (len / juce::jmax (1.0, sampleRate), 1) + "s";
+        if (queuedForUi.load (std::memory_order_relaxed))
+            return "ON THE NEXT PULSE...";
         switch (state.load (std::memory_order_relaxed))
         {
             case empty:      return "EMPTY - REC to start a loop";
@@ -4012,6 +4084,9 @@ private:
     enum State { empty = 0, recording, playing, overdubbing, stopped };
     enum Command { commandNone = 0, commandRecord, commandPlay, commandUndo, commandClear };
     static constexpr int maximumSeconds = 60;
+    ClockFollower clock;
+    Command queuedCommand = commandNone;
+    std::atomic<bool> queuedForUi { false };
 
     void prepareDsp (double newSampleRate, int) override
     {
@@ -4030,6 +4105,9 @@ private:
     {
         playhead = 0.0;
         playheadForUi.store (0.0, std::memory_order_relaxed);
+        clock.reset();
+        queuedCommand = commandNone;
+        queuedForUi.store (false, std::memory_order_relaxed);
     }
 
     void applyCommand (Command command, float bpm, int bars) noexcept
@@ -4140,14 +4218,34 @@ private:
         }
         const auto bpm = parameterValue (4, inputs, 0);
         const auto bars = static_cast<int> (std::round (parameterValue (5, inputs, 0)));
+        const auto* clockIn = clock.pointer (inputs);
         if (const auto command = static_cast<Command> (pendingCommand.exchange (commandNone, std::memory_order_acq_rel)); command != commandNone)
-            applyCommand (command, bpm, bars);
+        {
+            // Transport commands wait for the clock while one is running;
+            // undo and clear are immediate either way.
+            if ((command == commandRecord || command == commandPlay) && clock.external (sampleRate))
+                queuedCommand = command;
+            else
+                applyCommand (command, bpm, bars);
+        }
+        if (queuedCommand != commandNone && ! clock.external (sampleRate))
+        {
+            applyCommand (queuedCommand, bpm, bars); // the clock went away: do not leave the player hanging
+            queuedCommand = commandNone;
+        }
+        queuedForUi.store (queuedCommand != commandNone, std::memory_order_relaxed);
 
         const bool half = halfSpeed.load (std::memory_order_relaxed);
         const bool backwards = reversed.load (std::memory_order_relaxed);
 
         for (int sample = 0; sample < numSamples; ++sample)
         {
+            if (clock.tick (clockIn, sample, sampleRate) && queuedCommand != commandNone)
+            {
+                applyCommand (queuedCommand, bpm, bars);
+                queuedCommand = commandNone;
+                queuedForUi.store (false, std::memory_order_relaxed);
+            }
             const auto dryGain = juce::Decibels::decibelsToGain (parameterValue (1, inputs, sample));
             const auto loopGain = juce::Decibels::decibelsToGain (parameterValue (0, inputs, sample));
             const auto feedback = juce::jlimit (0.0f, 1.0f, parameterValue (2, inputs, sample) * 0.01f);
@@ -4719,6 +4817,145 @@ private:
     mutable juce::String noteName;
 };
 
+// Transport for everything that steps: one tempo, pulses for beats, eighths
+// and bars, so the drum machine, the sequencer and the looper agree. Tap
+// tempo and reset arrive on the message thread; the pulses are written per
+// sample (2 ms high) so a follower can catch the edge exactly.
+class ClockNode final : public DspNode
+{
+public:
+    ClockNode() : DspNode (NodeKind::clock, nodeKindName (NodeKind::clock))
+    {
+        addOutputPort ("Beat", SignalType::control);
+        addOutputPort ("Eighth", SignalType::control);
+        addOutputPort ("Bar", SignalType::control);
+        addParameter ("bpm", "Tempo", "bpm", juce::NormalisableRange<float> (40.0f, 240.0f, 0.1f), 120.0f, 0.25f);
+        addParameter ("beats", "Beats/bar", "", juce::NormalisableRange<float> (1.0f, 8.0f, 1.0f), 4.0f, 0.0f, false);
+    }
+
+    bool handleUiCommand (const juce::String& command) override
+    {
+        if (command == "run")
+        {
+            running.store (! running.load (std::memory_order_relaxed), std::memory_order_relaxed);
+            return true;
+        }
+        if (command == "reset")
+        {
+            resetRequested.store (true, std::memory_order_release);
+            return true;
+        }
+        if (command != "tap")
+            return false;
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        if (tapCount > 0 && now - tapTimes[static_cast<std::size_t> ((tapCount - 1) % tapTimes.size())] > 2000.0)
+            tapCount = 0;
+        tapTimes[static_cast<std::size_t> (tapCount % tapTimes.size())] = now;
+        ++tapCount;
+        const auto samples = juce::jmin (tapCount, static_cast<int> (tapTimes.size()));
+        if (samples >= 2)
+        {
+            const auto newest = tapTimes[static_cast<std::size_t> ((tapCount - 1) % tapTimes.size())];
+            const auto oldest = tapTimes[static_cast<std::size_t> ((tapCount - samples) % tapTimes.size())];
+            const auto interval = (newest - oldest) / static_cast<double> (samples - 1);
+            if (interval > 0.0)
+                getParameter (0).setValue (static_cast<float> (60000.0 / interval));
+        }
+        return true;
+    }
+
+    bool uiToggleState (const juce::String& command) const override
+    {
+        return command == "run" && running.load (std::memory_order_relaxed);
+    }
+
+    int currentStep() const noexcept override { return beatForUi.load (std::memory_order_relaxed); }
+
+    juce::String statusText() const override
+    {
+        return juce::String (getParameter (0).getValue(), 1) + " bpm   beat " + juce::String (beatForUi.load (std::memory_order_relaxed) + 1);
+    }
+
+private:
+    void prepareDsp (double newSampleRate, int) override
+    {
+        sampleRate = newSampleRate;
+        resetDsp();
+    }
+
+    void resetDsp() noexcept override
+    {
+        beatPhase = 0.0;
+        beatCount = 0;
+        beatPulse = eighthPulse = barPulse = 0;
+        primed = false;
+        beatForUi.store (0, std::memory_order_relaxed);
+    }
+
+    void processDsp (const juce::AudioBuffer<float>& inputs, juce::AudioBuffer<float>& outputs, int numSamples) noexcept override
+    {
+        auto* beat = outputs.getWritePointer (0);
+        auto* eighth = outputs.getWritePointer (1);
+        auto* bar = outputs.getWritePointer (2);
+        const auto pulseLength = juce::jmax (16, static_cast<int> (sampleRate * 0.002));
+        if (resetRequested.exchange (false, std::memory_order_acq_rel))
+        {
+            beatPhase = 0.0;
+            beatCount = 0;
+            primed = false;
+        }
+        const bool run = running.load (std::memory_order_relaxed);
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const auto bpm = juce::jlimit (40.0f, 240.0f, parameterValue (0, inputs, sample));
+            const auto beatsPerBar = juce::jlimit (1, 8, static_cast<int> (std::round (parameterValue (1, inputs, sample))));
+            if (run)
+            {
+                if (! primed)
+                {
+                    // The first sample after start / reset is the downbeat.
+                    primed = true;
+                    beatPulse = eighthPulse = barPulse = pulseLength;
+                    beatForUi.store (0, std::memory_order_relaxed);
+                }
+                else
+                {
+                    const auto before = beatPhase;
+                    beatPhase += static_cast<double> (bpm) / 60.0 / sampleRate;
+                    if (before < 0.5 && beatPhase >= 0.5)
+                        eighthPulse = pulseLength;
+                    if (beatPhase >= 1.0)
+                    {
+                        beatPhase -= 1.0;
+                        beatCount = (beatCount + 1) % beatsPerBar;
+                        beatPulse = eighthPulse = pulseLength;
+                        if (beatCount == 0)
+                            barPulse = pulseLength;
+                        beatForUi.store (beatCount, std::memory_order_relaxed);
+                    }
+                }
+            }
+            beat[sample] = beatPulse > 0 ? 1.0f : 0.0f;
+            eighth[sample] = eighthPulse > 0 ? 1.0f : 0.0f;
+            bar[sample] = barPulse > 0 ? 1.0f : 0.0f;
+            if (beatPulse > 0) --beatPulse;
+            if (eighthPulse > 0) --eighthPulse;
+            if (barPulse > 0) --barPulse;
+        }
+    }
+
+    double sampleRate = 48000.0;
+    double beatPhase = 0.0;
+    int beatCount = 0;
+    int beatPulse = 0, eighthPulse = 0, barPulse = 0;
+    bool primed = false;
+    std::atomic<bool> running { true };
+    std::atomic<bool> resetRequested { false };
+    std::atomic<int> beatForUi { 0 };
+    std::array<double, 4> tapTimes {};
+    int tapCount = 0;
+};
+
 // MIDI Note: turns keyboard notes into control signals for the synth and
 // pluck. Gate is 1 while a note is held (last-note priority), Pitch is
 // (note - base) / 48 so a mod depth of 100% on a +/-24 st pitch knob gives
@@ -4850,6 +5087,7 @@ std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
         case NodeKind::stereoReverb:         return std::make_shared<StereoReverbNode>();
         case NodeKind::tuner:                return std::make_shared<TunerNode>();
         case NodeKind::midiNote:             return std::make_shared<MidiNoteNode>();
+        case NodeKind::clock:                return std::make_shared<ClockNode>();
         case NodeKind::hardwareInput:
         case NodeKind::hardwareOutput:       break;
     }

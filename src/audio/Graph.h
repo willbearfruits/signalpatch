@@ -67,7 +67,8 @@ enum class NodeKind
     stereoChorus,
     stereoReverb,
     tuner,
-    midiNote
+    midiNote,
+    clock
 };
 
 juce::String nodeKindName (NodeKind kind);

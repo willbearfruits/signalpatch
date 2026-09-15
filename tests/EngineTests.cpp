@@ -755,7 +755,7 @@ void testAllNodeKindsRenderFiniteOutput()
         NodeKind::stepSequencer, NodeKind::macro, NodeKind::spectralFollower,
         NodeKind::script, NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal,
         NodeKind::cabinet, NodeKind::looper, NodeKind::pan, NodeKind::stereoMerge, NodeKind::stereoDelay,
-        NodeKind::stereoChorus, NodeKind::stereoReverb, NodeKind::tuner, NodeKind::midiNote
+        NodeKind::stereoChorus, NodeKind::stereoReverb, NodeKind::tuner, NodeKind::midiNote, NodeKind::clock
     };
 
     for (const auto kind : kinds)
@@ -930,6 +930,19 @@ PatchDocument buildKitchenSinkDocument()
     expectOk (document.addConnection ({ keys, 1, pluck, pluckNode->processor->getParameter (0).inputPortIndex }), "midi note pitch -> pluck pitch mod");
     expectOk (document.addConnection ({ randomLfo, 0, pluck, pluckNode->processor->getParameter (pluckNode->processor->getNumParameters() - 1).inputPortIndex }),
               "random -> pluck last knob mod");
+    // One clock steps the drums (eighths), the sequencer (beats) and gates the looper's transport (bars).
+    const auto clock = document.addNode (NodeKind::clock, {});
+    const auto* drumsNode = document.findNode (drums);
+    const auto* sequencerNode = document.findNode (sequencer);
+    NodeId looperId = 0;
+    for (const auto& node : document.getNodes())
+        if (node.processor->getKind() == NodeKind::looper)
+            looperId = node.id;
+    const auto* looperNode = document.findNode (looperId);
+    expect (drumsNode != nullptr && sequencerNode != nullptr && looperNode != nullptr, "clock followers missing");
+    expectOk (document.addConnection ({ clock, 1, drums, drumsNode->processor->getNumInputPorts() - 1 }), "clock eighths -> drums");
+    expectOk (document.addConnection ({ clock, 0, sequencer, sequencerNode->processor->getNumInputPorts() - 1 }), "clock beats -> sequencer");
+    expectOk (document.addConnection ({ clock, 2, looperId, looperNode->processor->getNumInputPorts() - 1 }), "clock bars -> looper");
     expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 1, follower, 0 }),
               "input 2 -> envelope follower");
     expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 2, spectral, 0 }),
@@ -1870,6 +1883,101 @@ void testTunerDetectsPitch()
     expect (needle >= 45 && needle <= 55, "needle should sit near centre: " + std::to_string (needle));
 }
 
+namespace
+{
+    int risingEdges (const juce::AudioBuffer<float>& buffer, int channel, int numSamples, bool& wasHigh)
+    {
+        int edges = 0;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const bool high = buffer.getSample (channel, i) > 0.5f;
+            if (high && ! wasHigh)
+                ++edges;
+            wasHigh = high;
+        }
+        return edges;
+    }
+}
+
+void testClockPulsesAndFollowers()
+{
+    const int block = 64;
+    // The clock: 120 bpm, 4/4. One second holds beats at 0 and 0.5 s, eighths at 0/.25/.5/.75, the bar at 0.
+    auto clock = createNodeProcessor (NodeKind::clock);
+    clock->prepare (48000.0, block);
+    juce::AudioBuffer<float> clockInputs (juce::jmax (1, clock->getNumInputPorts()), block), pulses (3, block);
+    clockInputs.clear();
+    int beats = 0, eighths = 0, bars = 0;
+    bool beatHigh = false, eighthHigh = false, barHigh = false;
+    for (int rendered = 0; rendered < 48000; rendered += block)
+    {
+        clock->render (clockInputs, pulses, block);
+        beats += risingEdges (pulses, 0, block, beatHigh);
+        eighths += risingEdges (pulses, 1, block, eighthHigh);
+        bars += risingEdges (pulses, 2, block, barHigh);
+    }
+    expect (beats == 2 && eighths == 4 && bars == 1, "one second at 120 bpm: beats " + std::to_string (beats) + " eighths " + std::to_string (eighths) + " bars " + std::to_string (bars));
+    expect (clock->handleUiCommand ("reset"), "reset is a command");
+    clock->render (clockInputs, pulses, block);
+    expect (pulses.getSample (2, 0) == 1.0f, "reset should restart on a downbeat");
+    expect (clock->handleUiCommand ("run") && ! clock->uiToggleState ("run"), "run toggles off");
+    clock->render (clockInputs, pulses, block);
+    beatHigh = false;
+    for (int rendered = 0; rendered < 48000; rendered += block)
+    {
+        clock->render (clockInputs, pulses, block);
+        beats += risingEdges (pulses, 0, block, beatHigh);
+    }
+    expect (beats == 2, "a stopped clock must not pulse");
+
+    // The drum machine follows pulses on its Clock port and ignores its own tempo while they come.
+    auto drums = createNodeProcessor (NodeKind::drumMachine);
+    drums->prepare (48000.0, block);
+    drums->getParameter (0).setValue (40.0f); // internal step every 0.75 s
+    const auto drumClockPort = drums->getNumInputPorts() - 1;
+    expect (drums->getInputPort (drumClockPort).name == "Clock", "the drum machine's last input should be the clock");
+    juce::AudioBuffer<float> drumInputs (drums->getNumInputPorts(), block), drumOut (1, block);
+    drumInputs.clear();
+    drums->render (drumInputs, drumOut, block); // first sample of the internal clock advances 7 -> 0
+    const auto startStep = drums->currentStep();
+    for (int pulse = 0; pulse < 4; ++pulse)
+    {
+        drumInputs.clear();
+        for (int i = 0; i < 16; ++i)
+            drumInputs.setSample (drumClockPort, i, 1.0f);
+        drums->render (drumInputs, drumOut, block);
+        drumInputs.clear();
+        drums->render (drumInputs, drumOut, block);
+    }
+    expect (drums->currentStep() == (startStep + 4) % 8, "four pulses should advance four steps: " + std::to_string (drums->currentStep()));
+    for (int rendered = 0; rendered < 48000; rendered += block)
+        drums->render (drumInputs, drumOut, block); // a second of silence on the clock port: still external, no internal steps
+    expect (drums->currentStep() == (startStep + 4) % 8, "internal stepping must stay off while the clock is recent");
+    for (int rendered = 0; rendered < 48000 * 4; rendered += block)
+        drums->render (drumInputs, drumOut, block); // four more seconds: the clock is gone, the internal tempo returns
+    expect (drums->currentStep() != (startStep + 4) % 8, "internal stepping should resume after four silent seconds");
+
+    // The looper waits for the pulse when a clock is present.
+    auto looper = createNodeProcessor (NodeKind::looper);
+    looper->prepare (48000.0, block);
+    const auto looperClockPort = looper->getNumInputPorts() - 1;
+    juce::AudioBuffer<float> loopInputs (looper->getNumInputPorts(), block), loopOut (1, block);
+    loopInputs.clear();
+    for (int i = 0; i < 16; ++i)
+        loopInputs.setSample (looperClockPort, i, 1.0f);
+    looper->render (loopInputs, loopOut, block); // one pulse: the clock is now "present"
+    loopInputs.clear();
+    looper->render (loopInputs, loopOut, block);
+    expect (looper->handleUiCommand ("rec"), "rec is a command");
+    looper->render (loopInputs, loopOut, block);
+    expect (! looper->uiToggleState ("rec"), "recording must wait for the next pulse");
+    expect (looper->statusText().startsWith ("ON THE NEXT PULSE"), "status should say it is waiting: " + looper->statusText().toStdString());
+    for (int i = 0; i < 16; ++i)
+        loopInputs.setSample (looperClockPort, i, 1.0f);
+    looper->render (loopInputs, loopOut, block);
+    expect (looper->uiToggleState ("rec"), "recording should start on the pulse");
+}
+
 void testMidiNoteNodeDrivesGateAndPitch()
 {
     auto node = createNodeProcessor (NodeKind::midiNote);
@@ -1940,6 +2048,7 @@ int main()
         { "drum machine tap tempo", testDrumMachineTapTempo },
         { "stereo nodes: pan, ping-pong delay, cabinet R, reverb/chorus", testStereoNodes },
         { "tuner detects pitch", testTunerDetectsPitch },
+        { "clock pulses; drums and looper follow it", testClockPulsesAndFollowers },
         { "MIDI Note node drives gate and pitch", testMidiNoteNodeDrivesGateAndPitch }
     };
 

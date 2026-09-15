@@ -110,6 +110,7 @@ inline NVGcolor accent (NodeKind kind) noexcept
         case NodeKind::stereoReverb:         return rgb (0xff6fc7d9);
         case NodeKind::tuner:                return rgb (0xffb8ffd9);
         case NodeKind::midiNote:             return rgb (0xffc7b3ff);
+        case NodeKind::clock:                return rgb (0xffffd9a3);
     }
     return palette::selection;
 }
@@ -161,6 +162,7 @@ inline const std::vector<ModuleEntry>& moduleCatalogue()
         { NodeKind::limiter,              "LIMITER",        "DYNAMICS" },
         { NodeKind::gate,                 "NOISE GATE",     "DYNAMICS" },
         { NodeKind::feedbackGuard,        "FEEDBACK GUARD", "DYNAMICS" },
+        { NodeKind::clock,                "CLOCK",          "CONTROL" },
         { NodeKind::midiNote,             "MIDI NOTE",      "CONTROL" },
         { NodeKind::lfo,                  "LFO",            "CONTROL" },
         { NodeKind::randomLfo,            "RANDOM",         "CONTROL" },
