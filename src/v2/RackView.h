@@ -108,6 +108,10 @@ private:
     void drawCable (const Connection& connection, bool selected, double now);
     void drawPlateStatic (const Layout& layout, const NodeModel& model);
     void drawNode (const Layout& layout, double now);
+    void drawPreviewContent (const Layout& layout, const NodeModel& model, juce::Point<float> origin);
+    [[nodiscard]] juce::Rectangle<float> previewArea (const Layout& layout, juce::Point<float> origin) const noexcept;
+    bool editPreviewAt (const Layout& layout, juce::Point<float> origin, juce::Point<float> world, bool firstPress);
+    void showAudioMenu (double x, double y);
     void drawHud (int width, int height, double now);
     void drawKnob (juce::Point<float> centre, float radius, float normalised, NVGcolor accent,
                    const juce::String& label, const juce::String& value);
@@ -163,6 +167,7 @@ private:
     juce::Point<float> dragOffset;
     std::optional<KnobDrag> knobDrag;
     std::optional<CableDrag> cableDrag;
+    std::optional<NodeId> sequencerDrag; // painting step values across the preview
 
     NodeId selectedNode = 0;
     std::optional<Connection> selectedCable;

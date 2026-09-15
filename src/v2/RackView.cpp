@@ -775,6 +775,305 @@ void RackView::showCableMenu (const Connection& cable, double x, double y)
     dirty = true;
 }
 
+juce::Rectangle<float> RackView::previewArea (const Layout& layout, juce::Point<float> origin) const noexcept
+{
+    return { origin.x + 68.0f, origin.y + layout.previewY, layout.w - 136.0f, layout.previewH };
+}
+
+void RackView::drawPreviewContent (const Layout& layout, const NodeModel& model, juce::Point<float> origin)
+{
+    const auto area = previewArea (layout, origin);
+    const auto colour = accent (layout.kind);
+    const auto kind = layout.kind;
+
+    if (kind == NodeKind::stepSequencer)
+    {
+        const auto active = model.processor->currentStep();
+        const auto gap = 3.0f;
+        const auto width = (area.getWidth() - gap * 9.0f) / 8.0f;
+        for (int step = 0; step < 8; ++step)
+        {
+            const auto value = model.processor->getParameter (2 + step).getValue();
+            const juce::Rectangle<float> bar (area.getX() + gap + static_cast<float> (step) * (width + gap), area.getY() + 5.0f, width, area.getHeight() - 10.0f);
+            nvgBeginPath (vg);
+            nvgRoundedRect (vg, bar.getX(), area.getCentreY() - 1.0f, bar.getWidth(), 2.0f, 1.0f);
+            nvgFillColor (vg, alpha (palette::grid, 0.5f));
+            nvgFill (vg);
+            const auto filled = value >= 0.0f
+                ? juce::Rectangle<float> (bar.getX(), area.getCentreY() - value * bar.getHeight() * 0.48f, bar.getWidth(), value * bar.getHeight() * 0.48f)
+                : juce::Rectangle<float> (bar.getX(), area.getCentreY(), bar.getWidth(), -value * bar.getHeight() * 0.48f);
+            if (filled.getHeight() > 0.5f)
+            {
+                nvgBeginPath (vg);
+                nvgRoundedRect (vg, filled.getX(), filled.getY(), filled.getWidth(), filled.getHeight(), 1.5f);
+                nvgFillColor (vg, step == active ? palette::selection : alpha (colour, 0.7f));
+                nvgFill (vg);
+            }
+            if (step == active)
+            {
+                nvgBeginPath (vg);
+                nvgRoundedRect (vg, bar.getX(), bar.getY(), bar.getWidth(), bar.getHeight(), 2.0f);
+                nvgFillColor (vg, alpha (palette::selection, 0.22f));
+                nvgFill (vg);
+            }
+        }
+        return;
+    }
+
+    if (kind == NodeKind::drumMachine)
+    {
+        const auto active = model.processor->currentStep();
+        const auto grid = area.reduced (3.0f);
+        const auto cellW = grid.getWidth() / 8.0f, cellH = grid.getHeight() / 3.0f;
+        const NVGcolor lanes[3] { colour, palette::okay, palette::audio };
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 8; ++column)
+            {
+                const auto cell = juce::Rectangle<float> (grid.getX() + static_cast<float> (column) * cellW, grid.getY() + static_cast<float> (row) * cellH, cellW, cellH).reduced (1.5f);
+                const bool on = model.processor->getParameter (5 + row * 8 + column).getValue() > 0.5f;
+                if (column == active)
+                {
+                    nvgBeginPath (vg);
+                    nvgRoundedRect (vg, cell.getX() - 1.0f, cell.getY() - 1.0f, cell.getWidth() + 2.0f, cell.getHeight() + 2.0f, 2.0f);
+                    nvgFillColor (vg, alpha (palette::selection, 0.18f));
+                    nvgFill (vg);
+                }
+                nvgBeginPath (vg);
+                nvgRoundedRect (vg, cell.getX(), cell.getY(), cell.getWidth(), cell.getHeight(), 2.0f);
+                nvgFillColor (vg, on ? alpha (lanes[row], column == active ? 1.0f : 0.8f) : lighter (palette::nodeDark, 0.15f));
+                nvgFill (vg);
+                if (! on)
+                {
+                    nvgStrokeColor (vg, lighter (palette::grid, 0.15f));
+                    nvgStrokeWidth (vg, 0.8f);
+                    nvgStroke (vg);
+                }
+            }
+        return;
+    }
+
+    if (kind == NodeKind::compressor || kind == NodeKind::limiter || kind == NodeKind::gate)
+    {
+        const auto reduction = juce::jlimit (0.0f, 24.0f, model.processor->gainReductionDb());
+        const auto meter = area.reduced (10.0f, 20.0f);
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, meter.getX(), meter.getY(), meter.getWidth(), meter.getHeight(), 2.0f);
+        nvgFillColor (vg, lighter (palette::nodeDark, 0.12f));
+        nvgFill (vg);
+        for (int tick = 1; tick < 4; ++tick)
+        {
+            const auto tickX = meter.getX() + meter.getWidth() * static_cast<float> (tick) / 4.0f;
+            nvgBeginPath (vg);
+            nvgMoveTo (vg, tickX, meter.getY());
+            nvgLineTo (vg, tickX, meter.getBottom());
+            nvgStrokeColor (vg, lighter (palette::grid, 0.2f));
+            nvgStrokeWidth (vg, 1.0f);
+            nvgStroke (vg);
+        }
+        const auto fillW = meter.getWidth() * reduction / 24.0f;
+        if (fillW > 0.5f)
+        {
+            nvgBeginPath (vg);
+            nvgRoundedRect (vg, meter.getX(), meter.getY(), fillW, meter.getHeight(), 2.0f);
+            nvgFillPaint (vg, nvgLinearGradient (vg, meter.getX(), 0, meter.getRight(), 0, palette::okay, palette::feedback));
+            nvgFill (vg);
+        }
+        nvgFontFaceId (vg, font);
+        nvgFontSize (vg, 11.0f);
+        nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
+        nvgFillColor (vg, palette::text);
+        nvgText (vg, area.getCentreX(), area.getBottom() - 3.0f, (juce::String (reduction, 1) + " dB GR").toRawUTF8(), nullptr);
+        return;
+    }
+
+    if (kind == NodeKind::delay)
+    {
+        const auto feedback = model.processor->getParameter (1).getValue() * 0.01f;
+        for (int echo = 0; echo < 6; ++echo)
+        {
+            const auto height = juce::jmax (2.0f, area.getHeight() * 0.68f * std::pow (feedback, static_cast<float> (echo)));
+            const auto ex = area.getX() + 10.0f + static_cast<float> (echo) * (area.getWidth() - 20.0f) / 5.0f;
+            nvgBeginPath (vg);
+            nvgRoundedRect (vg, ex - 1.8f, area.getCentreY() - height * 0.5f, 3.6f, height, 1.8f);
+            nvgFillColor (vg, alpha (colour, 0.85f - 0.12f * static_cast<float> (echo)));
+            nvgFill (vg);
+        }
+        return;
+    }
+
+    if (kind == NodeKind::hardwareInput)
+    {
+        const auto lanes = juce::jmin (8, layout.outputs);
+        const auto laneH = (area.getHeight() - 10.0f) / static_cast<float> (juce::jmax (1, lanes));
+        for (int lane = 0; lane < lanes; ++lane)
+        {
+            float laneRms = 0.0f;
+            for (int port = lane; port < layout.outputs; port += lanes)
+                laneRms = juce::jmax (laneRms, model.processor->outputRms (port));
+            const auto level = juce::jlimit (0.0f, 1.0f, std::sqrt (laneRms));
+            const auto ly = area.getY() + 5.0f + static_cast<float> (lane) * laneH;
+            nvgBeginPath (vg);
+            nvgRoundedRect (vg, area.getX() + 5.0f, ly, area.getWidth() - 10.0f, juce::jmax (2.0f, laneH - 3.0f), 1.5f);
+            nvgFillColor (vg, lighter (palette::nodeDark, 0.15f));
+            nvgFill (vg);
+            if (level > 0.005f)
+            {
+                nvgBeginPath (vg);
+                nvgRoundedRect (vg, area.getX() + 5.0f, ly, (area.getWidth() - 10.0f) * level, juce::jmax (2.0f, laneH - 3.0f), 1.5f);
+                nvgFillPaint (vg, nvgLinearGradient (vg, area.getX(), 0, area.getRight(), 0, alpha (colour, 0.9f), palette::warning));
+                nvgFill (vg);
+            }
+        }
+        return;
+    }
+
+    // Everything else: a scope of the output (input for the hardware output),
+    // with the distortion showing its input faintly behind.
+    auto drawWave = [&] (const WaveformSnapshot& snapshot, NVGcolor waveColour, float waveAlpha)
+    {
+        const auto inner = area.reduced (4.0f);
+        const auto centreY = inner.getCentreY(), amplitude = inner.getHeight() * 0.46f;
+        nvgBeginPath (vg);
+        for (int bucket = 0; bucket < WaveformSnapshot::bucketCount; ++bucket)
+        {
+            const auto px = inner.getX() + inner.getWidth() * static_cast<float> (bucket) / static_cast<float> (WaveformSnapshot::bucketCount - 1);
+            const auto py = centreY - juce::jlimit (-1.0f, 1.0f, snapshot.high[static_cast<std::size_t> (bucket)]) * amplitude;
+            if (bucket == 0) nvgMoveTo (vg, px, py); else nvgLineTo (vg, px, py);
+        }
+        for (int bucket = WaveformSnapshot::bucketCount - 1; bucket >= 0; --bucket)
+        {
+            const auto px = inner.getX() + inner.getWidth() * static_cast<float> (bucket) / static_cast<float> (WaveformSnapshot::bucketCount - 1);
+            const auto py = centreY - juce::jlimit (-1.0f, 1.0f, snapshot.low[static_cast<std::size_t> (bucket)]) * amplitude;
+            nvgLineTo (vg, px, py);
+        }
+        nvgClosePath (vg);
+        nvgFillPaint (vg, nvgLinearGradient (vg, 0, inner.getY(), 0, inner.getBottom(), alpha (waveColour, waveAlpha), alpha (waveColour, waveAlpha * 0.15f)));
+        nvgFill (vg);
+        nvgStrokeColor (vg, alpha (waveColour, juce::jmin (1.0f, waveAlpha + 0.35f)));
+        nvgStrokeWidth (vg, 1.2f);
+        nvgStroke (vg);
+    };
+    if (kind == NodeKind::hardwareOutput)
+    {
+        drawWave (model.processor->inputWaveform(), colour, 0.5f);
+        return;
+    }
+    if (kind == NodeKind::distortion)
+        drawWave (model.processor->inputWaveform(), palette::text, 0.18f);
+    drawWave (layout.outputs > 0 ? model.processor->outputWaveform (0) : model.processor->inputWaveform(), colour, 0.5f);
+}
+
+bool RackView::editPreviewAt (const Layout& layout, juce::Point<float> origin, juce::Point<float> world, bool firstPress)
+{
+    const auto area = previewArea (layout, origin).reduced (3.0f);
+    if (! area.contains (world))
+        return false;
+    if (layout.kind == NodeKind::stepSequencer)
+    {
+        const auto step = juce::jlimit (0, 7, static_cast<int> ((world.x - area.getX()) / (area.getWidth() / 8.0f)));
+        const auto value = juce::jlimit (-1.0f, 1.0f, (area.getCentreY() - world.y) / (area.getHeight() * 0.48f));
+        engine.setParameter (layout.id, 2 + step, value);
+        return true;
+    }
+    if (layout.kind == NodeKind::drumMachine && firstPress)
+    {
+        const auto column = juce::jlimit (0, 7, static_cast<int> ((world.x - area.getX()) / (area.getWidth() / 8.0f)));
+        const auto row = juce::jlimit (0, 2, static_cast<int> ((world.y - area.getY()) / (area.getHeight() / 3.0f)));
+        const auto index = 5 + row * 8 + column;
+        const auto* model = engine.getDocument().findNode (layout.id);
+        if (model == nullptr)
+            return false;
+        engine.setParameter (layout.id, index, model->processor->getParameter (index).getValue() > 0.5f ? 0.0f : 1.0f);
+        engine.closeEditGesture();
+        return true;
+    }
+    return false;
+}
+
+void RackView::showAudioMenu (double x, double y)
+{
+    auto& manager = engine.getDeviceManager();
+    const auto setup = manager.getAudioDeviceSetup();
+    auto* device = manager.getCurrentAudioDevice();
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::sectionHeader (device != nullptr ? device->getName().toUpperCase() : juce::String ("NO DEVICE")));
+
+    std::vector<MenuItem> backends;
+    int id = 100;
+    for (auto* type : manager.getAvailableDeviceTypes())
+        backends.push_back (MenuItem::item (id++, type->getTypeName() + (manager.getCurrentAudioDeviceType() == type->getTypeName() ? "  (current)" : juce::String())));
+    items.push_back (MenuItem::sub ("Backend", std::move (backends)));
+
+    if (auto* type = manager.getCurrentDeviceTypeObject())
+    {
+        type->scanForDevices();
+        std::vector<MenuItem> outputs, inputs;
+        id = 200;
+        for (const auto& name : type->getDeviceNames (false))
+            outputs.push_back (MenuItem::item (id++, name + (name == setup.outputDeviceName ? "  (current)" : juce::String())));
+        id = 300;
+        for (const auto& name : type->getDeviceNames (true))
+            inputs.push_back (MenuItem::item (id++, name + (name == setup.inputDeviceName ? "  (current)" : juce::String())));
+        items.push_back (MenuItem::sub ("Output device", std::move (outputs)));
+        items.push_back (MenuItem::sub ("Input device", std::move (inputs)));
+    }
+    if (device != nullptr)
+    {
+        std::vector<MenuItem> buffers, rates;
+        id = 400;
+        for (const auto size : device->getAvailableBufferSizes())
+            buffers.push_back (MenuItem::item (id++, juce::String (size) + " samples  (" + juce::String (size * 1000.0 / juce::jmax (1.0, device->getCurrentSampleRate()), 2) + " ms)"
+                                                      + (size == device->getCurrentBufferSizeSamples() ? "  (current)" : juce::String())));
+        id = 500;
+        for (const auto rate : device->getAvailableSampleRates())
+            rates.push_back (MenuItem::item (id++, juce::String (rate / 1000.0, 1) + " kHz" + (std::abs (rate - device->getCurrentSampleRate()) < 1.0 ? "  (current)" : juce::String())));
+        items.push_back (MenuItem::sub ("Buffer size", std::move (buffers)));
+        items.push_back (MenuItem::sub ("Sample rate", std::move (rates)));
+    }
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this] (int picked)
+    {
+        auto& deviceManager = engine.getDeviceManager();
+        auto current = deviceManager.getAudioDeviceSetup();
+        juce::String error;
+        if (picked >= 100 && picked < 200)
+        {
+            const auto& types = deviceManager.getAvailableDeviceTypes();
+            if (juce::isPositiveAndBelow (picked - 100, types.size()))
+                deviceManager.setCurrentAudioDeviceType (types[picked - 100]->getTypeName(), true);
+        }
+        else if (auto* type = deviceManager.getCurrentDeviceTypeObject(); type != nullptr && picked >= 200 && picked < 400)
+        {
+            const auto names = type->getDeviceNames (picked >= 300);
+            const auto index = picked >= 300 ? picked - 300 : picked - 200;
+            if (juce::isPositiveAndBelow (index, names.size()))
+            {
+                if (picked >= 300) current.inputDeviceName = names[index]; else current.outputDeviceName = names[index];
+                current.useDefaultInputChannels = current.useDefaultOutputChannels = true;
+                error = deviceManager.setAudioDeviceSetup (current, true);
+            }
+        }
+        else if (auto* device = deviceManager.getCurrentAudioDevice(); device != nullptr && picked >= 400 && picked < 600)
+        {
+            if (picked < 500)
+            {
+                const auto sizes = device->getAvailableBufferSizes();
+                if (juce::isPositiveAndBelow (picked - 400, sizes.size()))
+                    current.bufferSize = sizes[picked - 400];
+            }
+            else
+            {
+                const auto rates = device->getAvailableSampleRates();
+                if (juce::isPositiveAndBelow (picked - 500, rates.size()))
+                    current.sampleRate = rates[picked - 500];
+            }
+            error = deviceManager.setAudioDeviceSetup (current, true);
+        }
+        say (error.isNotEmpty() ? error : "Audio device updated");
+        dirty = true;
+    });
+    dirty = true;
+}
+
 // ---------------------------------------------------------------- frame loop
 
 void RackView::tick (double now)
@@ -1221,32 +1520,7 @@ void RackView::drawNode (const Layout& layout, double now)
         nvgStroke (vg);
     }
 
-    {
-        const auto previewX = x + 68.0f, previewW = w - 136.0f;
-        const auto previewY = y + layout.previewY, previewH = layout.previewH;
-        const auto snapshot = layout.outputs > 0 ? model->processor->outputWaveform (0) : model->processor->inputWaveform();
-        const auto areaX = previewX + 4.0f, areaW = previewW - 8.0f;
-        const auto centreY = previewY + previewH * 0.5f, amplitude = previewH * 0.46f;
-        nvgBeginPath (vg);
-        for (int bucket = 0; bucket < WaveformSnapshot::bucketCount; ++bucket)
-        {
-            const auto px = areaX + areaW * static_cast<float> (bucket) / static_cast<float> (WaveformSnapshot::bucketCount - 1);
-            const auto py = centreY - juce::jlimit (-1.0f, 1.0f, snapshot.high[static_cast<std::size_t> (bucket)]) * amplitude;
-            if (bucket == 0) nvgMoveTo (vg, px, py); else nvgLineTo (vg, px, py);
-        }
-        for (int bucket = WaveformSnapshot::bucketCount - 1; bucket >= 0; --bucket)
-        {
-            const auto px = areaX + areaW * static_cast<float> (bucket) / static_cast<float> (WaveformSnapshot::bucketCount - 1);
-            const auto py = centreY - juce::jlimit (-1.0f, 1.0f, snapshot.low[static_cast<std::size_t> (bucket)]) * amplitude;
-            nvgLineTo (vg, px, py);
-        }
-        nvgClosePath (vg);
-        nvgFillPaint (vg, nvgLinearGradient (vg, 0, previewY, 0, previewY + previewH, alpha (colour, 0.5f), alpha (colour, 0.08f)));
-        nvgFill (vg);
-        nvgStrokeColor (vg, alpha (colour, 0.85f));
-        nvgStrokeWidth (vg, 1.2f);
-        nvgStroke (vg);
-    }
+    drawPreviewContent (layout, *model, origin);
 
     const auto status = model->processor->statusText();
     if (status.isNotEmpty())
@@ -1352,7 +1626,16 @@ void RackView::drawHud (int width, int height, double now)
                     + juce::String (plateRenders) + " plates rasterised";
     nvgText (vg, 150.0f, 17.0f, line.toRawUTF8(), nullptr);
 
-    // FILE button and the current patch name.
+    // AUDIO and FILE buttons and the current patch name.
+    nvgBeginPath (vg);
+    nvgRoundedRect (vg, static_cast<float> (width) - 300.0f, 6.0f, 54.0f, 22.0f, 4.0f);
+    nvgFillColor (vg, palette::panelRaised);
+    nvgFill (vg);
+    nvgFontSize (vg, 10.5f);
+    nvgTextLetterSpacing (vg, 0.8f);
+    nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    nvgFillColor (vg, palette::text);
+    nvgText (vg, static_cast<float> (width) - 273.0f, 17.0f, "AUDIO", nullptr);
     nvgBeginPath (vg);
     nvgRoundedRect (vg, static_cast<float> (width) - 240.0f, 6.0f, 50.0f, 22.0f, 4.0f);
     nvgFillColor (vg, palette::panelRaised);
@@ -1365,7 +1648,7 @@ void RackView::drawHud (int width, int height, double now)
     nvgTextLetterSpacing (vg, 0.0f);
     nvgTextAlign (vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
     nvgFillColor (vg, palette::mutedText);
-    nvgText (vg, static_cast<float> (width) - 250.0f, 17.0f,
+    nvgText (vg, static_cast<float> (width) - 310.0f, 17.0f,
              (currentFile == juce::File() ? juce::String ("untitled") : currentFile.getFileName()).toRawUTF8(), nullptr);
 
     if (status.panicMuted)
@@ -1525,6 +1808,16 @@ void RackView::mouseMove (double x, double y)
             dirty = true;
         }
     }
+    else if (sequencerDrag.has_value())
+    {
+        if (const auto* layout = layoutFor (*sequencerDrag))
+        {
+            const auto origin = nodePosition (layout->id);
+            const auto area = previewArea (*layout, origin).reduced (3.0f);
+            editPreviewAt (*layout, origin, { juce::jlimit (area.getX(), area.getRight() - 0.01f, world.x), world.y }, false);
+        }
+        dirty = true;
+    }
     else if (cableDrag.has_value())
     {
         cableDrag->x = world.x;
@@ -1560,6 +1853,11 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
     if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < 34.0 && x >= windowW - 240.0 && x < windowW - 190.0)
     {
         showFileMenu (x, 34.0);
+        return;
+    }
+    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < 34.0 && x >= windowW - 300.0 && x < windowW - 246.0)
+    {
+        showAudioMenu (x, 34.0);
         return;
     }
     const auto world = toWorld (x, y);
@@ -1612,8 +1910,9 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
 
     if (! pressed)
     {
-        if (draggingNode.has_value() || knobDrag.has_value())
+        if (draggingNode.has_value() || knobDrag.has_value() || sequencerDrag.has_value())
             engine.closeEditGesture();
+        sequencerDrag.reset();
         if (cableDrag.has_value())
         {
             bool connected = false;
@@ -1667,6 +1966,13 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
                 runButton (layout, layout.buttons[index]);
                 return;
             }
+        if (editPreviewAt (layout, origin, world, true))
+        {
+            if (layout.kind == NodeKind::stepSequencer)
+                sequencerDrag = layout.id;
+            dirty = true;
+            return;
+        }
         // Double-click: name plate renames, a knob resets to its default.
         const auto clickTime = lastTick;
         const bool doubleClick = clickTime - lastClickTime < 0.35 && juce::Point<double> (x, y).getDistanceFrom ({ lastClickX, lastClickY }) < 6.0;
