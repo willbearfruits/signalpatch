@@ -7,6 +7,8 @@
 #include "../audio/PatchEngine.h"
 #include "RackView.h"
 
+#include <glad/gl.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <nanovg.h>
 #define NANOVG_GL3 1 // declarations only; the implementation lives in NanoVGImpl.cpp
@@ -104,6 +106,12 @@ int main (int argc, char** argv)
         return 1;
     }
     glfwMakeContextCurrent (window);
+    if (! gladLoadGL (glfwGetProcAddress))
+    {
+        std::fprintf (stderr, "OpenGL 3.3 core entry points not available\n");
+        glfwTerminate();
+        return 1;
+    }
     glfwSwapInterval (1);
 
     auto* vg = nvgCreateGL3 (NVG_ANTIALIAS | NVG_STENCIL_STROKES);

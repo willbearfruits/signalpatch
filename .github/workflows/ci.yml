@@ -33,7 +33,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    name: Windows (MSVC, tests)
+    name: Windows (MSVC, app + tests)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,3 +46,9 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Upload the Windows app
+        uses: actions/upload-artifact@v4
+        with:
+          name: SignalPatch-windows-x64
+          path: build/signalpatch_artefacts/Release/SignalPatch.exe
+          if-no-files-found: error

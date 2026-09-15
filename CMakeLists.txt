@@ -212,6 +212,19 @@ endif()
 find_package(glfw3 3.3 QUIET)
 find_package(OpenGL QUIET)
 option(SIGNALPATCH_BUILD_V2 "Build the GLFW/OpenGL app (signalpatch)" ON)
+if(SIGNALPATCH_BUILD_V2 AND NOT TARGET glfw AND TARGET OpenGL::GL)
+    # No system GLFW (Windows, minimal images): build the pinned release in-tree.
+    include(FetchContent)
+    set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(glfw
+        URL https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.zip
+        URL_HASH SHA256=b5ec004b2712fd08e8861dc271428f048775200a2df719ccf575143ba749a3e9)
+    FetchContent_MakeAvailable(glfw)
+    set(glfw3_VERSION "3.4 (fetched)")
+endif()
 if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
     include(FetchContent)
     FetchContent_Declare(nanovg
@@ -229,12 +242,16 @@ if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
     target_sources(signalpatch PRIVATE
         ${SIGNALPATCH_V2_SOURCES}
         ${SIGNALPATCH_AUDIO_SOURCES}
-        "${nanovg_SOURCE_DIR}/src/nanovg.c")
-    target_include_directories(signalpatch SYSTEM PRIVATE "${nanovg_SOURCE_DIR}/src")
+        "${nanovg_SOURCE_DIR}/src/nanovg.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/external/glad/src/gl.c")
+    target_include_directories(signalpatch SYSTEM PRIVATE
+        "${nanovg_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/external/glad/include")
     target_compile_features(signalpatch PRIVATE cxx_std_20)
     target_compile_definitions(signalpatch PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS} JUCE_ALSA=1 JUCE_JACK=1
         JUCE_MODAL_LOOPS_PERMITTED=1) # runDispatchLoopUntil: JUCE pumped from the GLFW frame loop
-    set_source_files_properties("${nanovg_SOURCE_DIR}/src/nanovg.c" PROPERTIES COMPILE_OPTIONS "-w")
+    set_source_files_properties("${nanovg_SOURCE_DIR}/src/nanovg.c" "${CMAKE_CURRENT_SOURCE_DIR}/external/glad/src/gl.c"
+        PROPERTIES COMPILE_OPTIONS "$<IF:$<C_COMPILER_ID:MSVC>,/w,-w>")
     if(SIGNALPATCH_HAS_NAM)
         target_compile_definitions(signalpatch PRIVATE SIGNALPATCH_HAS_NAM=1)
         target_link_libraries(signalpatch PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,nam_core>")

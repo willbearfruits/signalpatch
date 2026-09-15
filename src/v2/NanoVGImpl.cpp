@@ -1,9 +1,7 @@
 // Single translation unit that instantiates NanoVG's OpenGL 3 backend.
-// Mesa/glvnd export the core profile entry points directly, so with
-// GL_GLEXT_PROTOTYPES no loader library is needed on Linux.
-#define GL_GLEXT_PROTOTYPES 1
-#include <GL/gl.h>
-#include <GL/glext.h>
+// GL entry points come from the vendored glad loader (external/glad), fed by
+// glfwGetProcAddress in main(), so Linux and Windows share one path.
+#include <glad/gl.h>
 
 #include <nanovg.h>
 #define NANOVG_GL3_IMPLEMENTATION

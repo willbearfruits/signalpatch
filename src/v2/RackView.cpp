@@ -2,6 +2,8 @@
 #include "Palette.h"
 #include "../audio/PatchBundle.h"
 
+#include <glad/gl.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #define NANOVG_GL3 1
 #include <nanovg_gl.h>
