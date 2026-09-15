@@ -1,4 +1,8 @@
 #include "PatchEngine.h"
+
+#if JUCE_LINUX
+ #include <sched.h>
+#endif
 #include "PatchBundle.h"
 
 #include <cmath>
@@ -503,6 +507,12 @@ EngineStatus PatchEngine::getStatus() const
     status.cpuLoad = cpuLoad.load (std::memory_order_relaxed);
     status.cpuPeak = cpuPeak.load (std::memory_order_relaxed);
     status.running = callbackRunning.load (std::memory_order_relaxed);
+   #if JUCE_LINUX
+    {
+        const auto scheduler = callbackScheduler.load (std::memory_order_relaxed);
+        status.realtimeThread = scheduler < 0 || scheduler == SCHED_FIFO || scheduler == SCHED_RR;
+    }
+   #endif
     status.panicMuted = isPanicMuted();
     status.graphMessage = graphMessage;
     if (deviceError.isNotEmpty())
@@ -889,6 +899,11 @@ void PatchEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     callbackRunning.store (true, std::memory_order_relaxed);
     if (numSamples > 0)
         observedBlockSize.store (numSamples, std::memory_order_relaxed);
+   #if JUCE_LINUX
+    // One non-blocking syscall on the first block: is this thread actually realtime?
+    if (callbackScheduler.load (std::memory_order_relaxed) < 0)
+        callbackScheduler.store (sched_getscheduler (0), std::memory_order_relaxed);
+   #endif
     if (activePlan != nullptr && midiNoteFifo.getNumReady() > 0)
     {
         const auto scope = midiNoteFifo.read (midiNoteFifo.getNumReady());
@@ -988,6 +1003,7 @@ void PatchEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 void PatchEngine::audioDeviceStopped()
 {
     observedBlockSize.store (0, std::memory_order_relaxed);
+    callbackScheduler.store (-1, std::memory_order_relaxed);
     callbackRunning.store (false, std::memory_order_relaxed);
     deviceReady.store (false, std::memory_order_release);
 }

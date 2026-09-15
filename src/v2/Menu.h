@@ -55,6 +55,8 @@ struct MenuItem
 // Popup menu drawn by the rack's own renderer, so it opens exactly at the
 // pointer and looks like the rest of the instrument. Hover opens submenus;
 // a click on a leaf reports its id; Escape or a click outside closes it.
+// Arrow keys walk it too (right/left open and close submenus, Enter picks),
+// which is what the gamepad drives.
 class Menu
 {
 public:
@@ -87,6 +89,8 @@ private:
     };
 
     void pushLevel (std::vector<MenuItem> items, float x, float y);
+    void openChild (int depth, int index);
+    [[nodiscard]] int nextSelectable (const Level& level, int from, int direction) const noexcept;
     [[nodiscard]] float itemTop (const Level& level, int index) const noexcept;
     [[nodiscard]] float rowHeight (const MenuItem& item) const noexcept;
     [[nodiscard]] int itemAt (const Level& level, float x, float y) const noexcept;

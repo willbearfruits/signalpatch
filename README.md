@@ -105,6 +105,12 @@ ctest --test-dir build --output-on-failure
 pw-jack ./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch  # PipeWire
 ```
 
+If the status bar says **NO RT PRIORITY**, the audio thread runs under the
+ordinary scheduler and every busy moment on the desktop becomes an xrun. On
+Arch either `pacman -S rtkit` (PipeWire asks it over D-Bus) or
+`pacman -S realtime-privileges && gpasswd -a $USER realtime` and log in
+again; other distributions ship one of the two with PipeWire.
+
 ### Flatpak
 
 ```sh

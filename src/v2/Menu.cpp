@@ -103,21 +103,43 @@ bool Menu::mouseMove (float x, float y)
             continue;
         if (index == level.hover)
             return true;
-        level.hover = index;
-        levels.resize (static_cast<std::size_t> (depth) + 1);
-        level.openedChild = -1;
-        if (index >= 0 && ! level.items[static_cast<std::size_t> (index)].children.empty())
-        {
-            level.openedChild = index;
-            const auto childX = level.x + level.w - 4.0f;
-            const auto childY = itemTop (level, index) - padding;
-            pushLevel (level.items[static_cast<std::size_t> (index)].children, childX, childY);
-            if (levels.back().x < childX) // no room on the right: flip to the left
-                levels.back().x = juce::jmax (4.0f, level.x - levels.back().w + 4.0f);
-        }
+        openChild (depth, index);
         return true;
     }
     return true; // pointer outside every level: still ours while open
+}
+
+void Menu::openChild (int depth, int index)
+{
+    levels.resize (static_cast<std::size_t> (depth) + 1);
+    auto& level = levels[static_cast<std::size_t> (depth)];
+    level.hover = index;
+    level.openedChild = -1;
+    if (index >= 0 && ! level.items[static_cast<std::size_t> (index)].children.empty())
+    {
+        level.openedChild = index;
+        const auto childX = level.x + level.w - 4.0f;
+        const auto childY = itemTop (level, index) - padding;
+        pushLevel (level.items[static_cast<std::size_t> (index)].children, childX, childY);
+        if (levels.back().x < childX) // no room on the right: flip to the left
+            levels.back().x = juce::jmax (4.0f, levels[static_cast<std::size_t> (depth)].x - levels.back().w + 4.0f);
+    }
+}
+
+int Menu::nextSelectable (const Level& level, int from, int direction) const noexcept
+{
+    const auto count = static_cast<int> (level.items.size());
+    if (count == 0)
+        return -1;
+    auto index = from;
+    for (int step = 0; step < count; ++step)
+    {
+        index = from < 0 && direction < 0 && step == 0 ? count - 1 : (index + direction + count) % count;
+        const auto& item = level.items[static_cast<std::size_t> (index)];
+        if (item.enabled || ! item.children.empty())
+            return index;
+    }
+    return from;
 }
 
 bool Menu::mouseButton (int button, bool pressed, float x, float y)
@@ -158,8 +180,55 @@ bool Menu::key (int keyCode)
 {
     if (levels.empty())
         return false;
-    if (keyCode == GLFW_KEY_ESCAPE)
-        close();
+    const auto depth = static_cast<int> (levels.size()) - 1;
+    auto& level = levels.back();
+    switch (keyCode)
+    {
+        case GLFW_KEY_ESCAPE:
+            close();
+            break;
+        case GLFW_KEY_DOWN:
+        case GLFW_KEY_UP:
+            level.hover = nextSelectable (level, level.hover, keyCode == GLFW_KEY_DOWN ? 1 : -1);
+            break;
+        case GLFW_KEY_LEFT:
+            if (depth > 0)
+            {
+                levels.pop_back();
+                levels.back().openedChild = -1;
+            }
+            break;
+        case GLFW_KEY_RIGHT:
+            if (level.hover >= 0 && ! level.items[static_cast<std::size_t> (level.hover)].children.empty())
+            {
+                openChild (depth, level.hover);
+                levels.back().hover = nextSelectable (levels.back(), -1, 1);
+            }
+            break;
+        case GLFW_KEY_ENTER:
+        case GLFW_KEY_KP_ENTER:
+        case GLFW_KEY_SPACE:
+            if (level.hover >= 0)
+            {
+                auto& item = level.items[static_cast<std::size_t> (level.hover)];
+                if (! item.children.empty())
+                {
+                    openChild (depth, level.hover);
+                    levels.back().hover = nextSelectable (levels.back(), -1, 1);
+                }
+                else if (item.enabled)
+                {
+                    const auto picked = item.id;
+                    auto done = std::move (callback);
+                    close();
+                    if (done)
+                        done (picked);
+                }
+            }
+            break;
+        default:
+            break;
+    }
     return true;
 }
 

@@ -26,6 +26,9 @@ struct EngineStatus
     float cpuPeak = 0.0f;
     bool running = false;
     bool panicMuted = false;
+    // False when the callback thread runs under the ordinary scheduler
+    // (no rtkit / realtime-privileges): expect xruns whenever the desktop is busy.
+    bool realtimeThread = true;
 };
 
 class PatchEngine final : private juce::AudioIODeviceCallback,
@@ -173,6 +176,7 @@ private:
     std::atomic<int> currentOutputChannels { 0 };
     std::atomic<int> currentBufferSize { 128 };
     std::atomic<int> observedBlockSize { 0 }; // what the callback really gets (pipewire-jack reports its max quantum)
+    std::atomic<int> callbackScheduler { -1 }; // sched_getscheduler() of the callback thread, sampled once
     std::atomic<double> currentSampleRate { 48000.0 };
     std::array<char, 512> pendingDeviceErrorText {};
     std::atomic<int> pendingDeviceErrorLength { 0 }; // 0 empty, -1 writer/reader owns the buffer.

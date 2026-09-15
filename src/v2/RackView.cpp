@@ -644,7 +644,7 @@ void RackView::runButton (const Layout& layout, const Button& button)
     dirty = true;
 }
 
-void RackView::showCanvasMenu (double x, double y)
+std::vector<MenuItem> RackView::moduleCatalogueMenu() const
 {
     std::vector<MenuItem> items;
     juce::String group;
@@ -662,6 +662,12 @@ void RackView::showCanvasMenu (double x, double y)
     }
     if (group.isNotEmpty())
         items.push_back (MenuItem::sub (group, std::move (groupItems)));
+    return items;
+}
+
+void RackView::showCanvasMenu (double x, double y)
+{
+    auto items = moduleCatalogueMenu();
     items.push_back (MenuItem::line());
     items.push_back (MenuItem::item (1, engine.canUndo() ? "Undo " + engine.getUndoDescription() : juce::String ("Undo"), "Ctrl+Z", engine.canUndo()));
     items.push_back (MenuItem::item (2, engine.canRedo() ? "Redo " + engine.getRedoDescription() : juce::String ("Redo"), "Ctrl+Shift+Z", engine.canRedo()));
@@ -1675,6 +1681,7 @@ juce::Point<float> RackView::pedalStompCentre (const Pedal& pedal) const noexcep
 
 void RackView::drawBoard (int width, int height, double now)
 {
+    juce::ignoreUnused (width, height);
     if (boardDirty)
         rebuildBoard();
     const auto& document = engine.getDocument();
@@ -2074,9 +2081,37 @@ void RackView::pollGamepad (double now)
     if (! pad.present)
     {
         pad.present = true;
-        say ("Gamepad connected: d-pad walks pedals, A stomps, B picks a knob, stick turns it, LB/RB slots, Start toggles views");
+        say ("Gamepad connected: d-pad walks pedals, A stomps, B picks a knob, stick turns it, stick clicks open menus, LB/RB slots, Start toggles views");
     }
     auto pressed = [&] (int button) { return state.buttons[button] == GLFW_PRESS && pad.buttons[static_cast<std::size_t> (button)] != GLFW_PRESS; };
+    auto rememberButtons = [&]
+    {
+        std::copy (std::begin (state.buttons), std::begin (state.buttons) + static_cast<long> (pad.buttons.size()), pad.buttons.begin());
+    };
+
+    // A menu, browser or prompt on top: the pad becomes a keyboard for it.
+    if (menu.isOpen() || browser.isOpen() || prompt.isOpen())
+    {
+        const int arrows[4][2] = { { GLFW_GAMEPAD_BUTTON_DPAD_UP, GLFW_KEY_UP }, { GLFW_GAMEPAD_BUTTON_DPAD_DOWN, GLFW_KEY_DOWN },
+                                   { GLFW_GAMEPAD_BUTTON_DPAD_LEFT, GLFW_KEY_LEFT }, { GLFW_GAMEPAD_BUTTON_DPAD_RIGHT, GLFW_KEY_RIGHT } };
+        for (const auto& [button, keyCode] : arrows)
+        {
+            const bool held = state.buttons[button] == GLFW_PRESS;
+            if (held && (pressed (button) || now - pad.lastRepeat > 0.22))
+            {
+                key (keyCode, true, 0);
+                pad.lastRepeat = now;
+            }
+        }
+        if (pressed (GLFW_GAMEPAD_BUTTON_A))
+            key (GLFW_KEY_ENTER, true, 0);
+        if (pressed (GLFW_GAMEPAD_BUTTON_B))
+            key (GLFW_KEY_ESCAPE, true, 0);
+        if (pressed (GLFW_GAMEPAD_BUTTON_X) && browser.isOpen())
+            key (GLFW_KEY_BACKSPACE, true, 0);
+        rememberButtons();
+        return;
+    }
 
     if (pressed (GLFW_GAMEPAD_BUTTON_START))
         setMode (mode == Mode::rack ? Mode::board : Mode::rack);
@@ -2112,9 +2147,41 @@ void RackView::pollGamepad (double now)
             moveFocus (right ? 1 : left ? -1 : 0, down ? 1 : up ? -1 : 0);
             pad.lastRepeat = now;
         }
+        if (pressed (GLFW_GAMEPAD_BUTTON_LEFT_THUMB))
+        {
+            // Board menu at the focused pedal, or mid-screen when nothing has focus.
+            auto menuX = static_cast<double> (windowW) * 0.5, menuY = static_cast<double> (windowH) * 0.5;
+            if (focusPedal >= 0 && focusPedal < static_cast<int> (pedals.size()))
+            {
+                const auto& pedal = pedals[static_cast<std::size_t> (focusPedal)];
+                menuX = boardPanX + (pedal.x + pedal.w + 12.0f) * boardScale;
+                menuY = boardPanY + pedal.y * boardScale;
+            }
+            showBoardMenu (menuX, menuY);
+            rememberButtons();
+            return;
+        }
         if (focusPedal >= 0 && focusPedal < static_cast<int> (pedals.size()))
         {
             const auto& pedal = pedals[static_cast<std::size_t> (focusPedal)];
+            if (pressed (GLFW_GAMEPAD_BUTTON_RIGHT_THUMB))
+            {
+                const auto menuX = boardPanX + (pedal.x + pedal.w * 0.5f) * boardScale;
+                const auto menuY = boardPanY + (pedal.y + 24.0f) * boardScale;
+                if (pedal.groupId >= 0)
+                {
+                    selectedGroup = pedal.groupId;
+                    showGroupMenu (pedal, menuX, menuY);
+                }
+                else
+                {
+                    selectedNode = pedal.id;
+                    boardSelection = { pedal.id };
+                    showBoardPedalMenu (pedal, menuX, menuY);
+                }
+                rememberButtons();
+                return;
+            }
             if (pressed (GLFW_GAMEPAD_BUTTON_A))
             {
                 if (pedal.groupId >= 0)
@@ -2149,7 +2216,7 @@ void RackView::pollGamepad (double now)
             stickWasTurning = std::abs (stick) > 0.15f && ! pedal.knobs.empty();
         }
     }
-    std::copy (std::begin (state.buttons), std::begin (state.buttons) + static_cast<long> (pad.buttons.size()), pad.buttons.begin());
+    rememberButtons();
 }
 
 bool RackView::isBoardSelected (NodeId id) const noexcept
@@ -2204,6 +2271,64 @@ void RackView::groupSelection()
         selectedNode = 0;
         say ("Grouped " + juce::String (members.size()) + " modules into one pedal - right-click it to pick its knobs");
     });
+}
+
+void RackView::showBoardMenu (double x, double y)
+{
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::sub ("Add module", moduleCatalogueMenu()));
+    items.push_back (MenuItem::line());
+    items.push_back (MenuItem::item (1, boardSelection.size() >= 2 ? "Group the " + juce::String (boardSelection.size()) + " selected pedals into one..." : juce::String ("Group selected pedals (Shift+click to select)"), {}, boardSelection.size() >= 2));
+    items.push_back (MenuItem::item (2, "Auto-arrange every pedal"));
+    items.push_back (MenuItem::item (3, "Fit board to window", "F"));
+    items.push_back (MenuItem::line());
+    items.push_back (MenuItem::item (5, engine.canUndo() ? "Undo " + engine.getUndoDescription() : juce::String ("Undo"), "Ctrl+Z", engine.canUndo()));
+    items.push_back (MenuItem::item (6, engine.canRedo() ? "Redo " + engine.getRedoDescription() : juce::String ("Redo"), "Ctrl+Shift+Z", engine.canRedo()));
+    items.push_back (MenuItem::line());
+    items.push_back (MenuItem::item (4, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute", "M"));
+    const auto where = toBoard (x, y);
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, where] (int picked)
+    {
+        if (picked >= 1000)
+        {
+            // New pedal lands where the menu opened; the rack position trails
+            // the last module so the rack stays readable too.
+            const auto kind = static_cast<NodeKind> (picked - 1000);
+            juce::Point<float> rackPosition (40.0f, 40.0f);
+            for (const auto& node : engine.getDocument().getNodes())
+                rackPosition.x = juce::jmax (rackPosition.x, node.position.x + 260.0f);
+            const auto created = engine.addNode (kind, rackPosition);
+            if (created != 0)
+            {
+                engine.setBoardPosition (created, where);
+                selectedNode = created;
+                boardSelection = { created };
+                boardDirty = true;
+                say (nodeKindName (kind) + " added to the board");
+            }
+        }
+        else if (picked == 1) groupSelection();
+        else if (picked == 2)
+        {
+            for (const auto& node : engine.getDocument().getNodes())
+                if (node.boardPosition.has_value())
+                    engine.setBoardPosition (node.id, std::nullopt);
+            auto groups = engine.getDocument().getGroups();
+            for (auto& group : groups)
+                group.boardPosition.reset();
+            if (! groups.empty())
+                engine.setGroups (std::move (groups));
+            boardDirty = true;
+            rebuildBoard();
+            fitBoard();
+        }
+        else if (picked == 3) fitBoard();
+        else if (picked == 4) { engine.togglePanic(); say (engine.isPanicMuted() ? "Muted" : "Fading in"); }
+        else if (picked == 5) say (engine.undo() ? "Undo" : "Nothing to undo");
+        else if (picked == 6) say (engine.redo() ? "Redo" : "Nothing to redo");
+        dirty = true;
+    });
+    dirty = true;
 }
 
 void RackView::showBoardPedalMenu (const Pedal& pedal, double x, double y)
@@ -2575,33 +2700,7 @@ bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, d
     {
         if (button == GLFW_MOUSE_BUTTON_RIGHT)
         {
-            std::vector<MenuItem> items;
-            items.push_back (MenuItem::item (1, boardSelection.size() >= 2 ? "Group the " + juce::String (boardSelection.size()) + " selected pedals into one..." : juce::String ("Group selected pedals (Shift+click to select)"), {}, boardSelection.size() >= 2));
-            items.push_back (MenuItem::item (2, "Auto-arrange every pedal"));
-            items.push_back (MenuItem::item (3, "Fit board to window", "F"));
-            items.push_back (MenuItem::line());
-            items.push_back (MenuItem::item (4, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute", "M"));
-            menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this] (int picked)
-            {
-                if (picked == 1) groupSelection();
-                else if (picked == 2)
-                {
-                    for (const auto& node : engine.getDocument().getNodes())
-                        if (node.boardPosition.has_value())
-                            engine.setBoardPosition (node.id, std::nullopt);
-                    auto groups = engine.getDocument().getGroups();
-                    for (auto& group : groups)
-                        group.boardPosition.reset();
-                    if (! groups.empty())
-                        engine.setGroups (std::move (groups));
-                    boardDirty = true;
-                    rebuildBoard();
-                    fitBoard();
-                }
-                else if (picked == 3) fitBoard();
-                else if (picked == 4) { engine.togglePanic(); say (engine.isPanicMuted() ? "Muted" : "Fading in"); }
-                dirty = true;
-            });
+            showBoardMenu (x, y);
             return true;
         }
         if (button == GLFW_MOUSE_BUTTON_LEFT)
@@ -3398,6 +3497,7 @@ void RackView::drawHud (int width, int height, double now)
                     + juce::String (status.bufferSize) + " smp ("
                     + juce::String (status.bufferSize * 1000.0 / juce::jmax (1.0, status.sampleRate), 2) + " ms)   "
                     + "DSP " + juce::String (status.cpuLoad * 100.0f, 1) + "%   xruns " + juce::String (status.xruns)
+                    + (status.realtimeThread ? juce::String() : juce::String ("   NO RT PRIORITY (install rtkit or realtime-privileges)"))
                     + "   |   " + juce::String (fps, 0) + " fps  " + juce::String (lastFrameMs, 2) + " ms/frame  "
                     + juce::String (plateRenders) + " plates rasterised";
     nvgText (vg, 150.0f, 17.0f, line.toRawUTF8(), nullptr);
@@ -4096,6 +4196,14 @@ void RackView::key (int keyCode, bool pressed, int mods)
     const bool ctrl = (mods & GLFW_MOD_CONTROL) != 0;
     const bool shift = (mods & GLFW_MOD_SHIFT) != 0;
     auto say = [this] (const juce::String& text) { message = text; messageUntil = lastTick + 2.5; dirty = true; };
+
+    // The Menu key (or Shift+F10) opens whatever the right button would at the pointer.
+    if (keyCode == GLFW_KEY_MENU || (keyCode == GLFW_KEY_F10 && shift))
+    {
+        mouseButton (GLFW_MOUSE_BUTTON_RIGHT, true, 0, mouseX, mouseY);
+        mouseButton (GLFW_MOUSE_BUTTON_RIGHT, false, 0, mouseX, mouseY);
+        return;
+    }
 
     if (keyCode == GLFW_KEY_TAB)
     {

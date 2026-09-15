@@ -131,6 +131,7 @@ private:
 
     // Context menus, all built from the same MenuItem vocabulary.
     void showCanvasMenu (double x, double y);
+    [[nodiscard]] std::vector<MenuItem> moduleCatalogueMenu() const; // ids 1000 + kind
     void showModuleMenu (const Layout& layout, double x, double y);
     void showKnobMenu (const Layout& layout, int parameterIndex, double x, double y);
     void showPortMenu (const Layout& layout, bool output, int port, double x, double y);
@@ -217,7 +218,9 @@ private:
 
     // Gamepad (GLFW): the Board with no pointer. D-pad walks pedals, A stomps,
     // B cycles the focused knob, the left stick turns it, LB/RB change slot,
-    // Start toggles rack/board, Back mutes. Polled once per frame.
+    // Start toggles rack/board, Back mutes, the stick clicks open the pedal's
+    // and the board's menus; inside a menu, browser or prompt the d-pad, A and
+    // B become arrows, Enter and Escape. Polled once per frame.
     struct GamepadState
     {
         bool present = false;
@@ -241,6 +244,7 @@ private:
     std::vector<NodeId> boardSelection; // multi-select for grouping
     int selectedGroup = -1;
     [[nodiscard]] bool isBoardSelected (NodeId id) const noexcept;
+    void showBoardMenu (double x, double y);
     void showBoardPedalMenu (const Pedal& pedal, double x, double y);
     void showGroupMenu (const Pedal& pedal, double x, double y);
     void groupSelection();
