@@ -44,8 +44,13 @@ Cross-cutting from 0.3 on:
 
 ## 0.3 — One app, and a rig that keeps what you play
 
-- **Retire the JUCE UI.** Delete `src/ui`, keep `src/audio` and `src/v2`;
-  `signalpatch2` becomes `signalpatch`. One app to build, test and design.
+- **Retire the JUCE UI** (done 2026-09-15). `signalpatch2` is now the
+  `signalpatch` target and the `SignalPatch` executable; the JUCE rack builds
+  only with `-DSIGNALPATCH_BUILD_JUCE_UI=ON` (target `signalpatch_juce`) and
+  `src/ui` is deleted at the 0.3 release. Ways back, in order of how much
+  they undo: `cmake -B build -DSIGNALPATCH_BUILD_JUCE_UI=ON` (both apps on
+  the current engine); `git checkout juce-ui` (the last both-UIs tree, tagged
+  `v0.2.1`, builds forever); `git revert` of the retirement commit.
 - **Looper node**: record / overdub / undo-last-layer / half-speed / reverse;
   loop length settable by first take or locked to the drum machine's bar.
 - **Recording persistence**: sampler, 4-track and looper audio saved as WAV

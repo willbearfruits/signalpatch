@@ -25,7 +25,7 @@ Run: `./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch [patch.signalpatc
 - **Windows**: `cmake -S . -B build -A x64` — do NOT pass an explicit `-G "Visual Studio 17 2022"`; runner/user VS versions vary.
 - **Sanitizers**: `build-asan/` is configured with `-fsanitize=address,undefined -fno-sanitize-recover=all`; build `signalpatch_tests` there and run it.
 - **Flatpak**: `flatpak run org.flatpak.Builder --user --install --force-clean build-flatpak packaging/flatpak/io.github.willbearfruits.SignalPatch.yml` (manifest allows network at build time for the fetches — would need vendored sources for Flathub proper).
-- Targets: `signalpatch` (GUI app), `signalpatch_tests` (console), `nam_core` (static lib, linked **whole-archive** — NAM architectures self-register via static initializers a normal archive link drops; "No config parser registered for architecture" at model load = this regression).
+- Targets: `signalpatch` (the GLFW/OpenGL/NanoVG app, sources in `src/v2/`, executable `SignalPatch`), `signalpatch_tests` (console), `signalpatch_juce` (the retired JUCE rack, only with `-DSIGNALPATCH_BUILD_JUCE_UI=ON`; branch `juce-ui` / tag `v0.2.1` keep the last both-UIs tree), `nam_core` (static lib, linked **whole-archive** — NAM architectures self-register via static initializers a normal archive link drops; "No config parser registered for architecture" at model load = this regression).
 
 ### Tests
 

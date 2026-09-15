@@ -101,52 +101,57 @@ else()
     message(STATUS "SignalPatch: NAM disabled; Neural Amp node stays a passthrough")
 endif()
 
-juce_add_gui_app(signalpatch
-    PRODUCT_NAME "SignalPatch"
-    COMPANY_NAME "SignalPatch"
-    VERSION "${PROJECT_VERSION}")
+# --- The original JUCE rack. Retired in 0.3 but kept buildable for one
+# release: -DSIGNALPATCH_BUILD_JUCE_UI=ON brings it back next to the GLFW app.
+option(SIGNALPATCH_BUILD_JUCE_UI "Build the retired JUCE rack UI (signalpatch_juce)" OFF)
+if(SIGNALPATCH_BUILD_JUCE_UI)
+    juce_add_gui_app(signalpatch_juce
+        PRODUCT_NAME "SignalPatch (JUCE)"
+        COMPANY_NAME "SignalPatch"
+        VERSION "${PROJECT_VERSION}")
 
-juce_generate_juce_header(signalpatch)
+    juce_generate_juce_header(signalpatch_juce)
 
-target_sources(signalpatch PRIVATE
-    src/Main.cpp
-    ${SIGNALPATCH_AUDIO_SOURCES}
-    ${SIGNALPATCH_UI_SOURCES})
+    target_sources(signalpatch_juce PRIVATE
+        src/Main.cpp
+        ${SIGNALPATCH_AUDIO_SOURCES}
+        ${SIGNALPATCH_UI_SOURCES})
 
-target_compile_features(signalpatch PRIVATE cxx_std_20)
-target_compile_definitions(signalpatch PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS})
+    target_compile_features(signalpatch_juce PRIVATE cxx_std_20)
+    target_compile_definitions(signalpatch_juce PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS})
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_compile_definitions(signalpatch PRIVATE JUCE_ALSA=1 JUCE_JACK=1)
-elseif(WIN32)
-    target_compile_definitions(signalpatch PRIVATE JUCE_WASAPI=1)
-    if(SIGNALPATCH_ENABLE_ASIO)
-        target_compile_definitions(signalpatch PRIVATE JUCE_ASIO=1)
-    else()
-        target_compile_definitions(signalpatch PRIVATE JUCE_ASIO=0)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(signalpatch_juce PRIVATE JUCE_ALSA=1 JUCE_JACK=1)
+    elseif(WIN32)
+        target_compile_definitions(signalpatch_juce PRIVATE JUCE_WASAPI=1)
+        if(SIGNALPATCH_ENABLE_ASIO)
+            target_compile_definitions(signalpatch_juce PRIVATE JUCE_ASIO=1)
+        else()
+            target_compile_definitions(signalpatch_juce PRIVATE JUCE_ASIO=0)
+        endif()
     endif()
-endif()
 
-if(SIGNALPATCH_HAS_NAM)
-    target_compile_definitions(signalpatch PRIVATE SIGNALPATCH_HAS_NAM=1)
-    # Whole-archive: NAM architectures (WaveNet, LSTM, ...) register their
-    # config parsers through static initializers the linker must not drop.
-    target_link_libraries(signalpatch PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,nam_core>")
-endif()
+    if(SIGNALPATCH_HAS_NAM)
+        target_compile_definitions(signalpatch_juce PRIVATE SIGNALPATCH_HAS_NAM=1)
+        # Whole-archive: NAM architectures (WaveNet, LSTM, ...) register their
+        # config parsers through static initializers the linker must not drop.
+        target_link_libraries(signalpatch_juce PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,nam_core>")
+    endif()
 
-target_link_libraries(signalpatch
-    PRIVATE
-        juce::juce_audio_utils
-        juce::juce_audio_devices
-        juce::juce_audio_processors
-        juce::juce_dsp
-        juce::juce_gui_extra
-        juce::juce_opengl
-        juce::juce_data_structures
-        juce::juce_osc
-    PUBLIC
-        juce::juce_recommended_config_flags
-        juce::juce_recommended_warning_flags)
+    target_link_libraries(signalpatch_juce
+        PRIVATE
+            juce::juce_audio_utils
+            juce::juce_audio_devices
+            juce::juce_audio_processors
+            juce::juce_dsp
+            juce::juce_gui_extra
+            juce::juce_opengl
+            juce::juce_data_structures
+            juce::juce_osc
+        PUBLIC
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags)
+endif()
 
 enable_testing()
 
@@ -192,7 +197,6 @@ add_test(NAME signalpatch_engine_tests COMMAND signalpatch_tests)
 
 # --- Install rules (used by the flatpak and other packagers).
 include(GNUInstallDirs)
-install(TARGETS signalpatch RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 if(UNIX AND NOT APPLE)
     install(FILES packaging/linux/io.github.willbearfruits.SignalPatch.desktop
             DESTINATION "${CMAKE_INSTALL_DATADIR}/applications")
@@ -202,10 +206,10 @@ if(UNIX AND NOT APPLE)
             DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps")
 endif()
 
-# --- SignalPatch 2: GLFW + OpenGL + NanoVG rack over the same engine ---------
+# --- SignalPatch: GLFW + OpenGL + NanoVG app over the engine (was "SignalPatch 2") ---
 find_package(glfw3 3.3 QUIET)
 find_package(OpenGL QUIET)
-option(SIGNALPATCH_BUILD_V2 "Build the GLFW/OpenGL rack (signalpatch2)" ON)
+option(SIGNALPATCH_BUILD_V2 "Build the GLFW/OpenGL app (signalpatch)" ON)
 if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
     include(FetchContent)
     FetchContent_Declare(nanovg
@@ -217,22 +221,22 @@ if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/v2/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/v2/*.h")
 
-    juce_add_console_app(signalpatch2 PRODUCT_NAME "SignalPatch2")
-    juce_generate_juce_header(signalpatch2)
-    target_sources(signalpatch2 PRIVATE
+    juce_add_console_app(signalpatch PRODUCT_NAME "SignalPatch")
+    juce_generate_juce_header(signalpatch)
+    target_sources(signalpatch PRIVATE
         ${SIGNALPATCH_V2_SOURCES}
         ${SIGNALPATCH_AUDIO_SOURCES}
         "${nanovg_SOURCE_DIR}/src/nanovg.c")
-    target_include_directories(signalpatch2 SYSTEM PRIVATE "${nanovg_SOURCE_DIR}/src")
-    target_compile_features(signalpatch2 PRIVATE cxx_std_20)
-    target_compile_definitions(signalpatch2 PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS} JUCE_ALSA=1 JUCE_JACK=1
+    target_include_directories(signalpatch SYSTEM PRIVATE "${nanovg_SOURCE_DIR}/src")
+    target_compile_features(signalpatch PRIVATE cxx_std_20)
+    target_compile_definitions(signalpatch PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS} JUCE_ALSA=1 JUCE_JACK=1
         JUCE_MODAL_LOOPS_PERMITTED=1) # runDispatchLoopUntil: JUCE pumped from the GLFW frame loop
     set_source_files_properties("${nanovg_SOURCE_DIR}/src/nanovg.c" PROPERTIES COMPILE_OPTIONS "-w")
     if(SIGNALPATCH_HAS_NAM)
-        target_compile_definitions(signalpatch2 PRIVATE SIGNALPATCH_HAS_NAM=1)
-        target_link_libraries(signalpatch2 PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,nam_core>")
+        target_compile_definitions(signalpatch PRIVATE SIGNALPATCH_HAS_NAM=1)
+        target_link_libraries(signalpatch PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,nam_core>")
     endif()
-    target_link_libraries(signalpatch2
+    target_link_libraries(signalpatch
         PRIVATE
             juce::juce_audio_devices
             juce::juce_audio_formats
@@ -245,7 +249,11 @@ if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
         PUBLIC
             juce::juce_recommended_config_flags
             juce::juce_recommended_warning_flags)
-    message(STATUS "SignalPatch: building signalpatch2 (GLFW ${glfw3_VERSION})")
+    message(STATUS "SignalPatch: building signalpatch (GLFW ${glfw3_VERSION})")
 else()
-    message(STATUS "SignalPatch: signalpatch2 skipped (needs glfw3 and OpenGL)")
+    message(STATUS "SignalPatch: signalpatch skipped (needs glfw3 and OpenGL)")
+endif()
+
+if(TARGET signalpatch)
+    install(TARGETS signalpatch RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()
