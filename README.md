@@ -114,7 +114,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch          # ALSA/JACK
-pw-jack ./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch  # PipeWire
+PIPEWIRE_QUANTUM=128/48000 pw-jack ./build/signalpatch_artefacts/RelWithDebInfo/SignalPatch  # PipeWire
 ```
 
 If the status bar says **NO RT PRIORITY**, the audio thread runs under the
