@@ -1780,6 +1780,23 @@ void RackView::drawBoard (int width, int height, double now)
         nvgStrokeColor (vg, selected ? palette::selection : nvgRGBAf (1, 1, 1, 0.1f));
         nvgStrokeWidth (vg, selected ? 2.5f : 1.0f);
         nvgStroke (vg);
+        if (pad.present && focusPedal >= 0 && &pedal == &pedals[static_cast<std::size_t> (focusPedal)])
+        {
+            nvgBeginPath (vg);
+            nvgRoundedRect (vg, pedal.x - 5.0f, pedal.y - 5.0f, pedal.w + 10.0f, pedal.h + 10.0f, 13.0f);
+            nvgStrokeColor (vg, alpha (palette::control, 0.9f));
+            nvgStrokeWidth (vg, 3.0f);
+            nvgStroke (vg);
+            if (! pedal.knobs.empty() && ! pedal.hardware)
+            {
+                const auto centre = pedalKnobCentre (pedal, juce::jlimit (0, static_cast<int> (pedal.knobs.size()) - 1, focusKnob));
+                nvgBeginPath (vg);
+                nvgCircle (vg, centre.x, centre.y, 27.0f);
+                nvgStrokeColor (vg, alpha (palette::control, 0.9f));
+                nvgStrokeWidth (vg, 2.0f);
+                nvgStroke (vg);
+            }
+        }
 
         nvgFontFaceId (vg, font);
         nvgFontSize (vg, pedal.hardware ? 11.0f : 13.0f);
@@ -1990,6 +2007,146 @@ void RackView::storeSlot (int slot)
     }
     else
         say (result.getErrorMessage());
+}
+
+void RackView::moveFocus (int dx, int dy)
+{
+    if (pedals.empty())
+        return;
+    if (focusPedal < 0 || focusPedal >= static_cast<int> (pedals.size()))
+    {
+        focusPedal = 0;
+        dirty = true;
+        return;
+    }
+    const auto from = pedalBounds (pedals[static_cast<std::size_t> (focusPedal)]).getCentre();
+    int best = -1;
+    float bestScore = 1.0e9f;
+    for (std::size_t index = 0; index < pedals.size(); ++index)
+    {
+        if (static_cast<int> (index) == focusPedal)
+            continue;
+        const auto to = pedalBounds (pedals[index]).getCentre();
+        const auto vx = to.x - from.x, vy = to.y - from.y;
+        const auto along = vx * static_cast<float> (dx) + vy * static_cast<float> (dy);
+        if (along <= 10.0f)
+            continue; // not in that direction
+        const auto across = std::abs (vx * static_cast<float> (dy)) + std::abs (vy * static_cast<float> (dx));
+        const auto score = along + across * 2.5f;
+        if (score < bestScore)
+        {
+            bestScore = score;
+            best = static_cast<int> (index);
+        }
+    }
+    if (best >= 0)
+    {
+        focusPedal = best;
+        focusKnob = 0;
+        dirty = true;
+    }
+}
+
+void RackView::pollGamepad (double now)
+{
+    int jid = -1;
+    for (int candidate = GLFW_JOYSTICK_1; candidate <= GLFW_JOYSTICK_4; ++candidate)
+        if (glfwJoystickPresent (candidate) && glfwJoystickIsGamepad (candidate))
+        {
+            jid = candidate;
+            break;
+        }
+    if (jid < 0)
+    {
+        if (pad.present)
+        {
+            pad.present = false;
+            dirty = true;
+        }
+        return;
+    }
+    GLFWgamepadstate state {};
+    if (! glfwGetGamepadState (jid, &state))
+        return;
+    if (! pad.present)
+    {
+        pad.present = true;
+        say ("Gamepad connected: d-pad walks pedals, A stomps, B picks a knob, stick turns it, LB/RB slots, Start toggles views");
+    }
+    auto pressed = [&] (int button) { return state.buttons[button] == GLFW_PRESS && pad.buttons[static_cast<std::size_t> (button)] != GLFW_PRESS; };
+
+    if (pressed (GLFW_GAMEPAD_BUTTON_START))
+        setMode (mode == Mode::rack ? Mode::board : Mode::rack);
+    if (pressed (GLFW_GAMEPAD_BUTTON_BACK))
+    {
+        engine.togglePanic();
+        say (engine.isPanicMuted() ? "Muted" : "Fading in");
+    }
+    if (pressed (GLFW_GAMEPAD_BUTTON_LEFT_BUMPER))
+        loadSlot (activeSlot <= 0 ? slotCount - 1 : activeSlot - 1);
+    if (pressed (GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER))
+        loadSlot (activeSlot < 0 ? 0 : (activeSlot + 1) % slotCount);
+    if (pressed (GLFW_GAMEPAD_BUTTON_X))
+        say (engine.undo() ? "Undo" : "Nothing to undo");
+    if (pressed (GLFW_GAMEPAD_BUTTON_Y))
+    {
+        if (mode == Mode::board) fitBoard(); else fitToPatch (windowW, windowH);
+    }
+
+    if (mode == Mode::board)
+    {
+        if (boardDirty)
+            rebuildBoard();
+        // D-pad with auto-repeat while held.
+        const bool up = state.buttons[GLFW_GAMEPAD_BUTTON_DPAD_UP] == GLFW_PRESS;
+        const bool down = state.buttons[GLFW_GAMEPAD_BUTTON_DPAD_DOWN] == GLFW_PRESS;
+        const bool left = state.buttons[GLFW_GAMEPAD_BUTTON_DPAD_LEFT] == GLFW_PRESS;
+        const bool right = state.buttons[GLFW_GAMEPAD_BUTTON_DPAD_RIGHT] == GLFW_PRESS;
+        const bool anyNew = pressed (GLFW_GAMEPAD_BUTTON_DPAD_UP) || pressed (GLFW_GAMEPAD_BUTTON_DPAD_DOWN)
+                         || pressed (GLFW_GAMEPAD_BUTTON_DPAD_LEFT) || pressed (GLFW_GAMEPAD_BUTTON_DPAD_RIGHT);
+        if ((up || down || left || right) && (anyNew || now - pad.lastRepeat > 0.28))
+        {
+            moveFocus (right ? 1 : left ? -1 : 0, down ? 1 : up ? -1 : 0);
+            pad.lastRepeat = now;
+        }
+        if (focusPedal >= 0 && focusPedal < static_cast<int> (pedals.size()))
+        {
+            const auto& pedal = pedals[static_cast<std::size_t> (focusPedal)];
+            if (pressed (GLFW_GAMEPAD_BUTTON_A))
+            {
+                if (pedal.groupId >= 0)
+                    toggleGroupBypass (pedal);
+                else if (const auto* model = engine.getDocument().findNode (pedal.id); model != nullptr && pedal.stomp)
+                    engine.setNodeBypassed (pedal.id, ! model->processor->isBypassed());
+                dirty = true;
+            }
+            if (pressed (GLFW_GAMEPAD_BUTTON_B) && ! pedal.knobs.empty())
+            {
+                focusKnob = (focusKnob + 1) % static_cast<int> (pedal.knobs.size());
+                dirty = true;
+            }
+            const auto stick = -state.axes[GLFW_GAMEPAD_AXIS_LEFT_Y]; // up = positive
+            if (std::abs (stick) > 0.15f && ! pedal.knobs.empty())
+            {
+                const auto [ownerId, parameterIndex] = pedal.knobs[static_cast<std::size_t> (juce::jlimit (0, static_cast<int> (pedal.knobs.size()) - 1, focusKnob))];
+                if (const auto* owner = engine.getDocument().findNode (ownerId))
+                {
+                    const auto& parameter = owner->processor->getParameter (parameterIndex);
+                    const auto dt = juce::jlimit (0.0, 0.1, now - lastTick);
+                    const auto shaped = stick * std::abs (stick); // gentle near the centre
+                    const auto next = juce::jlimit (0.0f, 1.0f, parameter.getNormalisedValue() + shaped * 0.7f * static_cast<float> (dt));
+                    engine.setParameter (ownerId, parameterIndex, parameter.range.convertFrom0to1 (next));
+                    invalidatePlate (ownerId);
+                    animating = true;
+                    dirty = true;
+                }
+            }
+            else if (stickWasTurning)
+                engine.closeEditGesture(); // stick released: one undo step per turn
+            stickWasTurning = std::abs (stick) > 0.15f && ! pedal.knobs.empty();
+        }
+    }
+    std::copy (std::begin (state.buttons), std::begin (state.buttons) + static_cast<long> (pad.buttons.size()), pad.buttons.begin());
 }
 
 bool RackView::isBoardSelected (NodeId id) const noexcept
@@ -2709,6 +2866,7 @@ void RackView::tick (double now)
         animating = true; // caret blink
         dirty = true;
     }
+    pollGamepad (now);
     if (glide.has_value())
     {
         const auto t = juce::jlimit (0.0, 1.0, (now - glide->start) / glide->duration);
@@ -3248,7 +3406,7 @@ void RackView::drawHud (int width, int height, double now)
         float bounds[4] {};
         nvgTextBounds (vg, 150.0f, 17.0f, line.toRawUTF8(), nullptr, bounds);
         nvgFillColor (vg, inputs.isEmpty() ? alpha (palette::mutedText, 0.6f) : palette::control);
-        nvgText (vg, bounds[2] + 24.0f, 17.0f, midiLine.toRawUTF8(), nullptr);
+        nvgText (vg, bounds[2] + 24.0f, 17.0f, (midiLine + (pad.present ? "   GAMEPAD" : "")).toRawUTF8(), nullptr);
     }
     if (learnTarget.has_value())
     {

@@ -5,6 +5,7 @@
 
 #include <nanovg.h>
 
+#include <array>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -213,6 +214,23 @@ private:
     };
     std::optional<BoardDrag> boardDrag;
     std::optional<Glide> glide;
+
+    // Gamepad (GLFW): the Board with no pointer. D-pad walks pedals, A stomps,
+    // B cycles the focused knob, the left stick turns it, LB/RB change slot,
+    // Start toggles rack/board, Back mutes. Polled once per frame.
+    struct GamepadState
+    {
+        bool present = false;
+        std::array<unsigned char, 15> buttons {};
+        double lastRepeat = 0.0;
+    };
+    GamepadState pad;
+    int focusPedal = -1; // index into pedals
+    int focusKnob = 0;
+    bool stickWasTurning = false;
+    void pollGamepad (double now);
+    void moveFocus (int dx, int dy);
+    [[nodiscard]] juce::Rectangle<float> pedalBounds (const Pedal& pedal) const noexcept { return { pedal.x, pedal.y, pedal.w, pedal.h }; }
 
     // MIDI learn: the next CC / note / program change binds to this target.
     std::optional<MidiMapping> learnTarget;
