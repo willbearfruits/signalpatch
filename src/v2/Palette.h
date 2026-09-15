@@ -4,6 +4,8 @@
 
 #include <nanovg.h>
 
+#include <vector>
+
 // Colours for the GPU rack. Same palette as the JUCE rack so patches read
 // identically in both; kept here because the v2 target links no JUCE GUI.
 namespace signalpatch::v2
@@ -102,5 +104,56 @@ inline NVGcolor accent (NodeKind kind) noexcept
         case NodeKind::cabinet:              return rgb (0xffd9a066);
     }
     return palette::selection;
+}
+struct ModuleEntry
+{
+    NodeKind kind;
+    const char* label;
+    const char* group;
+};
+
+// Same vocabulary and grouping as the JUCE palette.
+inline const std::vector<ModuleEntry>& moduleCatalogue()
+{
+    static const std::vector<ModuleEntry> entries {
+        { NodeKind::gain,                 "GAIN",           "UTILITY" },
+        { NodeKind::mixer,                "4-CH MIXER",     "UTILITY" },
+        { NodeKind::crossfade,            "CROSSFADE",      "UTILITY" },
+        { NodeKind::distortion,           "DISTORTION",     "EFFECTS" },
+        { NodeKind::filter,               "FILTER",         "EFFECTS" },
+        { NodeKind::delay,                "DELAY",          "EFFECTS" },
+        { NodeKind::reverb,               "REVERB",         "EFFECTS" },
+        { NodeKind::chorus,               "CHORUS",         "EFFECTS" },
+        { NodeKind::phaser,               "PHASER",         "EFFECTS" },
+        { NodeKind::tremolo,              "TREMOLO",        "EFFECTS" },
+        { NodeKind::bitcrusher,           "BITCRUSHER",     "EFFECTS" },
+        { NodeKind::ringMod,              "RING MOD",       "EFFECTS" },
+        { NodeKind::pitchShifter,         "PITCH SHIFTER",  "EFFECTS" },
+        { NodeKind::granular,             "GRANULAR",       "EFFECTS" },
+        { NodeKind::neuralAmpPlaceholder, "NEURAL AMP",     "NEURAL" },
+        { NodeKind::neuralPedal,          "NEURAL PEDAL",   "NEURAL" },
+        { NodeKind::cabinet,              "CABINET",        "NEURAL" },
+        { NodeKind::vowelFilter,          "VOWEL FILTER",   "VOICE" },
+        { NodeKind::vocoder,              "VOCODER",        "VOICE" },
+        { NodeKind::pitchCorrector,       "AUTOTUNE",       "VOICE" },
+        { NodeKind::monoSynth,            "MONO SYNTH",     "INSTRUMENTS" },
+        { NodeKind::pluck,                "PLUCK",          "INSTRUMENTS" },
+        { NodeKind::noiseSource,          "NOISE",          "INSTRUMENTS" },
+        { NodeKind::drumMachine,          "DRUM MACHINE",   "INSTRUMENTS" },
+        { NodeKind::sampler,              "SAMPLER",        "INSTRUMENTS" },
+        { NodeKind::fourTrack,            "4-TRACK",        "INSTRUMENTS" },
+        { NodeKind::compressor,           "COMPRESSOR",     "DYNAMICS" },
+        { NodeKind::limiter,              "LIMITER",        "DYNAMICS" },
+        { NodeKind::gate,                 "NOISE GATE",     "DYNAMICS" },
+        { NodeKind::feedbackGuard,        "FEEDBACK GUARD", "DYNAMICS" },
+        { NodeKind::lfo,                  "LFO",            "CONTROL" },
+        { NodeKind::randomLfo,            "RANDOM",         "CONTROL" },
+        { NodeKind::envelopeFollower,     "ENVELOPE",       "CONTROL" },
+        { NodeKind::stepSequencer,        "8-STEP SEQ",     "CONTROL" },
+        { NodeKind::macro,                "MACRO",          "CONTROL" },
+        { NodeKind::spectralFollower,     "SPECTRAL (FFT)", "CONTROL" },
+        { NodeKind::script,               "SCRIPT",         "CONTROL" },
+    };
+    return entries;
 }
 } // namespace signalpatch::v2

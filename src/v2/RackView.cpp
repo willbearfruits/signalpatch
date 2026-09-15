@@ -51,7 +51,7 @@ namespace
 } // namespace
 
 RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
-    : engine (engineToUse), vg (context), font (fontId)
+    : engine (engineToUse), vg (context), font (fontId), menu (context, fontId), prompt (context, fontId)
 {
     engine.addChangeListener (this);
 }
@@ -112,6 +112,41 @@ void RackView::rebuildLayouts()
             if (layout.kind == NodeKind::drumMachine && index >= 5)
                 continue;
             layout.knobParameters.push_back (index);
+        }
+        auto button = [&layout] (const char* label, const char* command, NVGcolor active, int row = 0)
+        {
+            layout.buttons.push_back ({ label, command, row, active });
+        };
+        switch (layout.kind)
+        {
+            case NodeKind::sampler:
+                button ("REC", "rec", palette::warning);
+                button ("PLAY", "play", palette::okay);
+                button ("CLR", "clear", palette::mutedText);
+                break;
+            case NodeKind::fourTrack:
+                button ("PLAY", "play", palette::okay);
+                button ("REC", "rec", palette::warning);
+                button ("RTZ", "rtz", palette::mutedText);
+                for (int track = 1; track <= 4; ++track)
+                    button (juce::String (track).toRawUTF8(), ("arm" + juce::String (track)).toRawUTF8(), palette::warning, 1);
+                break;
+            case NodeKind::neuralAmpPlaceholder:
+            case NodeKind::neuralPedal:
+                button ("<", "prev-model", palette::panelRaised);
+                button ("LOAD", "load", palette::panelRaised);
+                button (">", "next-model", palette::panelRaised);
+                break;
+            case NodeKind::cabinet:
+                button ("<", "prev-ir", palette::panelRaised);
+                button ("IR A", "load-a", palette::panelRaised);
+                button ("IR B", "load-b", palette::panelRaised);
+                button (">", "next-ir", palette::panelRaised);
+                break;
+            case NodeKind::feedbackGuard:
+                button ("RESET LOOP", "reset-loop", palette::feedback);
+                break;
+            default: break;
         }
         const auto portRows = juce::jmax (layout.inputs, layout.outputs);
         layout.previewY = previewTop;
@@ -238,6 +273,356 @@ void RackView::fitToPatch (int width, int height)
     dirty = true;
 }
 
+juce::Rectangle<float> RackView::buttonBounds (const Layout& layout, juce::Point<float> origin, int index) const noexcept
+{
+    const auto& button = layout.buttons[static_cast<std::size_t> (index)];
+    int rowCount = 0, indexInRow = 0;
+    for (int i = 0; i < static_cast<int> (layout.buttons.size()); ++i)
+        if (layout.buttons[static_cast<std::size_t> (i)].row == button.row)
+        {
+            if (i == index)
+                indexInRow = rowCount;
+            ++rowCount;
+        }
+    const auto rows = 1 + (layout.kind == NodeKind::fourTrack ? 1 : 0);
+    const auto bottom = origin.y + layout.h - railHeight - 6.0f - (layout.stomp ? stompZoneHeight : 0.0f);
+    const auto y = bottom - 26.0f - static_cast<float> (rows - 1 - button.row) * 28.0f;
+    const auto width = (layout.w - 24.0f - static_cast<float> (rowCount - 1) * 6.0f) / static_cast<float> (rowCount);
+    return { origin.x + 12.0f + static_cast<float> (indexInRow) * (width + 6.0f), y, width, 22.0f };
+}
+
+void RackView::say (const juce::String& text)
+{
+    message = text;
+    messageUntil = lastTick + 3.0;
+    dirty = true;
+}
+
+void RackView::runButton (const Layout& layout, const Button& button)
+{
+    if (button.command == "load" || button.command == "load-a" || button.command == "load-b")
+        say ("File browser is next on the list - the < > buttons step through the folder for now");
+    else if (button.command == "reset-loop")
+        engine.resetNodeSafety (layout.id);
+    else
+        engine.sendNodeCommand (layout.id, button.command);
+    dirty = true;
+}
+
+void RackView::showCanvasMenu (double x, double y)
+{
+    std::vector<MenuItem> items;
+    juce::String group;
+    std::vector<MenuItem> groupItems;
+    for (const auto& entry : moduleCatalogue())
+    {
+        if (group != entry.group)
+        {
+            if (group.isNotEmpty())
+                items.push_back (MenuItem::sub (group, std::move (groupItems)));
+            groupItems.clear();
+            group = entry.group;
+        }
+        groupItems.push_back (MenuItem::item (1000 + static_cast<int> (entry.kind), entry.label));
+    }
+    if (group.isNotEmpty())
+        items.push_back (MenuItem::sub (group, std::move (groupItems)));
+    items.push_back (MenuItem::line());
+    items.push_back (MenuItem::item (1, engine.canUndo() ? "Undo " + engine.getUndoDescription() : juce::String ("Undo"), "Ctrl+Z", engine.canUndo()));
+    items.push_back (MenuItem::item (2, engine.canRedo() ? "Redo " + engine.getRedoDescription() : juce::String ("Redo"), "Ctrl+Shift+Z", engine.canRedo()));
+    items.push_back (MenuItem::line());
+    items.push_back (MenuItem::item (3, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute", "M"));
+    items.push_back (MenuItem::item (4, "Fit patch to window", "F"));
+    const auto world = toWorld (x, y);
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, world] (int id)
+    {
+        if (id >= 1000)
+        {
+            const auto kind = static_cast<NodeKind> (id - 1000);
+            const auto created = engine.addNode (kind, world - juce::Point<float> (118.0f, 40.0f));
+            if (created != 0)
+            {
+                selectedNode = created;
+                say (nodeKindName (kind) + " added");
+            }
+        }
+        else if (id == 1) say (engine.undo() ? "Undo" : "Nothing to undo");
+        else if (id == 2) say (engine.redo() ? "Redo" : "Nothing to redo");
+        else if (id == 3) { engine.togglePanic(); say (engine.isPanicMuted() ? "Muted" : "Fading in"); }
+        else if (id == 4) fitToPatch (windowW, windowH);
+        dirty = true;
+    });
+    dirty = true;
+}
+
+void RackView::showModuleMenu (const Layout& layout, double x, double y)
+{
+    const auto* model = engine.getDocument().findNode (layout.id);
+    if (model == nullptr)
+        return;
+    int cableCount = 0;
+    for (const auto& connection : engine.getDocument().getConnections())
+        if (connection.sourceNode == layout.id || connection.destinationNode == layout.id)
+            ++cableCount;
+    enum { bypass = 1, rename, duplicate, resetKnobs, disconnectAll, remove, prevModel, nextModel, prevIr, nextIr, clearIrB };
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::sectionHeader (model->processor->getName().toUpperCase()));
+    if (layout.stomp)
+        items.push_back (MenuItem::item (bypass, model->processor->isBypassed() ? "Enable (unbypass)" : "Bypass", "stomp"));
+    if (! layout.hardware)
+    {
+        items.push_back (MenuItem::item (rename, "Rename...", "dbl-click"));
+        items.push_back (MenuItem::item (duplicate, "Duplicate", "Ctrl+D"));
+        items.push_back (MenuItem::item (resetKnobs, "Reset knobs to defaults", {}, ! layout.knobParameters.empty()));
+    }
+    items.push_back (MenuItem::item (disconnectAll, "Disconnect all cables (" + juce::String (cableCount) + ")", {}, cableCount > 0));
+    if (layout.kind == NodeKind::neuralAmpPlaceholder || layout.kind == NodeKind::neuralPedal)
+    {
+        items.push_back (MenuItem::line());
+        items.push_back (MenuItem::item (prevModel, "Previous model in folder"));
+        items.push_back (MenuItem::item (nextModel, "Next model in folder"));
+    }
+    else if (layout.kind == NodeKind::cabinet)
+    {
+        items.push_back (MenuItem::line());
+        items.push_back (MenuItem::item (prevIr, "Previous impulse in folder"));
+        items.push_back (MenuItem::item (nextIr, "Next impulse in folder"));
+        items.push_back (MenuItem::item (clearIrB, "Clear impulse B", {}, model->processor->getExtraState().hasProperty ("irB")));
+    }
+    if (! layout.hardware)
+    {
+        items.push_back (MenuItem::line());
+        items.push_back (MenuItem::item (remove, "Delete", "Del"));
+    }
+    const auto id = layout.id;
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, id] (int picked)
+    {
+        const auto* current = engine.getDocument().findNode (id);
+        if (current == nullptr)
+            return;
+        switch (picked)
+        {
+            case bypass: engine.setNodeBypassed (id, ! current->processor->isBypassed()); break;
+            case rename:
+                prompt.open ("Rename module", current->processor->getName(), [this, id] (const juce::String& name)
+                {
+                    const auto result = engine.renameNode (id, name);
+                    say (result.wasOk() ? "Renamed" : result.getErrorMessage());
+                });
+                break;
+            case duplicate:
+            {
+                const auto copy = engine.duplicateNode (id);
+                if (copy != 0) { selectedNode = copy; say ("Duplicated"); }
+                break;
+            }
+            case resetKnobs:
+                for (int index = 0; index < current->processor->getNumParameters(); ++index)
+                    engine.setParameter (id, index, current->processor->getParameter (index).defaultValue);
+                engine.closeEditGesture();
+                invalidatePlate (id);
+                break;
+            case disconnectAll:
+            {
+                const auto cables = engine.getDocument().getConnections();
+                for (const auto& cable : cables)
+                    if (cable.sourceNode == id || cable.destinationNode == id)
+                        engine.disconnect (cable);
+                break;
+            }
+            case remove:
+                if (engine.removeNode (id)) { selectedNode = 0; say ("Module removed"); }
+                break;
+            case prevModel: engine.sendNodeCommand (id, "prev-model"); break;
+            case nextModel: engine.sendNodeCommand (id, "next-model"); break;
+            case prevIr:    engine.sendNodeCommand (id, "prev-ir"); break;
+            case nextIr:    engine.sendNodeCommand (id, "next-ir"); break;
+            case clearIrB:
+            {
+                auto state = current->processor->getExtraState();
+                if (auto* object = state.getDynamicObject())
+                {
+                    object->removeProperty ("irB");
+                    engine.applyNodeExtraState (id, state);
+                }
+                break;
+            }
+            default: break;
+        }
+        dirty = true;
+    });
+    dirty = true;
+}
+
+void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x, double y)
+{
+    const auto* model = engine.getDocument().findNode (layout.id);
+    if (model == nullptr)
+        return;
+    const auto& parameter = model->processor->getParameter (parameterIndex);
+    std::optional<Connection> modulation;
+    if (parameter.inputPortIndex >= 0)
+        for (const auto& connection : engine.getDocument().getConnections())
+            if (connection.destinationNode == layout.id && connection.destinationPort == parameter.inputPortIndex)
+                modulation = connection;
+    enum { reset = 1, setValue, zeroDepth, fullDepth, removeModulation };
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::sectionHeader (parameter.name.toUpperCase()));
+    items.push_back (MenuItem::item (reset, "Reset to default (" + juce::String (parameter.defaultValue, 2) + ")", "dbl-click"));
+    items.push_back (MenuItem::item (setValue, "Set value..."));
+    if (parameter.inputPortIndex >= 0)
+    {
+        items.push_back (MenuItem::line());
+        items.push_back (MenuItem::item (zeroDepth, "Mod depth 0", {}, parameter.getModulationDepth() > 0.0f));
+        items.push_back (MenuItem::item (fullDepth, "Mod depth 100%", {}, parameter.getModulationDepth() < 1.0f));
+        items.push_back (MenuItem::item (removeModulation, "Disconnect modulation cable", {}, modulation.has_value()));
+    }
+    const auto id = layout.id;
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, id, parameterIndex, modulation] (int picked)
+    {
+        const auto* current = engine.getDocument().findNode (id);
+        if (current == nullptr)
+            return;
+        const auto& current_parameter = current->processor->getParameter (parameterIndex);
+        switch (picked)
+        {
+            case reset: engine.setParameter (id, parameterIndex, current_parameter.defaultValue); break;
+            case setValue:
+                prompt.open ("Set " + current_parameter.name + (current_parameter.unit.isNotEmpty() ? " (" + current_parameter.unit + ")" : juce::String()),
+                             juce::String (current_parameter.getValue(), 3), [this, id, parameterIndex] (const juce::String& text)
+                {
+                    const auto* node = engine.getDocument().findNode (id);
+                    if (node == nullptr)
+                        return;
+                    const auto& range = node->processor->getParameter (parameterIndex).range;
+                    engine.setParameter (id, parameterIndex, juce::jlimit (range.start, range.end, text.getFloatValue()));
+                    engine.closeEditGesture();
+                    invalidatePlate (id);
+                    dirty = true;
+                });
+                return;
+            case zeroDepth: engine.setModulationDepth (id, parameterIndex, 0.0f); break;
+            case fullDepth: engine.setModulationDepth (id, parameterIndex, 1.0f); break;
+            case removeModulation:
+                if (modulation.has_value())
+                    engine.disconnect (*modulation);
+                break;
+            default: return;
+        }
+        engine.closeEditGesture();
+        invalidatePlate (id);
+        dirty = true;
+    });
+    dirty = true;
+}
+
+void RackView::showPortMenu (const Layout& layout, bool output, int port, double x, double y)
+{
+    const auto* model = engine.getDocument().findNode (layout.id);
+    if (model == nullptr)
+        return;
+    std::vector<Connection> cables;
+    for (const auto& connection : engine.getDocument().getConnections())
+        if ((output && connection.sourceNode == layout.id && connection.sourcePort == port)
+            || (! output && connection.destinationNode == layout.id && connection.destinationPort == port))
+            cables.push_back (connection);
+    const auto& info = output ? model->processor->getOutputPort (port) : model->processor->getInputPort (port);
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::sectionHeader ((output ? "OUT  " : "IN  ") + info.name.toUpperCase()));
+    if (cables.empty())
+        items.push_back (MenuItem::item (0, "No cables - drag from the port to connect", {}, false));
+    else
+    {
+        items.push_back (MenuItem::item (1, "Disconnect all (" + juce::String (cables.size()) + ")"));
+        items.push_back (MenuItem::line());
+        for (std::size_t index = 0; index < cables.size(); ++index)
+        {
+            const auto& cable = cables[index];
+            const auto otherId = output ? cable.destinationNode : cable.sourceNode;
+            const auto* other = engine.getDocument().findNode (otherId);
+            const auto otherName = other != nullptr ? other->processor->getName() : juce::String ("?");
+            const auto otherPort = other == nullptr ? juce::String()
+                : (output ? other->processor->getInputPort (cable.destinationPort).name
+                          : other->processor->getOutputPort (cable.sourcePort).name);
+            items.push_back (MenuItem::item (100 + static_cast<int> (index),
+                                             juce::String (output ? "Remove cable to " : "Remove cable from ") + otherName + " / " + otherPort));
+        }
+    }
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, cables] (int picked)
+    {
+        if (picked == 1)
+            for (const auto& cable : cables)
+                engine.disconnect (cable);
+        else if (picked >= 100 && juce::isPositiveAndBelow (picked - 100, static_cast<int> (cables.size())))
+            engine.disconnect (cables[static_cast<std::size_t> (picked - 100)]);
+        dirty = true;
+    });
+    dirty = true;
+}
+
+void RackView::insertNodeOnCable (const Connection& cable, NodeKind kind, juce::Point<float> world)
+{
+    const auto id = engine.addNode (kind, world - juce::Point<float> (118.0f, 40.0f));
+    if (id == 0)
+        return;
+    const auto* node = engine.getDocument().findNode (id);
+    if (node == nullptr || node->processor->getNumInputPorts() == 0 || node->processor->getNumOutputPorts() == 0)
+    {
+        say (nodeKindName (kind) + " added (could not splice it into the cable)");
+        return;
+    }
+    engine.disconnect (cable);
+    const auto in = engine.connect ({ cable.sourceNode, cable.sourcePort, id, 0 });
+    const auto out = engine.connect ({ id, 0, cable.destinationNode, cable.destinationPort });
+    selectedNode = id;
+    say (in.wasOk() && out.wasOk() ? nodeKindName (kind) + " inserted into the cable"
+                                   : (in.failed() ? in.getErrorMessage() : out.getErrorMessage()));
+}
+
+void RackView::showCableMenu (const Connection& cable, double x, double y)
+{
+    const auto* source = engine.getDocument().findNode (cable.sourceNode);
+    const bool audioCable = source != nullptr && source->processor->getOutputPort (cable.sourcePort).type == SignalType::audio;
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::item (1, "Disconnect cable", "Del"));
+    if (audioCable)
+    {
+        std::vector<MenuItem> insert;
+        juce::String group;
+        std::vector<MenuItem> groupItems;
+        for (const auto& entry : moduleCatalogue())
+        {
+            const juce::String entryGroup (entry.group);
+            if (entryGroup != "EFFECTS" && entryGroup != "NEURAL" && entryGroup != "DYNAMICS" && entryGroup != "VOICE" && entry.kind != NodeKind::gain)
+                continue;
+            if (group != entryGroup)
+            {
+                if (group.isNotEmpty())
+                    insert.push_back (MenuItem::sub (group, std::move (groupItems)));
+                groupItems.clear();
+                group = entryGroup;
+            }
+            groupItems.push_back (MenuItem::item (1000 + static_cast<int> (entry.kind), entry.label));
+        }
+        if (group.isNotEmpty())
+            insert.push_back (MenuItem::sub (group, std::move (groupItems)));
+        items.push_back (MenuItem::sub ("Insert module here", std::move (insert)));
+    }
+    const auto world = toWorld (x, y);
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, cable, world] (int picked)
+    {
+        if (picked == 1)
+        {
+            engine.disconnect (cable);
+            say ("Cable removed");
+        }
+        else if (picked >= 1000)
+            insertNodeOnCable (cable, static_cast<NodeKind> (picked - 1000), world);
+        dirty = true;
+    });
+    dirty = true;
+}
+
 // ---------------------------------------------------------------- frame loop
 
 void RackView::tick (double now)
@@ -281,6 +666,11 @@ void RackView::tick (double now)
     if (message.isNotEmpty() && now > messageUntil)
     {
         message.clear();
+        dirty = true;
+    }
+    if (prompt.isOpen())
+    {
+        animating = true; // caret blink
         dirty = true;
     }
 }
@@ -738,6 +1128,25 @@ void RackView::drawNode (const Layout& layout, double now)
         nvgText (vg, centre.x + 22.0f, centre.y, bypassed ? "BYP" : "ON", nullptr);
     }
 
+    for (std::size_t index = 0; index < layout.buttons.size(); ++index)
+    {
+        const auto& button = layout.buttons[index];
+        const auto bounds = buttonBounds (layout, origin, static_cast<int> (index));
+        const bool lit = model->processor->uiToggleState (button.command);
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), 4.0f);
+        nvgFillColor (vg, lit ? button.active : palette::panelRaised);
+        nvgFill (vg);
+        nvgStrokeColor (vg, nvgRGBAf (1, 1, 1, lit ? 0.18f : 0.08f));
+        nvgStrokeWidth (vg, 1.0f);
+        nvgStroke (vg);
+        nvgFontFaceId (vg, font);
+        nvgFontSize (vg, 10.0f);
+        nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgFillColor (vg, lit ? palette::nodeDark : palette::text);
+        nvgText (vg, bounds.getCentreX(), bounds.getCentreY(), button.label.toRawUTF8(), nullptr);
+    }
+
     if (bypassed)
     {
         nvgBeginPath (vg);
@@ -815,6 +1224,9 @@ void RackView::render (int width, int height, float ratio, double now)
 {
     const auto start = juce::Time::getMillisecondCounterHiRes();
     pixelRatio = ratio;
+    windowW = width;
+    windowH = height;
+    menu.setWindowSize (width, height);
     if (structureDirty)
         rebuildLayouts();
 
@@ -886,6 +1298,8 @@ void RackView::render (int width, int height, float ratio, double now)
     nvgRestore (vg);
 
     drawHud (width, height, now);
+    menu.draw (width, height);
+    prompt.draw (width, height, now);
     nvgEndFrame (vg);
 
     lastFrameMs = juce::Time::getMillisecondCounterHiRes() - start;
@@ -900,10 +1314,22 @@ void RackView::render (int width, int height, float ratio, double now)
 
 // ---------------------------------------------------------------- input
 
+void RackView::character (unsigned int codepoint)
+{
+    if (prompt.character (static_cast<juce::juce_wchar> (codepoint)))
+        dirty = true;
+}
+
 void RackView::mouseMove (double x, double y)
 {
     mouseX = x;
     mouseY = y;
+    if (menu.isOpen())
+    {
+        menu.mouseMove (static_cast<float> (x), static_cast<float> (y));
+        dirty = true;
+        return;
+    }
     const auto world = toWorld (x, y);
     if (draggingNode.has_value())
     {
@@ -941,8 +1367,61 @@ void RackView::mouseMove (double x, double y)
 void RackView::mouseButton (int button, bool pressed, int mods, double x, double y)
 {
     juce::ignoreUnused (mods);
+    if (prompt.isOpen())
+        return;
+    if (menu.isOpen())
+    {
+        menu.mouseButton (button, pressed, static_cast<float> (x), static_cast<float> (y));
+        dirty = true;
+        return;
+    }
     const auto world = toWorld (x, y);
     const auto hit = static_cast<float> (1.0 / zoom);
+
+    if (pressed && button == GLFW_MOUSE_BUTTON_RIGHT)
+    {
+        for (auto it = layouts.rbegin(); it != layouts.rend(); ++it)
+        {
+            const auto origin = nodePosition (it->id);
+            const juce::Rectangle<float> bounds (origin.x, origin.y, it->w, it->h);
+            if (! bounds.expanded (10.0f * hit).contains (world))
+                continue;
+            for (std::size_t knob = 0; knob < it->knobParameters.size(); ++knob)
+                if (knobCentre (*it, origin, static_cast<int> (knob)).getDistanceFrom (world) <= 26.0f)
+                {
+                    showKnobMenu (*it, it->knobParameters[knob], x, y);
+                    return;
+                }
+            for (int port = 0; port < it->outputs; ++port)
+                if (outputPortCentre (*it, origin, port).getDistanceFrom (world) <= 11.0f * hit)
+                {
+                    showPortMenu (*it, true, port, x, y);
+                    return;
+                }
+            for (int port = 0; port < it->inputs; ++port)
+                if (inputPortCentre (*it, origin, port).getDistanceFrom (world) <= 11.0f * hit)
+                {
+                    showPortMenu (*it, false, port, x, y);
+                    return;
+                }
+            if (bounds.contains (world))
+            {
+                selectedNode = it->id;
+                selectedCable.reset();
+                showModuleMenu (*it, x, y);
+                return;
+            }
+        }
+        if (const auto cable = cableNear (world, 7.0f * hit))
+        {
+            selectedCable = cable;
+            selectedNode = 0;
+            showCableMenu (*cable, x, y);
+            return;
+        }
+        showCanvasMenu (x, y);
+        return;
+    }
 
     if (! pressed)
     {
@@ -995,10 +1474,41 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
         if (model == nullptr)
             continue;
 
+        for (std::size_t index = 0; index < layout.buttons.size(); ++index)
+            if (buttonBounds (layout, origin, static_cast<int> (index)).contains (world))
+            {
+                runButton (layout, layout.buttons[index]);
+                return;
+            }
+        // Double-click: name plate renames, a knob resets to its default.
+        const auto clickTime = lastTick;
+        const bool doubleClick = clickTime - lastClickTime < 0.35 && juce::Point<double> (x, y).getDistanceFrom ({ lastClickX, lastClickY }) < 6.0;
+        lastClickTime = clickTime;
+        lastClickX = x;
+        lastClickY = y;
+        if (doubleClick && world.y <= origin.y + railHeight + headerHeight && ! layout.hardware)
+        {
+            const auto id = layout.id;
+            prompt.open ("Rename module", model->processor->getName(), [this, id] (const juce::String& name)
+            {
+                const auto result = engine.renameNode (id, name);
+                say (result.wasOk() ? "Renamed" : result.getErrorMessage());
+            });
+            dirty = true;
+            return;
+        }
         for (std::size_t knob = 0; knob < layout.knobParameters.size(); ++knob)
             if (knobCentre (layout, origin, static_cast<int> (knob)).getDistanceFrom (world) <= 26.0f)
             {
                 const auto parameterIndex = layout.knobParameters[knob];
+                if (doubleClick)
+                {
+                    engine.setParameter (layout.id, parameterIndex, model->processor->getParameter (parameterIndex).defaultValue);
+                    engine.closeEditGesture();
+                    invalidatePlate (layout.id);
+                    dirty = true;
+                    return;
+                }
                 knobDrag = KnobDrag { layout.id, parameterIndex, y,
                                       model->processor->getParameter (parameterIndex).getNormalisedValue() };
                 selectedNode = layout.id;
@@ -1098,6 +1608,18 @@ void RackView::key (int keyCode, bool pressed, int mods)
 {
     if (! pressed)
         return;
+    if (prompt.isOpen())
+    {
+        prompt.key (keyCode, mods);
+        dirty = true;
+        return;
+    }
+    if (menu.isOpen())
+    {
+        menu.key (keyCode);
+        dirty = true;
+        return;
+    }
     const bool ctrl = (mods & GLFW_MOD_CONTROL) != 0;
     const bool shift = (mods & GLFW_MOD_SHIFT) != 0;
     auto say = [this] (const juce::String& text) { message = text; messageUntil = lastTick + 2.5; dirty = true; };

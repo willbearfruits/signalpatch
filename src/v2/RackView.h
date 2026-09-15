@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../audio/PatchEngine.h"
+#include "Menu.h"
 
 #include <nanovg.h>
 
@@ -33,10 +34,18 @@ public:
     void mouseButton (int button, bool pressed, int mods, double x, double y);
     void scroll (double dx, double dy, int mods, double x, double y);
     void key (int key, bool pressed, int mods);
+    void character (unsigned int codepoint);
 
     void fitToPatch (int width, int height);
 
 private:
+    struct Button
+    {
+        juce::String label, command;
+        int row = 0;
+        NVGcolor active {};
+    };
+
     struct Layout
     {
         NodeId id = 0;
@@ -44,6 +53,7 @@ private:
         float w = 236.0f, h = 200.0f;
         int inputs = 0, outputs = 0;
         std::vector<int> knobParameters; // parameter indices drawn as knobs
+        std::vector<Button> buttons;     // transport / model / IR commands
         float previewY = 0.0f, previewH = 64.0f, controlsTop = 0.0f;
         bool hardware = false, stomp = false;
     };
@@ -104,10 +114,24 @@ private:
 
     void deleteSelection();
     void markDirty() noexcept { dirty = true; }
+    void say (const juce::String& text);
+
+    // Context menus, all built from the same MenuItem vocabulary.
+    void showCanvasMenu (double x, double y);
+    void showModuleMenu (const Layout& layout, double x, double y);
+    void showKnobMenu (const Layout& layout, int parameterIndex, double x, double y);
+    void showPortMenu (const Layout& layout, bool output, int port, double x, double y);
+    void showCableMenu (const Connection& cable, double x, double y);
+    void insertNodeOnCable (const Connection& cable, NodeKind kind, juce::Point<float> world);
+    void runButton (const Layout& layout, const Button& button);
+    [[nodiscard]] juce::Rectangle<float> buttonBounds (const Layout& layout, juce::Point<float> origin, int index) const noexcept;
 
     PatchEngine& engine;
     NVGcontext* vg;
     int font;
+    Menu menu;
+    TextPrompt prompt;
+    int windowW = 1600, windowH = 1000;
     std::vector<Layout> layouts;
     std::unordered_map<NodeId, PlateCache> plates;
     float cachedPlateScale = 0.0f;
@@ -124,6 +148,7 @@ private:
     double lastTick = 0.0;
 
     double mouseX = 0.0, mouseY = 0.0;
+    double lastClickTime = -1.0, lastClickX = 0.0, lastClickY = 0.0;
     bool panning = false;
     double panStartX = 0.0, panStartY = 0.0, panOriginX = 0.0, panOriginY = 0.0;
     std::optional<NodeId> draggingNode;

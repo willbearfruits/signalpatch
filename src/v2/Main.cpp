@@ -107,6 +107,7 @@ int main (int argc, char** argv)
         if (action == GLFW_PRESS || action == GLFW_REPEAT)
             rackFor (w)->key (key, true, mods);
     });
+    glfwSetCharCallback (window, [] (GLFWwindow* w, unsigned int codepoint) { rackFor (w)->character (codepoint); });
 
     {
         int width = 0, height = 0;
