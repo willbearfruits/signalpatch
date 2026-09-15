@@ -922,7 +922,14 @@ PatchDocument buildKitchenSinkDocument()
                                         synthNode->processor->getParameter (1).inputPortIndex }),
               "lfo -> synth pitch mod");
     expectOk (document.addConnection ({ sequencer, 0, synth, 0 }), "sequencer -> synth gate");
-    expectOk (document.addConnection ({ randomLfo, 0, pluck, 0 }), "random -> pluck trigger");
+    // A keyboard plays the pluck: MIDI Note gate -> trigger, its pitch -> pitch mod; the random LFO wobbles the level.
+    const auto keys = document.addNode (NodeKind::midiNote, {});
+    auto* pluckNode = document.findNode (pluck);
+    expect (pluckNode != nullptr, "pluck disappeared");
+    expectOk (document.addConnection ({ keys, 0, pluck, 0 }), "midi note gate -> pluck trigger");
+    expectOk (document.addConnection ({ keys, 1, pluck, pluckNode->processor->getParameter (0).inputPortIndex }), "midi note pitch -> pluck pitch mod");
+    expectOk (document.addConnection ({ randomLfo, 0, pluck, pluckNode->processor->getParameter (pluckNode->processor->getNumParameters() - 1).inputPortIndex }),
+              "random -> pluck last knob mod");
     expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 1, follower, 0 }),
               "input 2 -> envelope follower");
     expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 2, spectral, 0 }),
@@ -997,6 +1004,9 @@ void renderPlanBlocks (RenderPlan& plan, int blockCount, bool varyBlockSizes, bo
                     std::sin (juce::MathConstants<double>::twoPi * 180.0 * phase / sampleRate));
                 phase += 1.0;
             }
+        // A note every few blocks, like the engine's FIFO drain does before the render.
+        if (block % 5 == 0)
+            plan.dispatchMidiNote (1, 48 + (block / 5) % 24, 100, (block / 5) % 2 == 0);
         plan.render (inputPointers.data(), 6, outputPointers.data(), 2, 0, numSamples);
         for (int channel = 0; channel < 2; ++channel)
             for (int sample = 0; sample < numSamples; ++sample)
