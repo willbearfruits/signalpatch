@@ -42,13 +42,22 @@ F0 7D 53 <command> <payload...> F7
 | 0x02    | switch (0-7), label as 7-bit ASCII, up to 8 chars | text under a switch |
 | 0x03    | slot (0-4), active (0/1)                      | which rig slot is live |
 | 0x04    | name as 7-bit ASCII, up to 16 chars           | current rig name for the display |
-| 0x7F    | —                                             | hello: SignalPatch is here, send state |
+| 0x7F    | side (0x00 controller, 0x01 SignalPatch)      | hello |
 
-SignalPatch sends the whole state after a `0x7F` hello from the controller
-and after every change that affects a mapped switch. The controller replies
-to `0x7F` with its own `0x7F` so both sides know the other is listening.
+The controller sends `F0 7D 53 7F 00 F7` on its input port when it boots
+(and whenever it wants the state again). SignalPatch answers on the output
+port with the same name as that input: `F0 7D 53 7F 01 F7`, then the whole
+state (eight LED + label pairs, five slot messages, the rig name). After
+that it sends only what changed, checked ten times a second: a stomp,
+a looper going into record (LED 2 = blink), a slot change, a rename. Labels
+are the pedal's name (8 chars), `REC <pedal>`, `RIG n` or the group's name.
+The side byte is what keeps a looped-back port (ALSA's Midi Through) from
+answering itself.
 
-## What SignalPatch already does (0.4)
+Try it without hardware: `aseqdump -p "Midi Through"` in one terminal,
+`aseqsend -p "Midi Through" F0 7D 53 7F 00 F7` in another.
+
+## What SignalPatch already does
 
 - Opens every MIDI input, hot-plug included.
 - MIDI learn on knobs, stomps, module buttons, group pedals and rig slots;
@@ -56,13 +65,16 @@ to `0x7F` with its own `0x7F` so both sides know the other is listening.
 - Note On toggles a stomp, CC >= 64 sets it, commands fire on the rising
   edge, program changes select slots.
 - Relative encoders (CC 64 ± n) per mapping; the flag is saved with the patch.
+- SysEx feedback as above (`src/audio/ControllerFeedback.*`, diffed on the
+  engine timer, tested headless).
 - A MIDI Note node: notes reach the synth and pluck through the audio
   callback's queue (Gate / Pitch / Velocity outputs).
 
 ## Follow-ups on the SignalPatch side
 
-- **SysEx feedback**: the 0x01-0x04 messages above, sent from the message
-  thread when mapped state changes.
+- Expression pedal calibration (min/max per CC) and a curve.
+- A "controller layout" view in the app that shows the eight switches the
+  way the pedal does.
 
 ## Hardware sketch (for the firmware repo)
 

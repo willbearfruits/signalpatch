@@ -663,8 +663,17 @@ void PatchEngine::refreshMidiInputs()
     midiInputsOpen = open;
 }
 
-void PatchEngine::handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& message)
+void PatchEngine::handleIncomingMidiMessage (juce::MidiInput* source, const juce::MidiMessage& message)
 {
+    if (message.isSysEx())
+    {
+        if (controller::isHello (message, controller::fromController) && source != nullptr)
+        {
+            const auto name = source->getName();
+            juce::MessageManager::callAsync ([this, name] { openControllerOutput (name); });
+        }
+        return;
+    }
     // MIDI thread. Notes go straight to the audio thread through a lock-free
     // FIFO (block-accurate, no allocation); everything hops to the message
     // thread too, where mappings and learn live.
@@ -677,6 +686,50 @@ void PatchEngine::handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiM
                                                                              message.isNoteOn (true) };
     }
     juce::MessageManager::callAsync ([this, message] { handleMidiOnMessageThread (message); });
+}
+
+void PatchEngine::openControllerOutput (const juce::String& inputName)
+{
+    for (const auto& output : controllerOutputs)
+        if (output->getName() == inputName)
+        {
+            output->sendMessageNow (controller::helloMessage (controller::fromSignalPatch));
+            sendControllerFeedback (true);
+            return;
+        }
+    for (const auto& device : juce::MidiOutput::getAvailableDevices())
+    {
+        if (device.name != inputName)
+            continue;
+        if (auto output = juce::MidiOutput::openDevice (device.identifier))
+        {
+            output->sendMessageNow (controller::helloMessage (controller::fromSignalPatch));
+            controllerOutputs.push_back (std::move (output));
+            lastMidiDescription = "controller: " + inputName;
+            sendControllerFeedback (true);
+            sendChangeMessage();
+            return;
+        }
+    }
+}
+
+void PatchEngine::setControllerContext (int activeSlot, const juce::String& rigName)
+{
+    controllerSlot = activeSlot;
+    controllerRig = rigName;
+    sendControllerFeedback (false);
+}
+
+void PatchEngine::sendControllerFeedback (bool full)
+{
+    if (controllerOutputs.empty())
+        return;
+    auto next = controller::computeState (document, controllerSlot, controllerRig);
+    const auto messages = controller::encode (controllerState, next, full);
+    controllerState = std::move (next);
+    for (const auto& message : messages)
+        for (const auto& output : controllerOutputs)
+            output->sendMessageNow (message);
 }
 
 void PatchEngine::handleMidiOnMessageThread (const juce::MidiMessage& message)
@@ -1068,6 +1121,7 @@ void PatchEngine::timerCallback()
         midiRefreshCountdown = 30; // hot-plug scan every few seconds (timer runs ~10 Hz)
         refreshMidiInputs();
     }
+    sendControllerFeedback (false); // cheap when nothing moved, nothing when no controller
     // Let the displayed worst case fade over a few seconds.
     cpuPeak.store (cpuPeak.load (std::memory_order_relaxed) * 0.985f, std::memory_order_relaxed);
 

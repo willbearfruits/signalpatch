@@ -3,6 +3,7 @@
 #include "Graph.h"
 #include "PatchHistory.h"
 #include "MidiMap.h"
+#include "ControllerFeedback.h"
 
 #include <array>
 #include <atomic>
@@ -53,6 +54,11 @@ public:
     [[nodiscard]] juce::StringArray getOpenMidiInputNames() const;
     [[nodiscard]] bool hasMidiInputs() const noexcept { return midiInputsOpen > 0; }
     [[nodiscard]] juce::String getLastMidiDescription() const { return lastMidiDescription; }
+    // Controller feedback (docs/CONTROLLER.md): a device that says hello on
+    // its input gets its same-named output opened and receives switch LEDs,
+    // labels, the live slot and the rig name, diffed on the engine timer.
+    void setControllerContext (int activeSlot, const juce::String& rigName);
+    [[nodiscard]] int getControllerCount() const noexcept { return static_cast<int> (controllerOutputs.size()); }
 
     PatchEngine();
     ~PatchEngine() override;
@@ -196,6 +202,12 @@ private:
     int midiRefreshCountdown = 0;
     juce::String lastMidiDescription;
     std::unordered_map<juce::int64, bool> midiCommandGate; // rising-edge detection per (mapping index)
+    void openControllerOutput (const juce::String& inputName);
+    void sendControllerFeedback (bool full);
+    std::vector<std::unique_ptr<juce::MidiOutput>> controllerOutputs;
+    controller::State controllerState;
+    int controllerSlot = -1;
+    juce::String controllerRig;
     bool audioCallbackRegistered = false;
     bool restoredAudioDeviceState = false;
     juce::String configuredDeviceSignature;

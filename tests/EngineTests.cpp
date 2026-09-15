@@ -2,6 +2,7 @@
 #include "../src/audio/PatchHistory.h"
 #include "../src/audio/PatchBundle.h"
 #include "../src/audio/MidiMap.h"
+#include "../src/audio/ControllerFeedback.h"
 #include "../src/audio/Processors.h"
 
 #include <algorithm>
@@ -1611,6 +1612,49 @@ void testRecordedAudioSavesAndLoadsWithThePatch()
     temp.deleteRecursively();
 }
 
+void testControllerFeedback()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    const auto drive = document.addNode (NodeKind::distortion, { 0.0f, 0.0f }, 810);
+    const auto loop = document.addNode (NodeKind::looper, { 0.0f, 0.0f }, 811);
+    document.findNode (drive)->processor->setName ("Fuzz Face");
+    MidiMapping stomp;
+    stomp.source = MidiMapping::Source::note; stomp.number = controller::firstSwitchNote; stomp.channel = controller::switchChannel;
+    stomp.target = MidiMapping::Target::bypass; stomp.node = drive;
+    MidiMapping rec;
+    rec.source = MidiMapping::Source::note; rec.number = controller::firstSwitchNote + 1; rec.channel = 0;
+    rec.target = MidiMapping::Target::command; rec.node = loop; rec.command = "rec";
+    MidiMapping slot;
+    slot.source = MidiMapping::Source::note; slot.number = controller::firstSwitchNote + 7; slot.channel = controller::switchChannel;
+    slot.target = MidiMapping::Target::slot; slot.slot = 2;
+    document.setMidiMappings ({ stomp, rec, slot });
+
+    auto state = controller::computeState (document, 2, "Wednesday rig, the long name");
+    expect (state.switches[0].led == 1 && state.switches[0].label == "Fuzz Fac", "switch 1 should show the enabled pedal, label cut to 8: " + state.switches[0].label.toStdString());
+    expect (state.switches[1].led == 0 && state.switches[1].label.startsWith ("REC "), "switch 2 should be the looper's REC: " + state.switches[1].label.toStdString());
+    expect (state.switches[7].led == 1 && state.switches[7].label == "RIG 3", "switch 8 should light for the live slot");
+    expect (state.switches[3].led == 0 && state.switches[3].label.isEmpty(), "unmapped switch should be dark and blank");
+    expect (state.rig == "Wednesday rig, t", "rig name should be cut to 16");
+
+    const auto full = controller::encode ({}, state, true);
+    expect (full.size() == static_cast<std::size_t> (controller::switchCount * 2 + controller::slotCount + 1), "full dump message count: " + std::to_string (full.size()));
+    const auto* led = full[0].getSysExData();
+    expect (full[0].isSysEx() && led[0] == 0x7D && led[1] == 0x53 && led[2] == 0x01 && led[3] == 0 && led[4] == 1, "switch 1 LED message bytes");
+    const auto* label = full[1].getSysExData();
+    expect (full[1].getSysExDataSize() == 4 + 8 && label[2] == 0x02 && label[3] == 0 && label[4] == 'F', "switch 1 label message bytes");
+
+    document.findNode (drive)->processor->setBypassed (true);
+    auto next = controller::computeState (document, 1, "Wednesday rig, the long name");
+    const auto diff = controller::encode (state, next, false);
+    // One LED (switch 1 off), one LED (switch 8 off), slot 3 off + slot 2 on.
+    expect (diff.size() == 4, "diff should carry only what changed: " + std::to_string (diff.size()));
+    expect (diff[0].getSysExData()[2] == 0x01 && diff[0].getSysExData()[4] == 0, "switch 1 should go dark");
+
+    expect (controller::isHello (controller::helloMessage (controller::fromController), controller::fromController), "hello should be recognised");
+    expect (! controller::isHello (controller::helloMessage (controller::fromSignalPatch), controller::fromController), "our own hello must not count as a controller's");
+}
+
 void testMidiMappingsRoundTripAndScrub()
 {
     PatchDocument document;
@@ -1819,6 +1863,7 @@ int main()
         { "looper records, closes, overdubs, undoes", testLooperRecordsClosesOverdubsAndUndoes },
         { "recorded audio saves and loads with the patch", testRecordedAudioSavesAndLoadsWithThePatch },
         { "midi mappings round trip and scrub", testMidiMappingsRoundTripAndScrub },
+        { "controller feedback state and sysex", testControllerFeedback },
         { "stereo nodes: pan, ping-pong delay, cabinet R, reverb/chorus", testStereoNodes },
         { "tuner detects pitch", testTunerDetectsPitch },
         { "MIDI Note node drives gate and pitch", testMidiNoteNodeDrivesGateAndPitch }

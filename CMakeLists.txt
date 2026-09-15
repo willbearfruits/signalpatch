@@ -166,6 +166,7 @@ target_sources(signalpatch_tests PRIVATE
     src/audio/PatchHistory.cpp
     src/audio/PatchBundle.cpp
     src/audio/MidiMap.cpp
+    src/audio/ControllerFeedback.cpp
     src/audio/Graph.h
     src/audio/Processors.cpp
     src/audio/Processors.h)

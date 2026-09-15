@@ -2969,6 +2969,16 @@ void RackView::tick (double now)
         dirty = true;
     }
     pollGamepad (now);
+    {
+        // The foot controller shows the live slot and the rig name (engine diffs, so this is cheap).
+        const auto rig = currentFile.existsAsFile() ? currentFile.getFileNameWithoutExtension() : juce::String ("SignalPatch");
+        if (activeSlot != controllerSlotSent || rig != controllerRigSent)
+        {
+            controllerSlotSent = activeSlot;
+            controllerRigSent = rig;
+            engine.setControllerContext (activeSlot, rig);
+        }
+    }
     if (glide.has_value())
     {
         const auto t = juce::jlimit (0.0, 1.0, (now - glide->start) / glide->duration);
