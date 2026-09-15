@@ -1657,6 +1657,35 @@ void testLooperRecordsClosesOverdubsAndUndoes()
     expect (node->statusText().startsWith ("EMPTY"), "clear should empty the loop");
 }
 
+void testRecordedAudioAtAnotherRateKeepsItsLength()
+{
+    const auto temp = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("signalpatch-rate-test-" + juce::Uuid().toString());
+    temp.createDirectory();
+    const auto patchFile = temp.getChildFile ("rate.signalpatch");
+    PatchDocument source;
+    source.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    source.prepareAll (48000.0, 64);
+    const auto looper = source.addNode (NodeKind::looper, { 0.0f, 0.0f }, 710);
+    juce::AudioBuffer<float> take (1, 48000); // one second at 48 kHz
+    for (int i = 0; i < take.getNumSamples(); ++i)
+        take.setSample (0, i, 0.5f * std::sin (static_cast<float> (i) * 0.01f));
+    source.findNode (looper)->processor->importAudioContent (take);
+    std::unordered_map<NodeId, juce::uint32> saved;
+    const auto json = bundle::toJsonWithAudio (source, patchFile, saved);
+    expect (patchFile.getSiblingFile ("assets").getChildFile ("audio").getChildFile ("rate-710.wav").existsAsFile(), "the take should be written");
+    expect (! patchFile.getSiblingFile ("assets").getChildFile ("audio").getChildFile ("rate-710.wav.part").existsAsFile(), "no partial file should remain");
+
+    PatchDocument reopened;
+    reopened.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    reopened.prepareAll (96000.0, 64);
+    expectOk (reopened.loadJson (json), "reload at 96 kHz");
+    reopened.prepareAll (96000.0, 64);
+    bundle::loadAudioContent (reopened, json, temp);
+    const auto length = reopened.findNode (looper)->processor->exportAudioContent().getNumSamples();
+    expect (std::abs (length - 96000) < 16, "a one-second take must stay one second at 96 kHz, got " + std::to_string (length) + " samples");
+    temp.deleteRecursively();
+}
+
 void testLooperOverdubOncePerSlotAndUndoAtAnySpeed()
 {
     const int block = 64;
@@ -2259,13 +2288,13 @@ void testTone3000PiecesAreRight()
     expect (page.tones[0].id == 12 && page.tones[0].title == "Plexi 51" && page.tones[0].make == "Marshall" && page.tones[0].user == "tim" && page.tones[0].modelsCount == 3, "tone fields");
     expect (page.tones[1].make.isEmpty() && page.tones[1].gear == "pedal", "missing make should stay empty");
     expect (page.tones[0].image == "https://x/p.jpg" && page.tones[1].image.isEmpty(), "first photo URL should be kept");
-    expect (tone3000::modelFileName (page.tones[0], tone3000::Model { 1, "V30 57", "https://x/i.wav", "", 0 }, "wav") == "Plexi 51 - V30 57.wav", "impulse file name");
+    expect (tone3000::modelFileName (page.tones[0], tone3000::Model { 1, "V30 57", "https://x/i.wav", "", 0 }, "wav") == "Plexi 51 - V30 57 [1].wav", "impulse file name");
 
     const auto models = tone3000::parseModels (juce::JSON::parse (R"({"data":[{"id":7,"tone_id":12,"name":"Plexi 51 DI#03","model_url":"https://x/y.nam","size":"standard","architecture_version":2},{"id":8,"name":"no url"}]})"));
     expect (models.size() == 1 && models[0].id == 7 && models[0].size == "standard" && models[0].architecture == 2 && models[0].url == "https://x/y.nam", "model fields; entries without a url dropped");
     const auto bare = tone3000::parseModels (juce::JSON::parse (R"([{"id":9,"name":"n","model_url":"https://x/z.nam"}])"));
     expect (bare.size() == 1, "a bare array should parse too");
-    expect (tone3000::modelFileName (page.tones[0], models[0]) == "Plexi 51 - Plexi 51 DI03 (standard).nam", "file name: " + tone3000::modelFileName (page.tones[0], models[0]).toStdString());
+    expect (tone3000::modelFileName (page.tones[0], models[0]) == "Plexi 51 - Plexi 51 DI03 (standard) [7].nam", "file name: " + tone3000::modelFileName (page.tones[0], models[0]).toStdString());
 
     auto tokens = tone3000::Tokens::fromTokenResponse (juce::JSON::parse (R"({"access_token":"A","refresh_token":"R","token_type":"bearer","expires_in":3600})"), 1000);
     expect (tokens.present() && tokens.refresh == "R" && tokens.expiresAtMs == 3601000, "token response");
@@ -2342,6 +2371,7 @@ int main()
         { "board positions and groups round trip", testBoardPositionsAndGroupsRoundTrip },
         { "looper records, closes, overdubs, undoes", testLooperRecordsClosesOverdubsAndUndoes },
         { "looper overdubs once per slot and undoes at any speed", testLooperOverdubOncePerSlotAndUndoAtAnySpeed },
+        { "recorded audio at another rate keeps its length", testRecordedAudioAtAnotherRateKeepsItsLength },
         { "4-track sync with track 1 stopped, no doubled monitor, take versions", testFourTrackSyncWithTrackOneStoppedAndNoDoubledMonitor },
         { "stereo bypass keeps both sides", testStereoBypassKeepsBothSides },
         { "recorded audio saves and loads with the patch", testRecordedAudioSavesAndLoadsWithThePatch },

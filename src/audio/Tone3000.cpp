@@ -1,6 +1,10 @@
 #include "Tone3000.h"
 
 #include <cstring>
+#if JUCE_LINUX || JUCE_MAC
+ #include <fcntl.h>
+ #include <unistd.h>
+#endif
 
 #if JUCE_LINUX || JUCE_MAC
  #include <sys/stat.h>
@@ -180,7 +184,8 @@ juce::String modelFileName (const Tone& tone, const Model& model, const juce::St
         name += " - " + model.name.trim();
     if (model.size.isNotEmpty())
         name += " (" + model.size + ")";
-    return juce::File::createLegalFileName (name).substring (0, 120) + "." + extension;
+    // The model id keeps two tones with the same title from sharing a cached file.
+    return juce::File::createLegalFileName (name).substring (0, 110) + " [" + juce::String (model.id) + "]." + extension;
 }
 
 juce::File keysFile()
@@ -206,11 +211,23 @@ Tokens loadTokens()
 
 void saveTokens (const Tokens& tokens)
 {
-    tokensFile().getParentDirectory().createDirectory();
-    tokensFile().replaceWithText (juce::JSON::toString (tokens.toJson()));
+    const auto file = tokensFile();
+    file.getParentDirectory().createDirectory();
    #if JUCE_LINUX || JUCE_MAC
-    chmod (tokensFile().getFullPathName().toRawUTF8(), 0600);
+    // Create the file private first, then write into it: the tokens are never readable by others.
+    const auto path = file.getFullPathName();
+    const auto handle = ::open (path.toRawUTF8(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (handle >= 0)
+    {
+        ::fchmod (handle, 0600);
+        const auto text = juce::JSON::toString (tokens.toJson());
+        const auto written = ::write (handle, text.toRawUTF8(), text.getNumBytesAsUTF8());
+        juce::ignoreUnused (written);
+        ::close (handle);
+        return;
+    }
    #endif
+    file.replaceWithText (juce::JSON::toString (tokens.toJson()));
 }
 
 void forgetTokens()
@@ -342,12 +359,22 @@ juce::Result Client::download (const Model& model, const juce::File& destination
     stream->readIntoMemoryBlock (data);
     if (status < 200 || status >= 300)
         return juce::Result::fail ("Model download failed (" + juce::String (status) + ")");
+    const auto expected = stream->getTotalLength();
+    if (expected > 0 && static_cast<juce::int64> (data.getSize()) != expected)
+        return juce::Result::fail ("The download was cut short (" + juce::String (data.getSize()) + " of " + juce::String (expected) + " bytes) - try again");
     const bool json = data.getSize() >= 32 && data[0] == '{';
     const bool riff = data.getSize() >= 44 && std::memcmp (data.getData(), "RIFF", 4) == 0;
     if (! json && ! riff)
         return juce::Result::fail ("The download is neither a .nam nor a .wav");
     destination.getParentDirectory().createDirectory();
-    return destination.replaceWithData (data.getData(), data.getSize()) ? juce::Result::ok() : juce::Result::fail ("Could not write " + destination.getFullPathName());
+    // Written beside the destination and moved into place, so a crash never leaves a half file in the cache.
+    const auto partial = destination.getSiblingFile (destination.getFileName() + ".part");
+    if (! partial.replaceWithData (data.getData(), data.getSize()) || ! partial.moveFileTo (destination))
+    {
+        partial.deleteFile();
+        return juce::Result::fail ("Could not write " + destination.getFullPathName());
+    }
+    return juce::Result::ok();
 }
 
 juce::Result Client::fetchBytes (const juce::String& url, juce::MemoryBlock& out)

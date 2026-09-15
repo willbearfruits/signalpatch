@@ -77,15 +77,26 @@ juce::var toJsonWithAudio (const PatchDocument& document, const juce::File& patc
             if (audio.getNumSamples() == 0)
                 continue;
             folder.createDirectory();
-            file.deleteFile();
-            juce::WavAudioFormat format;
-            std::unique_ptr<juce::AudioFormatWriter> writer (format.createWriterFor (
-                new juce::FileOutputStream (file), document.getSampleRate(), static_cast<unsigned int> (audio.getNumChannels()), 32, {}, 0));
-            if (writer == nullptr)
-                continue;
-            writer->writeFromAudioSampleBuffer (audio, 0, audio.getNumSamples());
-            writer.reset();
-            alreadySaved[id] = version;
+            // Written next to the old take and moved over it only when complete:
+            // a crash or a full disk mid-write keeps the previous recording.
+            const auto partial = file.getSiblingFile (file.getFileName() + ".part");
+            partial.deleteFile();
+            bool complete = false;
+            {
+                juce::WavAudioFormat format;
+                std::unique_ptr<juce::AudioFormatWriter> writer (format.createWriterFor (
+                    new juce::FileOutputStream (partial), document.getSampleRate(), static_cast<unsigned int> (audio.getNumChannels()), 32, {}, 0));
+                if (writer != nullptr)
+                    complete = writer->writeFromAudioSampleBuffer (audio, 0, audio.getNumSamples()) && writer->flush();
+            }
+            if (! complete || ! partial.moveFileTo (file))
+            {
+                partial.deleteFile();
+                if (! file.existsAsFile())
+                    continue; // nothing usable to point the patch at
+            }
+            else
+                alreadySaved[id] = version;
         }
         object->setProperty ("audio", file.getFullPathName());
     }
@@ -118,6 +129,21 @@ void loadAudioContent (PatchDocument& document, const juce::var& json, const juc
             continue;
         juce::AudioBuffer<float> audio (static_cast<int> (reader->numChannels), static_cast<int> (reader->lengthInSamples));
         reader->read (&audio, 0, audio.getNumSamples(), 0, true, true);
+        // A take recorded at another rate is resampled so it keeps its speed and pitch.
+        const auto targetRate = document.getSampleRate();
+        if (targetRate > 0.0 && reader->sampleRate > 0.0 && std::abs (reader->sampleRate - targetRate) > 0.5 && audio.getNumSamples() > 0)
+        {
+            const auto ratio = reader->sampleRate / targetRate;
+            const auto outLength = static_cast<int> (std::floor (audio.getNumSamples() / ratio));
+            juce::AudioBuffer<float> converted (audio.getNumChannels(), juce::jmax (1, outLength));
+            for (int channel = 0; channel < audio.getNumChannels(); ++channel)
+            {
+                juce::LagrangeInterpolator interpolator;
+                interpolator.process (ratio, audio.getReadPointer (channel), converted.getWritePointer (channel), converted.getNumSamples(),
+                                      audio.getNumSamples(), 0);
+            }
+            audio = std::move (converted);
+        }
         model->processor->importAudioContent (audio);
     }
 }

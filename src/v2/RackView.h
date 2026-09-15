@@ -156,6 +156,16 @@ private:
     FileBrowser browser;
     ToneBrowser toneBrowser;
     void openToneBrowser (NodeId id, bool impulses, bool slotB);
+    // A whole patch was replaced (open, new, a slot with other modules): ids now
+    // name different modules, so every drag, overlay, pending learn and glide
+    // from the old patch is dropped, and callbacks that captured an id check
+    // the epoch before touching a node.
+    void patchReplaced();
+    int patchEpoch = 0;
+    /** Runs proceed now, or after asking what to do with unsaved changes. */
+    void whenChangesAreSettled (const juce::String& action, std::function<void()> proceed);
+    /** Merges one key into a node's extra state if the node is still the kind the caller meant. */
+    bool applyExtraKey (NodeId id, int epoch, std::initializer_list<NodeKind> kinds, const char* key, const juce::String& value);
     juce::File currentFile;
     int controllerSlotSent = -2;
     juce::String controllerRigSent;

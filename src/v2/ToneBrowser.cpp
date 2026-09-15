@@ -84,21 +84,28 @@ void ToneBrowser::setStatus (juce::String text)
     dirty = true;
 }
 
-void ToneBrowser::runAsync (std::function<juce::Result()> work, std::function<void (juce::Result)> done, bool evenIfClosed)
+void ToneBrowser::runAsync (std::function<juce::Result (tone3000::Client&)> work, std::function<void (juce::Result)> done, bool evenIfClosed)
 {
     busy = true;
     dirty = true;
     const auto expected = ++generation;
     auto keepAlive = alive;
-    pool.addJob (std::function<juce::ThreadPoolJob::JobStatus()> ([this, keepAlive, expected, evenIfClosed, work = std::move (work), done = std::move (done)]
+    auto worker = std::make_shared<tone3000::Client> (client); // the pool never touches members
+    pool.addJob (std::function<juce::ThreadPoolJob::JobStatus()> ([this, keepAlive, expected, evenIfClosed, worker, work = std::move (work), done = std::move (done)]
     {
-        auto result = work();
-        juce::MessageManager::callAsync ([this, keepAlive, expected, evenIfClosed, result, done]
+        auto result = work (*worker);
+        juce::MessageManager::callAsync ([this, keepAlive, expected, evenIfClosed, worker, result, done]
         {
             if (! *keepAlive)
                 return;
             busy = false;
             dirty = true;
+            // Refresh tokens rotate: keep whatever the worker ended with, even for a stale request.
+            if (worker->tokens.present() && (worker->tokens.access != client.tokens.access || worker->tokens.refresh != client.tokens.refresh))
+            {
+                client.tokens = worker->tokens;
+                tone3000::saveTokens (client.tokens);
+            }
             if (expected == generation || evenIfClosed)
                 done (result);
         });
@@ -135,7 +142,7 @@ void ToneBrowser::finishLogin (const juce::String& code)
     server.stop();
     setStatus ("Exchanging the code...");
     const auto verifier = pkce.verifier;
-    runAsync ([this, code, verifier] { return client.exchangeCode (code, verifier, tone3000::redirectUri()); },
+    runAsync ([code, verifier] (tone3000::Client& worker) { return worker.exchangeCode (code, verifier, tone3000::redirectUri()); },
               [this] (juce::Result result)
     {
         if (result.failed())
@@ -145,8 +152,7 @@ void ToneBrowser::finishLogin (const juce::String& code)
             if (announce) announce ("TONE3000: " + result.getErrorMessage());
             return;
         }
-        tone3000::saveTokens (client.tokens); // kept even if the panel was closed meanwhile
-        view = View::tones;
+        view = View::tones; // tokens were adopted and saved in the hop, even if the panel closed meanwhile
         if (announce) announce ("Logged in to TONE3000");
         if (active)
             search (1);
@@ -159,19 +165,15 @@ void ToneBrowser::search (int pageNumber)
     const auto text = query;
     auto wanted = options;
     wanted.sort = text.trim().isNotEmpty() && sortIndex == 0 ? juce::String() : sortValues[sortIndex]; // a query sorts by match unless asked
-    runAsync ([this, text, pageNumber, wanted]
+    auto found = std::make_shared<tone3000::TonePage>();
+    runAsync ([text, pageNumber, wanted, found] (tone3000::Client& worker)
     {
-        if (auto refreshed = client.refreshIfNeeded(); refreshed.failed())
+        if (auto refreshed = worker.refreshIfNeeded(); refreshed.failed())
             return refreshed;
-        tone3000::TonePage result;
-        const auto outcome = client.search (text, pageNumber, wanted, result);
-        if (outcome.wasOk())
-            page = result; // written from the worker, read after the hop: the generation guard keeps it single-writer per request
-        return outcome;
+        return worker.search (text, pageNumber, wanted, *found);
     },
-    [this] (juce::Result result)
+    [this, found] (juce::Result result)
     {
-        tone3000::saveTokens (client.tokens);
         if (result.failed())
         {
             if (result.getErrorMessage().contains ("log in again") || result.getErrorMessage().contains ("Not logged in"))
@@ -183,6 +185,7 @@ void ToneBrowser::search (int pageNumber)
             setStatus (result.getErrorMessage());
             return;
         }
+        page = std::move (*found); // adopted on the message thread only
         view = View::tones;
         selected = page.tones.empty() ? -1 : 0;
         scrollOffset = 0.0f;
@@ -197,23 +200,21 @@ void ToneBrowser::openTone (const tone3000::Tone& tone)
     currentTone = tone;
     setStatus ("Loading models of " + tone.title + "...");
     const auto id = tone.id;
-    runAsync ([this, id]
+    auto found = std::make_shared<std::vector<tone3000::Model>>();
+    runAsync ([id, found] (tone3000::Client& worker)
     {
-        if (auto refreshed = client.refreshIfNeeded(); refreshed.failed())
+        if (auto refreshed = worker.refreshIfNeeded(); refreshed.failed())
             return refreshed;
-        std::vector<tone3000::Model> result;
-        const auto outcome = client.models (id, result);
-        if (outcome.wasOk())
-            models = std::move (result);
-        return outcome;
+        return worker.models (id, *found);
     },
-    [this] (juce::Result result)
+    [this, found] (juce::Result result)
     {
         if (result.failed())
         {
             setStatus (result.getErrorMessage());
             return;
         }
+        models = std::move (*found);
         view = View::models;
         selected = models.empty() ? -1 : 0;
         scrollOffset = 0.0f;
@@ -233,11 +234,11 @@ void ToneBrowser::download (const tone3000::Model& model)
         return;
     }
     setStatus ("Downloading " + model.name + "...");
-    runAsync ([this, model, destination]
+    runAsync ([model, destination] (tone3000::Client& worker)
     {
-        if (auto refreshed = client.refreshIfNeeded(); refreshed.failed())
+        if (auto refreshed = worker.refreshIfNeeded(); refreshed.failed())
             return refreshed;
-        return client.download (model, destination);
+        return worker.download (model, destination);
     },
     [this, destination] (juce::Result result)
     {

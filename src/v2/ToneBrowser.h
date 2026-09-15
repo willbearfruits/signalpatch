@@ -48,7 +48,9 @@ private:
     void search (int page);
     void openTone (const tone3000::Tone& tone);
     void download (const tone3000::Model& model);
-    void runAsync (std::function<juce::Result()> work, std::function<void (juce::Result)> done, bool evenIfClosed = false);
+    /** work runs on the pool with its own copy of the client; results go into objects the lambdas share,
+        and the message thread adopts them (and the possibly refreshed tokens) after the hop. */
+    void runAsync (std::function<juce::Result (tone3000::Client&)> work, std::function<void (juce::Result)> done, bool evenIfClosed = false);
     void setStatus (juce::String text);
     [[nodiscard]] juce::Rectangle<float> panel (int windowWidth, int windowHeight) const noexcept;
     [[nodiscard]] int rowCount() const noexcept;

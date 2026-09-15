@@ -10,6 +10,8 @@
 #include <glad/gl.h>
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+
+#include <memory>
 #include <nanovg.h>
 #define NANOVG_GL3 1 // declarations only; the implementation lives in NanoVGImpl.cpp
 #include <nanovg_gl.h>
@@ -139,7 +141,10 @@ int main (int argc, char** argv)
     const auto result = engine.initialise();
     if (result.failed())
         std::fprintf (stderr, "Audio offline: %s\n", result.getErrorMessage().toRawUTF8());
-    signalpatch::v2::RackView rack (engine, vg, font);
+    // Owned so it can be destroyed while the GL context and NanoVG still exist:
+    // its destructor frees cached plates and thumbnails through them.
+    auto rackOwner = std::make_unique<signalpatch::v2::RackView> (engine, vg, font);
+    auto& rack = *rackOwner;
     bool startOnBoard = false;
     {
         float contentX = 1.0f, contentY = 1.0f;
@@ -226,6 +231,8 @@ int main (int argc, char** argv)
         glfwSwapBuffers (window);
     }
 
+    glfwSetWindowUserPointer (window, nullptr);
+    rackOwner.reset();        // plates and thumbnails go while their context is alive
     engine.shutdown();
     nvgDeleteGL3 (vg);
     glfwDestroyWindow (window);

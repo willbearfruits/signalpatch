@@ -89,9 +89,18 @@ RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
         if (mapping.target == MidiMapping::Target::slot)
             loadSlot (mapping.slot);
         else if (mapping.target == MidiMapping::Target::groupBypass)
-            for (const auto& pedal : pedals)
-                if (pedal.groupId == mapping.groupId)
-                    toggleGroupBypass (pedal);
+            for (const auto& group : engine.getDocument().getGroups()) // the Board's pedal cache may be empty or stale
+                if (group.id == mapping.groupId)
+                {
+                    bool anyEnabled = false;
+                    for (const auto member : group.members)
+                        if (const auto* node = engine.getDocument().findNode (member); node != nullptr && ! node->processor->isBypassed())
+                            anyEnabled = true;
+                    engine.beginCompoundEditGesture ((anyEnabled ? "bypass " : "enable ") + group.name);
+                    for (const auto member : group.members)
+                        engine.setNodeBypassed (member, anyEnabled);
+                    engine.closeEditGesture();
+                }
         dirty = true;
     };
     engine.midiLearnHook = [this] (const juce::MidiMessage& message) -> bool
@@ -112,7 +121,7 @@ RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
             return false;
         auto mapping = *learnTarget;
         if (message.isController())        { mapping.source = MidiMapping::Source::controlChange; mapping.number = message.getControllerNumber(); }
-        else if (message.isNoteOn (true))  { mapping.source = MidiMapping::Source::note; mapping.number = message.getNoteNumber(); }
+        else if (message.isNoteOn())       { mapping.source = MidiMapping::Source::note; mapping.number = message.getNoteNumber(); }
         else if (message.isProgramChange()){ mapping.source = MidiMapping::Source::programChange; mapping.number = message.getProgramChangeNumber(); }
         else
             return false;
@@ -122,7 +131,7 @@ RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
             say ("A knob needs a CC (turn something continuous)");
             return true;
         }
-        mapping.channel = 0; // any channel: forgiving for a first controller
+        mapping.channel = message.getChannel(); // a keyboard on another channel must not work the footswitch bindings
         auto mappings = engine.getMidiMappings();
         // One binding per target; a re-learn replaces the old one.
         mappings.erase (std::remove_if (mappings.begin(), mappings.end(), [&] (const MidiMapping& existing)
@@ -141,7 +150,98 @@ RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
 RackView::~RackView()
 {
     engine.removeChangeListener (this);
+    engine.onMidiUiTarget = nullptr;
+    engine.midiLearnHook = nullptr;
+    engine.onParameterChangedByMidi = nullptr;
     releasePlates();
+}
+
+void RackView::patchReplaced()
+{
+    ++patchEpoch;
+    knobDrag.reset();
+    draggingNode.reset();
+    dragStartPositions.clear();
+    marquee.reset();
+    sequencerDrag.reset();
+    cableDrag.reset();
+    boardDrag.reset();
+    glide.reset();
+    panning = false;
+    menu.close();
+    prompt.close();
+    browser.close();
+    toneBrowser.close();
+    learnTarget.reset();
+    calibration.reset();
+    rackSelection.clear();
+    boardSelection.clear();
+    selectedNode = 0;
+    selectedCable.reset();
+    selectedGroup = -1;
+    focusPedal = -1;
+    engine.closeEditGesture();
+    structureDirty = true;
+    boardDirty = true;
+    dirty = true;
+}
+
+void RackView::whenChangesAreSettled (const juce::String& action, std::function<void()> proceed)
+{
+    if (! engine.hasUnsavedChanges())
+    {
+        proceed();
+        return;
+    }
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::sectionHeader ("UNSAVED CHANGES IN " + (currentFile == juce::File() ? juce::String ("THIS PATCH") : currentFile.getFileName().toUpperCase())));
+    items.push_back (MenuItem::item (1, "Save, then " + action));
+    items.push_back (MenuItem::item (2, action.substring (0, 1).toUpperCase() + action.substring (1) + " without saving"));
+    items.push_back (MenuItem::item (3, "Cancel", "Esc"));
+    menu.open (std::move (items), windowW * 0.5f - 120.0f, windowH * 0.4f, [this, proceed] (int picked)
+    {
+        if (picked == 2)
+            proceed();
+        else if (picked == 1)
+        {
+            if (currentFile != juce::File())
+            {
+                if (engine.savePatch (currentFile).wasOk())
+                    proceed();
+                return;
+            }
+            prompt.open ("Save as (in ~/Documents/SignalPatch/patches)", "my rig", [this, proceed] (const juce::String& name)
+            {
+                if (name.trim().isEmpty())
+                    return;
+                auto file = documentsFolder ("patches").getChildFile (name.trim());
+                if (! file.hasFileExtension ("signalpatch"))
+                    file = file.withFileExtension ("signalpatch");
+                if (engine.savePatch (file).wasOk())
+                {
+                    currentFile = file;
+                    proceed();
+                }
+            });
+        }
+        dirty = true;
+    });
+    dirty = true;
+}
+
+bool RackView::applyExtraKey (NodeId id, int epoch, std::initializer_list<NodeKind> kinds, const char* key, const juce::String& value)
+{
+    if (epoch != patchEpoch)
+        return false; // the patch this was meant for is gone
+    const auto* node = engine.getDocument().findNode (id);
+    if (node == nullptr || std::find (kinds.begin(), kinds.end(), node->processor->getKind()) == kinds.end())
+        return false;
+    auto state = node->processor->getExtraState(); // merge: a cabinet keeps its other impulse
+    if (state.getDynamicObject() == nullptr)
+        state = juce::var (new juce::DynamicObject());
+    state.getDynamicObject()->setProperty (key, value);
+    engine.applyNodeExtraState (id, state);
+    return true;
 }
 
 void RackView::changeListenerCallback (juce::ChangeBroadcaster*)
@@ -149,6 +249,9 @@ void RackView::changeListenerCallback (juce::ChangeBroadcaster*)
     rackSelection.erase (std::remove_if (rackSelection.begin(), rackSelection.end(),
                                          [this] (NodeId id) { return engine.getDocument().findNode (id) == nullptr; }),
                          rackSelection.end());
+    boardSelection.erase (std::remove_if (boardSelection.begin(), boardSelection.end(),
+                                          [this] (NodeId id) { return engine.getDocument().findNode (id) == nullptr; }),
+                          boardSelection.end());
     structureDirty = true;
     boardDirty = true;
     invalidateAllPlates();
@@ -503,9 +606,8 @@ void RackView::openPatchFile (const juce::File& fileToLoad)
     const auto result = engine.loadPatch (file);
     if (result.wasOk())
     {
+        patchReplaced();
         currentFile = file;
-        selectedNode = 0;
-        selectedCable.reset();
         say ("Loaded muted: " + file.getFileName() + " - M to fade in");
         structureDirty = true;
         fitToPatch (windowW, windowH);
@@ -605,13 +707,20 @@ void RackView::showFileMenu (double x, double y)
             case audioSettings: showAudioMenu (x, y); break;
             case tone3000Browse: key (GLFW_KEY_T, true, GLFW_MOD_CONTROL); break;
             case newPatch:
-                engine.newPatch();
-                currentFile = juce::File();
-                say ("New patch (muted) - M to fade in");
+                whenChangesAreSettled ("start a new patch", [this]
+                {
+                    engine.newPatch();
+                    patchReplaced();
+                    currentFile = juce::File();
+                    say ("New patch (muted) - M to fade in");
+                });
                 break;
             case openPatch:
-                browser.open ("Open patch", currentFile != juce::File() ? currentFile.getParentDirectory() : documentsFolder ("patches"),
-                              { "signalpatch", "zip" }, [this] (const juce::File& file) { openPatchFile (file); });
+                whenChangesAreSettled ("open another patch", [this]
+                {
+                    browser.open ("Open patch", currentFile != juce::File() ? currentFile.getParentDirectory() : documentsFolder ("patches"),
+                                  { "signalpatch", "zip" }, [this] (const juce::File& file) { openPatchFile (file); });
+                });
                 break;
             case save: saveCurrentPatch(); break;
             case saveAs: saveAsPrompt(); break;
@@ -641,14 +750,12 @@ void RackView::showFileMenu (double x, double y)
 void RackView::openToneBrowser (NodeId id, bool impulses, bool slotB)
 {
     const auto key = impulses ? (slotB ? "irB" : "ir") : "model";
-    toneBrowser.open (documentsFolder (impulses ? "impulses" : "models"), [this, id, key] (const juce::File& file)
+    toneBrowser.open (documentsFolder (impulses ? "impulses" : "models"), [this, id, key, impulses, epoch = patchEpoch] (const juce::File& file)
     {
-        if (engine.getDocument().findNode (id) == nullptr)
-            return;
-        auto* object = new juce::DynamicObject();
-        object->setProperty (key, file.getFullPathName());
-        engine.applyNodeExtraState (id, juce::var (object));
-        say ("Loading " + file.getFileName());
+        const auto kinds = impulses ? std::initializer_list<NodeKind> { NodeKind::cabinet }
+                                    : std::initializer_list<NodeKind> { NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal };
+        if (applyExtraKey (id, epoch, kinds, key, file.getFullPathName()))
+            say ("Loading " + file.getFileName());
     },
     [this] (const juce::String& text) { say (text); }, impulses ? ToneBrowser::Mode::impulses : ToneBrowser::Mode::captures);
     dirty = true;
@@ -664,12 +771,10 @@ void RackView::runButton (const Layout& layout, const Button& button)
     {
         const juce::File currentModel (model->processor->getExtraState().getProperty ("model", "").toString());
         browser.open ("Load NAM model", currentModel.getParentDirectory().isDirectory() ? currentModel.getParentDirectory() : documentsFolder ("models"),
-                      { "nam" }, [this, id] (const juce::File& file)
+                      { "nam" }, [this, id, epoch = patchEpoch] (const juce::File& file)
         {
-            auto* object = new juce::DynamicObject();
-            object->setProperty ("model", file.getFullPathName());
-            engine.applyNodeExtraState (id, juce::var (object));
-            say ("Loading " + file.getFileName());
+            if (applyExtraKey (id, epoch, { NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal }, "model", file.getFullPathName()))
+                say ("Loading " + file.getFileName());
         });
     }
     else if (button.command == "load-a" || button.command == "load-b")
@@ -682,17 +787,10 @@ void RackView::runButton (const Layout& layout, const Button& button)
         if (start.getNumberOfChildFiles (juce::File::findFiles, "*.wav") == 0 && juce::File ("/usr/share/gx_head/sounds/amps").isDirectory())
             start = juce::File ("/usr/share/gx_head/sounds/amps");
         browser.open (slotB ? "Load cab impulse B" : "Load cab impulse A", start, { "wav", "aif", "aiff", "flac" },
-                      [this, id, slotB] (const juce::File& file)
+                      [this, id, slotB, epoch = patchEpoch] (const juce::File& file)
         {
-            const auto* node = engine.getDocument().findNode (id);
-            if (node == nullptr)
-                return;
-            auto state = node->processor->getExtraState();
-            if (state.getDynamicObject() == nullptr)
-                state = juce::var (new juce::DynamicObject());
-            state.getDynamicObject()->setProperty (slotB ? "irB" : "ir", file.getFullPathName());
-            engine.applyNodeExtraState (id, state);
-            say ("Loading " + file.getFileName());
+            if (applyExtraKey (id, epoch, { NodeKind::cabinet }, slotB ? "irB" : "ir", file.getFullPathName()))
+                say ("Loading " + file.getFileName());
         });
     }
     else if (button.command == "reset-loop")
@@ -971,10 +1069,10 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
         items.push_back (MenuItem::item (removeModulation, "Disconnect modulation cable", {}, modulation.has_value()));
     }
     const auto id = layout.id;
-    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, id, parameterIndex, modulation] (int picked)
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, id, parameterIndex, modulation, epoch = patchEpoch] (int picked)
     {
         const auto* current = engine.getDocument().findNode (id);
-        if (current == nullptr)
+        if (current == nullptr || epoch != patchEpoch || ! juce::isPositiveAndBelow (parameterIndex, current->processor->getNumParameters()))
             return;
         const auto& current_parameter = current->processor->getParameter (parameterIndex);
         switch (picked)
@@ -985,7 +1083,7 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
                              juce::String (current_parameter.getValue(), 3), [this, id, parameterIndex] (const juce::String& text)
                 {
                     const auto* node = engine.getDocument().findNode (id);
-                    if (node == nullptr)
+                    if (node == nullptr || ! juce::isPositiveAndBelow (parameterIndex, node->processor->getNumParameters()))
                         return;
                     const auto& range = node->processor->getParameter (parameterIndex).range;
                     engine.setParameter (id, parameterIndex, juce::jlimit (range.start, range.end, text.getFloatValue()));
@@ -2004,7 +2102,7 @@ void RackView::drawBoard (int width, int height, double now)
         nvgStrokeColor (vg, selected ? palette::selection : nvgRGBAf (1, 1, 1, 0.1f));
         nvgStrokeWidth (vg, selected ? 2.5f : 1.0f);
         nvgStroke (vg);
-        if (pad.present && focusPedal >= 0 && &pedal == &pedals[static_cast<std::size_t> (focusPedal)])
+        if (pad.present && juce::isPositiveAndBelow (focusPedal, static_cast<int> (pedals.size())) && &pedal == &pedals[static_cast<std::size_t> (focusPedal)])
         {
             nvgBeginPath (vg);
             nvgRoundedRect (vg, pedal.x - 5.0f, pedal.y - 5.0f, pedal.w + 10.0f, pedal.h + 10.0f, 13.0f);
@@ -2219,6 +2317,7 @@ void RackView::loadSlot (int slot)
     bundle::rebaseAssetPaths (parsed, file.getParentDirectory(), false);
     if (tryGlideToPatch (parsed))
     {
+        currentFile = file; // Save now writes this slot, not the one loaded before it
         activeSlot = slot;
         boardDirty = true;
         say ("Slot " + juce::String (slot + 1) + ": gliding to " + file.getFileNameWithoutExtension());
@@ -2231,13 +2330,9 @@ void RackView::loadSlot (int slot)
         say (result.getErrorMessage());
         return;
     }
+    patchReplaced();
     currentFile = file;
     activeSlot = slot;
-    selectedNode = 0;
-    selectedCable.reset();
-    boardSelection.clear();
-    structureDirty = true;
-    boardDirty = true;
     engine.setPanicMuted (false); // a rig change on stage fades straight in
     say ("Slot " + juce::String (slot + 1) + ": " + file.getFileNameWithoutExtension() + " (different modules - loaded)");
     if (mode == Mode::board)
@@ -2251,7 +2346,7 @@ void RackView::loadSlot (int slot)
 void RackView::storeSlot (int slot)
 {
     const auto file = slotFile (slot);
-    const auto result = engine.savePatch (file);
+    const auto result = engine.savePatch (file, false); // a copy: the open patch keeps its unsaved flag
     if (result.wasOk())
     {
         activeSlot = slot;
@@ -4211,6 +4306,11 @@ void RackView::mouseMove (double x, double y)
         const auto* node = engine.getDocument().findNode (knobDrag->node);
         if (node != nullptr)
         {
+            if (! juce::isPositiveAndBelow (knobDrag->parameter, node->processor->getNumParameters()))
+            {
+                knobDrag.reset();
+                return;
+            }
             const auto& parameter = node->processor->getParameter (knobDrag->parameter);
             const auto fine = glfwGetKey (glfwGetCurrentContext(), GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? 0.2f : 1.0f;
             const auto normalised = juce::jlimit (0.0f, 1.0f,
@@ -4775,14 +4875,21 @@ void RackView::key (int keyCode, bool pressed, int mods)
             saveCurrentPatch();
     }
     else if (ctrl && keyCode == GLFW_KEY_O)
-        browser.open ("Open patch", currentFile != juce::File() ? currentFile.getParentDirectory() : documentsFolder ("patches"),
-                      { "signalpatch", "zip" }, [this] (const juce::File& file) { openPatchFile (file); });
+        whenChangesAreSettled ("open another patch", [this]
+        {
+            browser.open ("Open patch", currentFile != juce::File() ? currentFile.getParentDirectory() : documentsFolder ("patches"),
+                          { "signalpatch", "zip" }, [this] (const juce::File& file) { openPatchFile (file); });
+        });
     else if (ctrl && keyCode == GLFW_KEY_N)
-    {
-        engine.newPatch();
-        currentFile = juce::File();
-        say ("New patch (muted) - M to fade in");
-    }
+        whenChangesAreSettled ("start a new patch", [this]
+        {
+            engine.newPatch();
+            patchReplaced();
+            currentFile = juce::File();
+            message = "New patch (muted) - M to fade in";
+            messageUntil = lastTick + 2.5;
+            dirty = true;
+        });
     else if (ctrl && keyCode == GLFW_KEY_Q)
         requestQuit();
     else if (keyCode == GLFW_KEY_P && ! ctrl)
