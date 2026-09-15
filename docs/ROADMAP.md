@@ -33,9 +33,9 @@ so a 27-inch desktop, a laptop and a 7-inch handheld all get the same app,
 not three. Every phase below is ordered by how much closer it gets that.
 
 Cross-cutting from 0.3 on:
-- **UI scale**: a global scale factor (Ctrl+/- and a setting, seeded from
-  the display's content scale), all sizes in logical units, pedals and
-  menus sized for fingers at scale 1.25+ automatically.
+- **UI scale** (done 2026-09-15): Ctrl+/-/0, saved in settings, seeded from
+  the display, `--scale=`; everything in logical units. Still open: larger
+  finger targets at scale 1.25+.
 - **Input parity**: everything reachable by pointer, touch, gamepad and MIDI.
 - **Engine budget**: every node meets a 128-sample deadline on a laptop-class
   CPU (the Ally X's Z1 Extreme is the reference floor).
@@ -56,7 +56,8 @@ Cross-cutting from 0.3 on:
 - **Recording persistence** (done 2026-09-15): sampler, 4-track and looper
   audio saved as WAV under the project's `assets/audio/`, loaded back with
   the patch, carried by bundles and autosave.
-- **Tuner** (a control node with a Board face).
+- **Tuner** (done 2026-09-15): YIN on the message thread, note / cents /
+  needle on the module face.
 
 Exit: record a loop, save, reopen tomorrow, and it plays.
 
@@ -65,16 +66,17 @@ Exit: record a loop, save, reopen tomorrow, and it plays.
 The engine's event-queue design becomes real: every external input is a
 timestamped event on a bounded queue into the callback.
 
-- **MIDI input** (done 2026-09-15 for control): every input opened, hot-plug
-  scanned, messages applied on the message thread. Still open: notes driving
-  the synth/pluck sample-accurately through an engine event queue (a MIDI
-  Note node).
+- **MIDI input** (done 2026-09-15): every input opened, hot-plug scanned;
+  control messages applied on the message thread; notes go through a
+  lock-free FIFO into the audio callback and the **MIDI Note** node turns
+  them into Gate / Pitch / Velocity control for the synth and pluck.
 - **MIDI learn** (done 2026-09-15) on knobs, stomps, module buttons, group
   pedals and rig slots; bindings saved in the patch, shown on the Board and
   in the rack, adopted by slot glides.
-- **Gamepad map** (GLFW): d-pad walks pedals, sticks turn the focused knob,
-  triggers stomp, shoulders change slot, a button opens the palette. The
-  Board must be fully operable with no pointer.
+- **Gamepad map** (first cut done 2026-09-15): d-pad walks pedals, A
+  stomps, B picks the knob, the left stick turns it, LB/RB change slot, X
+  undoes, Y fits, Start toggles views, Back mutes. Still open: menus, the
+  browser and prompts by gamepad, and adding modules from it.
 - **The controller**: a purpose-built foot controller (ESP32-S3, class-
   compliant USB MIDI so any DAW also understands it): footswitches with LED
   feedback, expression inputs, encoders, bank buttons. SignalPatch sends
