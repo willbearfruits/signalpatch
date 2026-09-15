@@ -38,6 +38,8 @@ public:
 
     void fitToPatch (int width, int height);
     void loadPatchFromCommandLine (const juce::File& file) { openPatchFile (file); }
+    /** Close request from the window or Ctrl+Q: asks about unsaved changes first. */
+    void requestQuit();
 
 private:
     struct Button

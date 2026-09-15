@@ -159,8 +159,9 @@ void RackView::rebuildLayouts()
         auto height = juce::jmax (layout.hardware ? 150.0f : 210.0f, portsHeight, controlsHeight);
         if (layout.kind == NodeKind::script)
             height += 92.0f;
-        if (layout.kind == NodeKind::sampler || layout.kind == NodeKind::neuralAmpPlaceholder || layout.kind == NodeKind::neuralPedal)
-            height += 32.0f;
+        if (layout.kind == NodeKind::sampler || layout.kind == NodeKind::neuralAmpPlaceholder || layout.kind == NodeKind::neuralPedal
+            || layout.kind == NodeKind::cabinet)
+            height += 32.0f; // room for the button row under the knobs
         if (layout.kind == NodeKind::fourTrack)
             height += 62.0f;
         layout.h = height;
@@ -362,6 +363,47 @@ void RackView::saveAsPrompt()
     });
 }
 
+void RackView::requestQuit()
+{
+    auto* window = glfwGetCurrentContext();
+    if (! engine.hasUnsavedChanges())
+    {
+        glfwSetWindowShouldClose (window, GLFW_TRUE);
+        return;
+    }
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::sectionHeader ("UNSAVED CHANGES IN " + (currentFile == juce::File() ? juce::String ("THIS PATCH") : currentFile.getFileName().toUpperCase())));
+    items.push_back (MenuItem::item (1, "Save and quit"));
+    items.push_back (MenuItem::item (2, "Quit without saving"));
+    items.push_back (MenuItem::item (3, "Cancel", "Esc"));
+    menu.open (std::move (items), windowW * 0.5f - 120.0f, windowH * 0.4f, [this, window] (int picked)
+    {
+        if (picked == 2)
+            glfwSetWindowShouldClose (window, GLFW_TRUE);
+        else if (picked == 1)
+        {
+            if (currentFile != juce::File())
+            {
+                if (engine.savePatch (currentFile).wasOk())
+                    glfwSetWindowShouldClose (window, GLFW_TRUE);
+                return;
+            }
+            prompt.open ("Save as (in ~/Documents/SignalPatch/patches) then quit", "my rig", [this, window] (const juce::String& name)
+            {
+                if (name.trim().isEmpty())
+                    return;
+                auto file = documentsFolder ("patches").getChildFile (name.trim());
+                if (! file.hasFileExtension ("signalpatch"))
+                    file = file.withFileExtension ("signalpatch");
+                if (engine.savePatch (file).wasOk())
+                    glfwSetWindowShouldClose (window, GLFW_TRUE);
+            });
+        }
+        dirty = true;
+    });
+    dirty = true;
+}
+
 void RackView::showFileMenu (double x, double y)
 {
     enum { newPatch = 1, openPatch, save, saveAs, exportBundle, unmute, quit };
@@ -405,7 +447,7 @@ void RackView::showFileMenu (double x, double y)
                 });
                 break;
             case unmute: engine.togglePanic(); say (engine.isPanicMuted() ? "Muted" : "Fading in"); break;
-            case quit: glfwSetWindowShouldClose (glfwGetCurrentContext(), GLFW_TRUE); break;
+            case quit: requestQuit(); break;
             default: break;
         }
         dirty = true;
@@ -2161,7 +2203,7 @@ void RackView::key (int keyCode, bool pressed, int mods)
         say ("New patch (muted) - M to fade in");
     }
     else if (ctrl && keyCode == GLFW_KEY_Q)
-        glfwSetWindowShouldClose (glfwGetCurrentContext(), GLFW_TRUE);
+        requestQuit();
     else if (keyCode == GLFW_KEY_M)
     {
         engine.togglePanic();

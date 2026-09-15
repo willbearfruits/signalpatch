@@ -607,7 +607,7 @@ int NodeComponent::preferredHeight() const noexcept
     if (kind == NodeKind::script)
         height += 92;
     if (kind == NodeKind::sampler || kind == NodeKind::neuralAmpPlaceholder
-        || kind == NodeKind::neuralPedal)
+        || kind == NodeKind::neuralPedal || kind == NodeKind::cabinet)
         height += 32;
     if (kind == NodeKind::fourTrack)
         height += 62;
