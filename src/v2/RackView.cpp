@@ -3455,7 +3455,10 @@ void RackView::drawPlateStatic (const Layout& layout, const NodeModel& model)
             const bool crowded = layout.inputs > 6;
             const auto preview = previewArea (layout, origin);
             const bool besideScope = centre.y > preview.getY() - 8.0f && centre.y < preview.getBottom() + 8.0f;
-            const auto limit = besideScope ? preview.getX() - 3.0f : origin.x + layout.w * 0.5f - 6.0f; // below the scope the row is free
+            const bool besideKnobs = centre.y >= origin.y + layout.controlsTop + 8.0f && ! layout.knobParameters.empty();
+            const auto limit = besideScope ? preview.getX() - 3.0f
+                             : besideKnobs ? origin.x + 46.0f            // stop before the left knob
+                                           : origin.x + layout.w * 0.5f - 6.0f; // the row is free
             nvgSave (vg);
             nvgScissor (vg, centre.x + 8.0f, centre.y - 8.0f, juce::jmax (8.0f, limit - centre.x - 8.0f), 16.0f);
             nvgFontSize (vg, crowded ? 7.5f : 8.5f);
