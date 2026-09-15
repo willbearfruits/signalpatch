@@ -171,6 +171,24 @@ private:
     std::optional<CableDrag> cableDrag;
     std::optional<NodeId> sequencerDrag; // painting step values across the preview
 
+    // Module palette down the left edge: click adds at the view centre, drag
+    // drops the module where the pointer lands.
+    struct PaletteDrag
+    {
+        NodeKind kind = NodeKind::gain;
+        double startX = 0.0, startY = 0.0;
+        bool moved = false;
+    };
+    bool paletteVisible = true;
+    float paletteScroll = 0.0f;
+    int paletteHover = -1;
+    std::optional<PaletteDrag> paletteDrag;
+    static constexpr float paletteWidth = 192.0f;
+    static constexpr float hudHeight = 34.0f;
+    void drawPalette (int height);
+    [[nodiscard]] int paletteRowAt (double x, double y) const noexcept; // index into moduleCatalogue(), -1 none
+    [[nodiscard]] float paletteRowTop (int row) const noexcept;
+
     NodeId selectedNode = 0;
     std::optional<Connection> selectedCable;
     juce::String message;

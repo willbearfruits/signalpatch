@@ -268,9 +268,11 @@ void RackView::fitToPatch (int width, int height)
     const auto margin = 60.0f;
     const auto contentW = maxX - minX + 2.0f * margin;
     const auto contentH = maxY - minY + 2.0f * margin + 40.0f;
-    const auto fit = juce::jlimit (0.25, 1.5, std::min (width / static_cast<double> (contentW), height / static_cast<double> (contentH)));
+    const auto left = paletteVisible ? static_cast<double> (paletteWidth) : 0.0;
+    const auto availableW = width - left;
+    const auto fit = juce::jlimit (0.25, 1.5, std::min (availableW / static_cast<double> (contentW), height / static_cast<double> (contentH)));
     targetZoom = zoom = fit;
-    panX = (width - contentW * fit) * 0.5 - (minX - margin) * fit;
+    panX = left + (availableW - contentW * fit) * 0.5 - (minX - margin) * fit;
     panY = (height - contentH * fit) * 0.5 - (minY - margin) * fit + 20.0;
     dirty = true;
 }
@@ -1116,6 +1118,114 @@ void RackView::showAudioMenu (double x, double y)
     dirty = true;
 }
 
+// ---------------------------------------------------------------- palette
+
+float RackView::paletteRowTop (int row) const noexcept
+{
+    // Group headings take a taller row before the first entry of each group.
+    const auto& catalogue = moduleCatalogue();
+    float y = hudHeight + 12.0f - paletteScroll;
+    juce::String group;
+    for (int index = 0; index <= row && index < static_cast<int> (catalogue.size()); ++index)
+    {
+        if (group != catalogue[static_cast<std::size_t> (index)].group)
+        {
+            group = catalogue[static_cast<std::size_t> (index)].group;
+            y += 22.0f;
+        }
+        if (index == row)
+            return y;
+        y += 26.0f;
+    }
+    return y;
+}
+
+int RackView::paletteRowAt (double x, double y) const noexcept
+{
+    if (! paletteVisible || x < 0.0 || x > paletteWidth || y < hudHeight)
+        return -1;
+    const auto& catalogue = moduleCatalogue();
+    for (int index = 0; index < static_cast<int> (catalogue.size()); ++index)
+    {
+        const auto top = paletteRowTop (index);
+        if (y >= top && y < top + 26.0f)
+            return index;
+    }
+    return -1;
+}
+
+void RackView::drawPalette (int height)
+{
+    if (! paletteVisible)
+        return;
+    nvgBeginPath (vg);
+    nvgRect (vg, 0, hudHeight, paletteWidth, static_cast<float> (height) - hudHeight);
+    nvgFillColor (vg, alpha (palette::panel, 0.96f));
+    nvgFill (vg);
+    nvgBeginPath (vg);
+    nvgMoveTo (vg, paletteWidth, hudHeight);
+    nvgLineTo (vg, paletteWidth, static_cast<float> (height));
+    nvgStrokeColor (vg, nvgRGBAf (0, 0, 0, 0.4f));
+    nvgStrokeWidth (vg, 1.0f);
+    nvgStroke (vg);
+
+    nvgSave (vg);
+    nvgScissor (vg, 0, hudHeight, paletteWidth, static_cast<float> (height) - hudHeight);
+    nvgFontFaceId (vg, font);
+    const auto& catalogue = moduleCatalogue();
+    juce::String group;
+    for (int index = 0; index < static_cast<int> (catalogue.size()); ++index)
+    {
+        const auto& entry = catalogue[static_cast<std::size_t> (index)];
+        const auto top = paletteRowTop (index);
+        if (group != entry.group)
+        {
+            group = entry.group;
+            nvgFontSize (vg, 9.5f);
+            nvgTextLetterSpacing (vg, 1.0f);
+            nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+            nvgFillColor (vg, palette::mutedText);
+            nvgText (vg, 14.0f, top - 5.0f, group.toRawUTF8(), nullptr);
+            nvgTextLetterSpacing (vg, 0.0f);
+        }
+        const bool hovered = index == paletteHover;
+        const auto colour = accent (entry.kind);
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, 10.0f, top, paletteWidth - 20.0f, 23.0f, 4.0f);
+        nvgFillColor (vg, hovered ? lighter (palette::panelRaised, 0.12f) : palette::panelRaised);
+        nvgFill (vg);
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, 12.5f, top + 4.0f, 3.0f, 15.0f, 1.5f);
+        nvgFillColor (vg, alpha (colour, hovered ? 1.0f : 0.8f));
+        nvgFill (vg);
+        nvgFontSize (vg, 11.0f);
+        nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvgFillColor (vg, alpha (palette::text, hovered ? 1.0f : 0.88f));
+        nvgText (vg, 24.0f, top + 11.5f, entry.label, nullptr);
+    }
+    nvgRestore (vg);
+
+    // Ghost of the module being dragged out.
+    if (paletteDrag.has_value() && paletteDrag->moved)
+    {
+        const auto& entry = moduleCatalogue()[static_cast<std::size_t> (paletteHover >= 0 ? paletteHover : 0)];
+        juce::ignoreUnused (entry);
+        const auto colour = accent (paletteDrag->kind);
+        const auto gx = static_cast<float> (mouseX) - 60.0f, gy = static_cast<float> (mouseY) - 14.0f;
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, gx, gy, 120.0f, 28.0f, 5.0f);
+        nvgFillColor (vg, alpha (mix (palette::nodeTop, colour, 0.3f), 0.85f));
+        nvgFill (vg);
+        nvgStrokeColor (vg, alpha (colour, 0.9f));
+        nvgStrokeWidth (vg, 1.2f);
+        nvgStroke (vg);
+        nvgFontSize (vg, 11.0f);
+        nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgFillColor (vg, palette::text);
+        nvgText (vg, gx + 60.0f, gy + 14.0f, nodeKindName (paletteDrag->kind).toUpperCase().toRawUTF8(), nullptr);
+    }
+}
+
 // ---------------------------------------------------------------- frame loop
 
 void RackView::tick (double now)
@@ -1709,7 +1819,7 @@ void RackView::drawHud (int width, int height, double now)
     nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
     nvgFillColor (vg, alpha (palette::mutedText, 0.75f));
     const auto hint = message.isNotEmpty() ? message
-        : juce::String ("drag modules  |  drag a port to cable  |  drag the space to pan  |  wheel zooms at the pointer  |  Del  Ctrl+Z  Ctrl+D  M mute  F fit");
+        : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan  |  wheel zooms  |  Del  Ctrl+Z  Ctrl+D  M mute  F fit");
     nvgText (vg, 16.0f, static_cast<float> (height) - 10.0f, hint.toRawUTF8(), nullptr);
 }
 
@@ -1790,6 +1900,7 @@ void RackView::render (int width, int height, float ratio, double now)
         drawNode (layout, now);
     nvgRestore (vg);
 
+    drawPalette (height);
     drawHud (width, height, now);
     menu.draw (width, height);
     browser.draw (width, height);
@@ -1831,6 +1942,21 @@ void RackView::mouseMove (double x, double y)
         return;
     }
     const auto world = toWorld (x, y);
+    if (paletteDrag.has_value())
+    {
+        if (juce::Point<double> (x, y).getDistanceFrom ({ paletteDrag->startX, paletteDrag->startY }) > 6.0)
+            paletteDrag->moved = true;
+        dirty = true;
+        return;
+    }
+    {
+        const auto hovered = paletteRowAt (x, y);
+        if (hovered != paletteHover)
+        {
+            paletteHover = hovered;
+            dirty = true;
+        }
+    }
     if (draggingNode.has_value())
     {
         engine.moveNode (*draggingNode, world - dragOffset);
@@ -1904,6 +2030,37 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
     }
     const auto world = toWorld (x, y);
     const auto hit = static_cast<float> (1.0 / zoom);
+
+    if (! pressed && paletteDrag.has_value())
+    {
+        const auto kind = paletteDrag->kind;
+        const bool dropOnCanvas = paletteDrag->moved && x > paletteWidth;
+        const bool click = ! paletteDrag->moved;
+        paletteDrag.reset();
+        if (dropOnCanvas || click)
+        {
+            const auto centre = toWorld ((paletteWidth + windowW) * 0.5, (hudHeight + windowH) * 0.5);
+            const auto position = dropOnCanvas ? world - juce::Point<float> (118.0f, 22.0f) : centre - juce::Point<float> (118.0f, 100.0f);
+            const auto created = engine.addNode (kind, position);
+            if (created != 0)
+            {
+                selectedNode = created;
+                selectedCable.reset();
+                say (nodeKindName (kind) + " added");
+            }
+        }
+        dirty = true;
+        return;
+    }
+    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && paletteVisible && x < paletteWidth && y >= hudHeight)
+    {
+        const auto row = paletteRowAt (x, y);
+        if (row >= 0)
+            paletteDrag = PaletteDrag { moduleCatalogue()[static_cast<std::size_t> (row)].kind, x, y, false };
+        return;
+    }
+    if (pressed && paletteVisible && x < paletteWidth && y >= hudHeight)
+        return; // clicks on the panel never reach the canvas
 
     if (pressed && button == GLFW_MOUSE_BUTTON_RIGHT)
     {
@@ -2113,6 +2270,14 @@ void RackView::scroll (double dx, double dy, int mods, double x, double y)
         dirty = true;
         return;
     }
+    if (paletteVisible && x < paletteWidth && y >= hudHeight)
+    {
+        const auto contentHeight = paletteRowTop (static_cast<int> (moduleCatalogue().size()) - 1) + paletteScroll + 40.0f - hudHeight;
+        paletteScroll = juce::jlimit (0.0f, juce::jmax (0.0f, contentHeight - (windowH - hudHeight)), paletteScroll - static_cast<float> (dy) * 40.0f);
+        paletteHover = paletteRowAt (x, y);
+        dirty = true;
+        return;
+    }
     if ((mods & GLFW_MOD_SHIFT) != 0 || std::abs (dx) > 0.0)
     {
         panX += (std::abs (dx) > 0.0 ? dx : dy) * 40.0;
@@ -2204,6 +2369,11 @@ void RackView::key (int keyCode, bool pressed, int mods)
     }
     else if (ctrl && keyCode == GLFW_KEY_Q)
         requestQuit();
+    else if (keyCode == GLFW_KEY_P && ! ctrl)
+    {
+        paletteVisible = ! paletteVisible;
+        dirty = true;
+    }
     else if (keyCode == GLFW_KEY_M)
     {
         engine.togglePanic();
