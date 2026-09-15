@@ -1216,6 +1216,38 @@ void testUndoDeleteRestoresSameProcessorAndCables()
     expect (document.findNode (drive) == nullptr && document.getConnections().empty(), "redo delete incomplete");
 }
 
+void testUndoCompoundGestureMovesSeveralModulesAsOneStep()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    PatchHistory history (document);
+    const auto a = document.addNode (NodeKind::gain, { 0.0f, 0.0f });
+    const auto b = document.addNode (NodeKind::filter, { 100.0f, 0.0f });
+    history.closeGesture();
+    const auto baseline = history.getUndoCount();
+
+    // A multi-drag: both modules move on every motion event, interleaved.
+    history.beginCompoundGesture ("Move 2 modules");
+    for (int step = 1; step <= 10; ++step)
+        for (const auto id : { a, b })
+        {
+            auto* node = document.findNode (id);
+            const auto next = node->position + juce::Point<float> (5.0f, 3.0f);
+            history.recordMove (id, node->position, next);
+            node->position = next;
+        }
+    history.closeGesture();
+    expect (history.getUndoCount() == baseline + 2, "a compound drag should keep one entry per module: " + std::to_string (history.getUndoCount() - baseline));
+    expect (history.getUndoDescription() == "Move 2 modules", "compound description lost");
+
+    expect (history.undo() == PatchHistory::Applied::values, "undo the compound");
+    expect (history.getUndoCount() == baseline, "one undo should take the whole compound");
+    expect (document.findNode (a)->position == juce::Point<float> (0.0f, 0.0f) && document.findNode (b)->position == juce::Point<float> (100.0f, 0.0f), "both modules should be back");
+    expect (history.redo() == PatchHistory::Applied::values, "redo the compound");
+    expect (document.findNode (a)->position == juce::Point<float> (50.0f, 30.0f) && document.findNode (b)->position == juce::Point<float> (150.0f, 30.0f), "both modules should have moved again");
+    expect (! history.canRedo(), "redo should have consumed the whole compound");
+}
+
 void testUndoCoalescesKnobGestures()
 {
     PatchDocument document;
@@ -1855,6 +1887,7 @@ int main()
         { "undo/redo structure round trip", testUndoRedoStructure },
         { "undo delete restores processor and cables", testUndoDeleteRestoresSameProcessorAndCables },
         { "undo coalesces knob gestures", testUndoCoalescesKnobGestures },
+        { "undo compound gesture moves several modules as one step", testUndoCompoundGestureMovesSeveralModulesAsOneStep },
         { "raw juce convolution sanity", testRawJuceConvolutionSanity },
         { "cabinet convolves an impulse", testCabinetConvolvesImpulse },
         { "merge patch adds nodes with fresh ids", testMergeJsonAddsNodesWithFreshIds },

@@ -61,6 +61,10 @@ public:
     // Ends the current coalescing window; the next continuous edit starts a
     // fresh entry even if it targets the same control.
     void closeGesture() noexcept;
+    // Until closeGesture(), every recorded edit belongs to one compound step
+    // (a multi-module drag): continuous edits coalesce per target inside it,
+    // and undo/redo walk the whole step at once under this description.
+    void beginCompoundGesture (juce::String description);
 
     void clear();
 
@@ -104,6 +108,7 @@ private:
         Connection connection;
 
         juce::int64 lastEditMs = 0;
+        int gestureId = 0; // > 0: part of a compound gesture, undone/redone together
     };
 
     void push (Entry entry);
@@ -116,5 +121,8 @@ private:
     std::vector<Entry> undoStack;
     std::vector<Entry> redoStack;
     bool gestureOpen = false;
+    int compoundGesture = 0; // current compound id, 0 when none is open
+    int nextGestureId = 1;
+    juce::String compoundDescription;
 };
 } // namespace signalpatch

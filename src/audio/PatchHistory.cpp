@@ -204,17 +204,36 @@ bool PatchHistory::tryCoalesce (const Entry& entry)
     if (! gestureOpen || undoStack.empty() || ! isContinuous (entry.kind))
         return false;
 
-    auto& top = undoStack.back();
-    if (top.kind != entry.kind || top.node != entry.node || top.parameterIndex != entry.parameterIndex)
-        return false;
-    if (entry.lastEditMs - top.lastEditMs > gestureWindowMs)
-        return false;
+    // Inside a compound gesture the targets interleave (every module of a
+    // multi-drag moves on every motion event), so look through the whole
+    // compound for this target rather than only at the top entry.
+    for (auto it = undoStack.rbegin(); it != undoStack.rend(); ++it)
+    {
+        auto& top = *it;
+        if (compoundGesture != 0 && top.gestureId != compoundGesture)
+            return false;
+        if (top.kind != entry.kind || top.node != entry.node || top.parameterIndex != entry.parameterIndex)
+        {
+            if (compoundGesture == 0)
+                return false;
+            continue;
+        }
+        if (compoundGesture == 0 && entry.lastEditMs - top.lastEditMs > gestureWindowMs)
+            return false;
+        top.floatAfter = entry.floatAfter;
+        top.pointAfter = entry.pointAfter;
+        top.hasPointAfter = entry.hasPointAfter;
+        top.lastEditMs = entry.lastEditMs;
+        return true;
+    }
+    return false;
+}
 
-    top.floatAfter = entry.floatAfter;
-    top.pointAfter = entry.pointAfter;
-    top.hasPointAfter = entry.hasPointAfter;
-    top.lastEditMs = entry.lastEditMs;
-    return true;
+void PatchHistory::beginCompoundGesture (juce::String description)
+{
+    compoundGesture = nextGestureId++;
+    compoundDescription = std::move (description);
+    gestureOpen = true;
 }
 
 void PatchHistory::push (Entry entry)
@@ -225,7 +244,14 @@ void PatchHistory::push (Entry entry)
     if (tryCoalesce (entry))
         return;
 
-    gestureOpen = isContinuous (entry.kind);
+    if (compoundGesture != 0)
+    {
+        entry.gestureId = compoundGesture;
+        entry.description = compoundDescription;
+        gestureOpen = true;
+    }
+    else
+        gestureOpen = isContinuous (entry.kind);
     undoStack.push_back (std::move (entry));
     if (undoStack.size() > static_cast<size_t> (maximumEntries))
         undoStack.erase (undoStack.begin());
@@ -234,6 +260,7 @@ void PatchHistory::push (Entry entry)
 void PatchHistory::closeGesture() noexcept
 {
     gestureOpen = false;
+    compoundGesture = 0;
 }
 
 void PatchHistory::clear()
@@ -241,6 +268,7 @@ void PatchHistory::clear()
     undoStack.clear();
     redoStack.clear();
     gestureOpen = false;
+    compoundGesture = 0;
 }
 
 juce::String PatchHistory::getUndoDescription() const
@@ -366,33 +394,47 @@ PatchHistory::Applied PatchHistory::apply (Entry& entry, bool forward)
 
 PatchHistory::Applied PatchHistory::undo()
 {
-    gestureOpen = false;
+    closeGesture();
+    auto result = Applied::none;
     while (! undoStack.empty())
     {
         auto entry = std::move (undoStack.back());
         undoStack.pop_back();
+        const auto gesture = entry.gestureId;
         const auto applied = apply (entry, false);
-        if (applied == Applied::none)
-            continue; // Target vanished (e.g. device relayout); skip the stale entry.
-        redoStack.push_back (std::move (entry));
-        return applied;
+        if (applied != Applied::none)
+        {
+            redoStack.push_back (std::move (entry));
+            result = juce::jmax (result, applied);
+        }
+        // Stale entries (target vanished after a device relayout) are skipped;
+        // a compound gesture keeps going while the next entry shares its id.
+        const bool more = gesture != 0 && ! undoStack.empty() && undoStack.back().gestureId == gesture;
+        if (result != Applied::none && ! more)
+            return result;
     }
-    return Applied::none;
+    return result;
 }
 
 PatchHistory::Applied PatchHistory::redo()
 {
-    gestureOpen = false;
+    closeGesture();
+    auto result = Applied::none;
     while (! redoStack.empty())
     {
         auto entry = std::move (redoStack.back());
         redoStack.pop_back();
+        const auto gesture = entry.gestureId;
         const auto applied = apply (entry, true);
-        if (applied == Applied::none)
-            continue;
-        undoStack.push_back (std::move (entry));
-        return applied;
+        if (applied != Applied::none)
+        {
+            undoStack.push_back (std::move (entry));
+            result = juce::jmax (result, applied);
+        }
+        const bool more = gesture != 0 && ! redoStack.empty() && redoStack.back().gestureId == gesture;
+        if (result != Applied::none && ! more)
+            return result;
     }
-    return Applied::none;
+    return result;
 }
 } // namespace signalpatch

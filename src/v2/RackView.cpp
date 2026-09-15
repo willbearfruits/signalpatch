@@ -132,6 +132,9 @@ RackView::~RackView()
 
 void RackView::changeListenerCallback (juce::ChangeBroadcaster*)
 {
+    rackSelection.erase (std::remove_if (rackSelection.begin(), rackSelection.end(),
+                                         [this] (NodeId id) { return engine.getDocument().findNode (id) == nullptr; }),
+                         rackSelection.end());
     structureDirty = true;
     boardDirty = true;
     invalidateAllPlates();
@@ -3341,7 +3344,7 @@ void RackView::drawNode (const Layout& layout, double now)
     const auto origin = nodePosition (layout.id);
     const auto x = origin.x, y = origin.y, w = layout.w, h = layout.h;
     const auto colour = accent (layout.kind);
-    const bool selected = selectedNode == layout.id;
+    const bool selected = selectedNode == layout.id || isRackSelected (layout.id);
     const bool bypassed = model->processor->isBypassed();
 
     // Cached plate.
@@ -3587,7 +3590,7 @@ void RackView::drawHud (int width, int height, double now)
     const auto hint = message.isNotEmpty() ? message
         : mode == Mode::board
             ? juce::String ("drag pedals to place them  |  Shift+click to select several, right-click to group them into one pedal  |  1-5 load a slot (knobs glide), Shift+1-5 store  |  Tab rack")
-            : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan  |  wheel zooms  |  Del  Ctrl+Z  Ctrl+D  M mute  F fit  |  Ctrl +/- UI scale  |  Tab board");
+            : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan, Shift+drag selects  |  wheel zooms  |  Del  Ctrl+A  Ctrl+Z  Ctrl+D  M mute  F fit  |  Ctrl +/- UI scale  |  Tab board");
     nvgText (vg, 16.0f, static_cast<float> (height) - 10.0f, hint.toRawUTF8(), nullptr);
 }
 
@@ -3694,6 +3697,16 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
 
     for (const auto& layout : layouts)
         drawNode (layout, now);
+    if (marquee.has_value())
+    {
+        nvgBeginPath (vg);
+        nvgRect (vg, marquee->getX(), marquee->getY(), marquee->getWidth(), marquee->getHeight());
+        nvgFillColor (vg, alpha (palette::control, 0.12f));
+        nvgFill (vg);
+        nvgStrokeColor (vg, alpha (palette::control, 0.8f));
+        nvgStrokeWidth (vg, static_cast<float> (1.0 / zoom));
+        nvgStroke (vg);
+    }
     nvgRestore (vg);
 
     drawPalette (height);
@@ -3773,7 +3786,28 @@ void RackView::mouseMove (double x, double y)
     }
     if (draggingNode.has_value())
     {
-        engine.moveNode (*draggingNode, world - dragOffset);
+        if (dragStartPositions.size() > 1)
+        {
+            const auto delta = world - dragStartWorld;
+            for (const auto& [id, start] : dragStartPositions)
+                engine.moveNode (id, start + delta);
+        }
+        else
+            engine.moveNode (*draggingNode, world - dragOffset);
+        dirty = true;
+    }
+    else if (marquee.has_value())
+    {
+        marquee = juce::Rectangle<float>::leftTopRightBottom (juce::jmin (marqueeStart.x, world.x), juce::jmin (marqueeStart.y, world.y),
+                                                              juce::jmax (marqueeStart.x, world.x), juce::jmax (marqueeStart.y, world.y));
+        rackSelection.clear();
+        for (const auto& layout : layouts)
+        {
+            const auto origin = nodePosition (layout.id);
+            if (marquee->intersects (juce::Rectangle<float> (origin.x, origin.y, layout.w, layout.h)))
+                rackSelection.push_back (layout.id);
+        }
+        selectedNode = rackSelection.empty() ? 0 : rackSelection.back();
         dirty = true;
     }
     else if (knobDrag.has_value())
@@ -3992,6 +4026,8 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
             }
         }
         draggingNode.reset();
+        dragStartPositions.clear();
+        marquee.reset();
         knobDrag.reset();
         cableDrag.reset();
         panning = false;
@@ -4100,10 +4136,30 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
             }
         if (! bounds.contains (world))
             continue;
-        selectedNode = layout.id;
         selectedCable.reset();
+        if ((mods & GLFW_MOD_SHIFT) != 0)
+        {
+            // Shift+click toggles membership; no drag starts.
+            if (isRackSelected (layout.id))
+                rackSelection.erase (std::remove (rackSelection.begin(), rackSelection.end(), layout.id), rackSelection.end());
+            else
+                rackSelection.push_back (layout.id);
+            selectedNode = rackSelection.empty() ? 0 : rackSelection.back();
+            dirty = true;
+            return;
+        }
+        if (! isRackSelected (layout.id))
+            rackSelection = { layout.id };
+        selectedNode = layout.id;
         draggingNode = layout.id;
         dragOffset = world - origin;
+        dragStartWorld = world;
+        dragStartPositions.clear();
+        for (const auto id : rackSelection)
+            if (const auto* model = engine.getDocument().findNode (id); model != nullptr && ! model->hardware)
+                dragStartPositions.emplace_back (id, model->position);
+        if (dragStartPositions.size() > 1)
+            engine.beginCompoundEditGesture ("Move " + juce::String (dragStartPositions.size()) + " modules");
         dirty = true;
         return;
     }
@@ -4112,14 +4168,28 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
     {
         selectedCable = cable;
         selectedNode = 0;
+        rackSelection.clear();
         dirty = true;
         return;
     }
     selectedNode = 0;
     selectedCable.reset();
+    if ((mods & GLFW_MOD_SHIFT) != 0)
+    {
+        marqueeStart = world;
+        marquee = juce::Rectangle<float> (world, world);
+        dirty = true;
+        return;
+    }
+    rackSelection.clear();
     panning = true;
     panStartX = x; panStartY = y; panOriginX = panX; panOriginY = panY;
     dirty = true;
+}
+
+bool RackView::isRackSelected (NodeId id) const noexcept
+{
+    return std::find (rackSelection.begin(), rackSelection.end(), id) != rackSelection.end();
 }
 
 void RackView::scroll (double dx, double dy, int mods, double x, double y)
@@ -4170,12 +4240,28 @@ void RackView::deleteSelection()
         selectedCable.reset();
         message = "Cable removed";
     }
+    else if (rackSelection.size() > 1 && mode == Mode::rack)
+    {
+        engine.beginCompoundEditGesture ("Remove " + juce::String (rackSelection.size()) + " modules");
+        int removed = 0;
+        for (const auto id : std::vector<NodeId> (rackSelection))
+        {
+            const auto* node = engine.getDocument().findNode (id);
+            if (node != nullptr && ! node->hardware && engine.removeNode (id))
+                ++removed;
+        }
+        engine.closeEditGesture();
+        message = juce::String (removed) + " modules removed";
+        rackSelection.clear();
+        selectedNode = 0;
+    }
     else if (selectedNode != 0)
     {
         const auto* node = engine.getDocument().findNode (selectedNode);
         if (node != nullptr && ! node->hardware && engine.removeNode (selectedNode))
             message = "Module removed";
         selectedNode = 0;
+        rackSelection.clear();
     }
     messageUntil = lastTick + 2.0;
     dirty = true;
@@ -4239,6 +4325,16 @@ void RackView::key (int keyCode, bool pressed, int mods)
         if (copy != 0)
             selectedNode = copy;
         say (copy != 0 ? "Duplicated" : "Select a module first");
+    }
+    else if (ctrl && keyCode == GLFW_KEY_A && mode == Mode::rack)
+    {
+        rackSelection.clear();
+        for (const auto& node : engine.getDocument().getNodes())
+            if (! node.hardware)
+                rackSelection.push_back (node.id);
+        selectedNode = rackSelection.empty() ? 0 : rackSelection.back();
+        selectedCable.reset();
+        say (juce::String (rackSelection.size()) + " modules selected");
     }
     else if (ctrl && keyCode == GLFW_KEY_S)
     {

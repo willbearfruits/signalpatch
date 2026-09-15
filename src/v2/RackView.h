@@ -295,6 +295,15 @@ private:
 
     NodeId selectedNode = 0;
     std::optional<Connection> selectedCable;
+    // Rack multi-selection: Shift+click toggles, Shift+drag on the canvas
+    // rubber-bands, Ctrl+A takes everything; dragging any selected module
+    // moves them all as one undo step; Delete removes them all.
+    std::vector<NodeId> rackSelection;
+    [[nodiscard]] bool isRackSelected (NodeId id) const noexcept;
+    std::optional<juce::Rectangle<float>> marquee; // world coordinates
+    juce::Point<float> marqueeStart;
+    std::vector<std::pair<NodeId, juce::Point<float>>> dragStartPositions;
+    juce::Point<float> dragStartWorld;
     juce::String message;
     double messageUntil = 0.0;
     double lastFrameMs = 0.0;

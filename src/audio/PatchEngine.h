@@ -98,6 +98,7 @@ public:
     [[nodiscard]] juce::String getUndoDescription() const { return history.getUndoDescription(); }
     [[nodiscard]] juce::String getRedoDescription() const { return history.getRedoDescription(); }
     void closeEditGesture() noexcept { history.closeGesture(); }
+    void beginCompoundEditGesture (const juce::String& description) { history.beginCompoundGesture (description); }
 
     // Patch files store asset paths (NAM models, cab impulses) relative to
     // the patch's folder when they live under it, absolute otherwise. A
