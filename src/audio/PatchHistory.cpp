@@ -1,4 +1,5 @@
 #include "PatchHistory.h"
+#include "MidiMap.h"
 
 #include <algorithm>
 
@@ -188,6 +189,16 @@ void PatchHistory::recordGroups (juce::var before, juce::var after)
     push (std::move (entry));
 }
 
+void PatchHistory::recordMidi (juce::var before, juce::var after)
+{
+    Entry entry;
+    entry.kind = Kind::midi;
+    entry.description = "change MIDI mapping";
+    entry.varBefore = std::move (before);
+    entry.varAfter = std::move (after);
+    push (std::move (entry));
+}
+
 bool PatchHistory::tryCoalesce (const Entry& entry)
 {
     if (! gestureOpen || undoStack.empty() || ! isContinuous (entry.kind))
@@ -345,6 +356,9 @@ PatchHistory::Applied PatchHistory::apply (Entry& entry, bool forward)
         }
         case Kind::groups:
             document.groupsFromJson (forward ? entry.varAfter : entry.varBefore);
+            return Applied::values;
+        case Kind::midi:
+            document.setMidiMappings (midiMappingsFromJson (forward ? entry.varAfter : entry.varBefore));
             return Applied::values;
     }
     return Applied::none;

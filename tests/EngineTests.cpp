@@ -1,6 +1,7 @@
 #include "../src/audio/Graph.h"
 #include "../src/audio/PatchHistory.h"
 #include "../src/audio/PatchBundle.h"
+#include "../src/audio/MidiMap.h"
 #include "../src/audio/Processors.h"
 
 #include <algorithm>
@@ -1608,6 +1609,43 @@ void testRecordedAudioSavesAndLoadsWithThePatch()
     temp.deleteRecursively();
 }
 
+void testMidiMappingsRoundTripAndScrub()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    const auto drive = document.addNode (NodeKind::distortion, { 0.0f, 0.0f }, 800);
+    const auto loop = document.addNode (NodeKind::looper, { 0.0f, 0.0f }, 801);
+    MidiMapping knob;
+    knob.source = MidiMapping::Source::controlChange; knob.number = 21; knob.channel = 0;
+    knob.target = MidiMapping::Target::parameter; knob.node = drive; knob.parameter = 0;
+    MidiMapping stomp;
+    stomp.source = MidiMapping::Source::note; stomp.number = 60; stomp.channel = 10;
+    stomp.target = MidiMapping::Target::bypass; stomp.node = drive;
+    MidiMapping rec;
+    rec.source = MidiMapping::Source::controlChange; rec.number = 64;
+    rec.target = MidiMapping::Target::command; rec.node = loop; rec.command = "rec";
+    MidiMapping slot;
+    slot.source = MidiMapping::Source::programChange; slot.number = 2;
+    slot.target = MidiMapping::Target::slot; slot.slot = 2;
+    MidiMapping dangling = knob;
+    dangling.node = 999; // no such node: dropped on set
+    document.setMidiMappings ({ knob, stomp, rec, slot, dangling });
+    expect (document.getMidiMappings().size() == 4, "dangling mapping should be dropped");
+
+    PatchDocument reloaded;
+    reloaded.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    expectOk (reloaded.loadJson (document.toJson()), "reload with midi");
+    const auto& back = reloaded.getMidiMappings();
+    expect (back.size() == 4, "mappings lost in the round trip");
+    expect (back[0].matches (MidiMapping::Source::controlChange, 5, 21) && back[0].target == MidiMapping::Target::parameter && back[0].parameter == 0, "knob mapping changed");
+    expect (back[1].matches (MidiMapping::Source::note, 10, 60) && ! back[1].matches (MidiMapping::Source::note, 1, 60), "channel filter lost");
+    expect (back[2].command == "rec" && back[2].node == loop, "command mapping changed");
+    expect (back[3].target == MidiMapping::Target::slot && back[3].slot == 2 && back[3].sourceLabel() == "PC2", "slot mapping changed");
+
+    reloaded.removeNode (drive);
+    expect (reloaded.getMidiMappings().size() == 2, "mappings to a deleted node should be scrubbed");
+}
+
 int main()
 {
     // Flush every insertion so a crash on CI still shows which test was
@@ -1642,7 +1680,8 @@ int main()
         { "portable bundle round trip", testBundleRoundTripKeepsAssetsRelative },
         { "board positions and groups round trip", testBoardPositionsAndGroupsRoundTrip },
         { "looper records, closes, overdubs, undoes", testLooperRecordsClosesOverdubsAndUndoes },
-        { "recorded audio saves and loads with the patch", testRecordedAudioSavesAndLoadsWithThePatch }
+        { "recorded audio saves and loads with the patch", testRecordedAudioSavesAndLoadsWithThePatch },
+        { "midi mappings round trip and scrub", testMidiMappingsRoundTripAndScrub }
     };
 
     int failures = 0;

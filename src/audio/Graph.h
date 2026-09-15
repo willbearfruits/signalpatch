@@ -272,6 +272,8 @@ struct NodeModel
     std::optional<juce::Point<float>> boardPosition; // pedalboard; unset = auto-arranged
 };
 
+struct MidiMapping;
+
 // A board-only pedal made of several modules: one footswitch bypasses all
 // members, and up to a few of their knobs are exposed on its face. The rack
 // is untouched; this is presentation and control, not a sub-graph.
@@ -336,6 +338,9 @@ public:
     juce::Result mergeJson (const juce::var& value, juce::Point<float> offset,
                             std::vector<NodeId>& addedNodes, std::vector<Connection>& addedCables);
 
+    [[nodiscard]] const std::vector<struct MidiMapping>& getMidiMappings() const noexcept;
+    void setMidiMappings (std::vector<struct MidiMapping> mappings);
+
     [[nodiscard]] const std::vector<PedalGroup>& getGroups() const noexcept { return groups; }
     /** Replaces the group list (ids assigned to groups that have none). */
     void setGroups (std::vector<PedalGroup> newGroups);
@@ -349,6 +354,7 @@ private:
     std::vector<NodeModel> nodes;
     std::vector<Connection> connections;
     std::vector<PedalGroup> groups;
+    std::vector<struct MidiMapping> midiMappings;
     int nextGroupId = 1;
     NodeId nextNodeId = 100;
     double currentSampleRate = 48000.0;

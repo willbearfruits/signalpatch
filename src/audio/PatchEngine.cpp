@@ -28,6 +28,8 @@ juce::Result PatchEngine::initialise()
     if (initialised)
         return juce::Result::ok();
 
+    deviceManager.addMidiInputDeviceCallback ({}, this); // every enabled input
+    refreshMidiInputs();
     auto deviceResult = openDefaultDevice();
     if (! restoredAudioDeviceState)
         configureAllAvailableChannels();
@@ -83,6 +85,7 @@ juce::Result PatchEngine::initialise()
 
 void PatchEngine::shutdown()
 {
+    deviceManager.removeMidiInputDeviceCallback ({}, this);
     if (! initialised && activePlan == nullptr && pendingPlan.load() == nullptr)
         return;
 
@@ -608,6 +611,128 @@ void PatchEngine::setGroups (std::vector<PedalGroup> groups)
     sendChangeMessage();
 }
 
+void PatchEngine::setMidiMappings (std::vector<MidiMapping> mappings)
+{
+    const auto before = midiMappingsToJson (document.getMidiMappings());
+    document.setMidiMappings (std::move (mappings));
+    history.recordMidi (before, midiMappingsToJson (document.getMidiMappings()));
+    markDocumentEdited();
+    sendChangeMessage();
+}
+
+void PatchEngine::applyMidiMappingsJson (const juce::var& mappings)
+{
+    const auto before = midiMappingsToJson (document.getMidiMappings());
+    document.setMidiMappings (midiMappingsFromJson (mappings));
+    history.recordMidi (before, midiMappingsToJson (document.getMidiMappings()));
+    markDocumentEdited();
+    sendChangeMessage();
+}
+
+juce::StringArray PatchEngine::getOpenMidiInputNames() const
+{
+    juce::StringArray names;
+    for (const auto& device : juce::MidiInput::getAvailableDevices())
+        if (deviceManager.isMidiInputDeviceEnabled (device.identifier))
+            names.add (device.name);
+    return names;
+}
+
+void PatchEngine::refreshMidiInputs()
+{
+    // Open everything that is plugged in; a hot-plugged controller shows up
+    // on the next refresh (timer, every few seconds).
+    int open = 0;
+    for (const auto& device : juce::MidiInput::getAvailableDevices())
+    {
+        if (! deviceManager.isMidiInputDeviceEnabled (device.identifier))
+            deviceManager.setMidiInputDeviceEnabled (device.identifier, true);
+        if (deviceManager.isMidiInputDeviceEnabled (device.identifier))
+            ++open;
+    }
+    midiInputsOpen = open;
+}
+
+void PatchEngine::handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& message)
+{
+    // MIDI thread: hop to the message thread, where the document is safe to touch.
+    juce::MessageManager::callAsync ([this, message] { handleMidiOnMessageThread (message); });
+}
+
+void PatchEngine::handleMidiOnMessageThread (const juce::MidiMessage& message)
+{
+    MidiMapping::Source source;
+    int number = 0;
+    if (message.isController())            { source = MidiMapping::Source::controlChange; number = message.getControllerNumber(); }
+    else if (message.isNoteOn (true))      { source = MidiMapping::Source::note; number = message.getNoteNumber(); }
+    else if (message.isNoteOff (true))     { source = MidiMapping::Source::note; number = message.getNoteNumber(); }
+    else if (message.isProgramChange())    { source = MidiMapping::Source::programChange; number = message.getProgramChangeNumber(); }
+    else
+        return;
+    lastMidiDescription = (source == MidiMapping::Source::controlChange ? "CC " + juce::String (number) + " = " + juce::String (message.getControllerValue())
+                         : source == MidiMapping::Source::note ? "Note " + juce::String (number) + (message.isNoteOn (true) ? " on" : " off")
+                                                                : "Program " + juce::String (number))
+                        + "  ch " + juce::String (message.getChannel());
+    if (midiLearnHook && (message.isController() || message.isNoteOn (true) || message.isProgramChange()))
+        if (midiLearnHook (message))
+            return;
+    const auto& mappings = document.getMidiMappings();
+    for (std::size_t index = 0; index < mappings.size(); ++index)
+        if (mappings[index].matches (source, message.getChannel(), number))
+            applyMidiMapping (mappings[index], message);
+}
+
+void PatchEngine::applyMidiMapping (const MidiMapping& mapping, const juce::MidiMessage& message)
+{
+    // "On" for notes is note-on; for CCs it is value >= 64; program changes are always on.
+    const bool isOn = message.isNoteOn (true) || (message.isController() && message.getControllerValue() >= 64) || message.isProgramChange();
+    const bool isEdge = message.isNoteOn (true) || message.isProgramChange()
+                      || (message.isController() && ! message.isNoteOff (true)); // CC: act on every message, gate below
+    switch (mapping.target)
+    {
+        case MidiMapping::Target::parameter:
+        {
+            if (! message.isController())
+                return;
+            const auto* node = document.findNode (mapping.node);
+            if (node == nullptr || ! juce::isPositiveAndBelow (mapping.parameter, node->processor->getNumParameters()))
+                return;
+            auto& parameter = node->processor->getParameter (mapping.parameter);
+            parameter.setValue (parameter.range.convertFrom0to1 (static_cast<float> (message.getControllerValue()) / 127.0f));
+            markDocumentEdited();
+            if (onParameterChangedByMidi)
+                onParameterChangedByMidi (mapping.node);
+            return;
+        }
+        case MidiMapping::Target::bypass:
+        {
+            const auto* node = document.findNode (mapping.node);
+            if (node == nullptr)
+                return;
+            if (message.isNoteOn (true))
+                setNodeBypassed (mapping.node, ! node->processor->isBypassed()); // a note toggles
+            else if (message.isController())
+                setNodeBypassed (mapping.node, ! isOn);                          // a switch CC sets
+            return;
+        }
+        case MidiMapping::Target::command:
+        {
+            // Rising edge only, so a latching switch CC does not fire twice.
+            const auto key = static_cast<juce::int64> (mapping.node) * 1000 + mapping.command.hashCode() % 1000;
+            const bool wasOn = midiCommandGate[key];
+            midiCommandGate[key] = isOn;
+            if (isEdge && isOn && ! wasOn)
+                sendNodeCommand (mapping.node, mapping.command);
+            return;
+        }
+        case MidiMapping::Target::slot:
+        case MidiMapping::Target::groupBypass:
+            if (isOn && onMidiUiTarget)
+                onMidiUiTarget (mapping, message);
+            return;
+    }
+}
+
 void PatchEngine::applyGroupsJson (const juce::var& groups)
 {
     const auto before = document.groupsToJson();
@@ -889,6 +1014,11 @@ void PatchEngine::timerCallback()
 {
     reclaimRetiredPlans();
     writeAutosaveIfDue();
+    if (--midiRefreshCountdown <= 0)
+    {
+        midiRefreshCountdown = 30; // hot-plug scan every few seconds (timer runs ~10 Hz)
+        refreshMidiInputs();
+    }
     // Let the displayed worst case fade over a few seconds.
     cpuPeak.store (cpuPeak.load (std::memory_order_relaxed) * 0.985f, std::memory_order_relaxed);
 

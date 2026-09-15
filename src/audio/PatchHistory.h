@@ -48,6 +48,7 @@ public:
     void recordRename (NodeId id, const juce::String& before, const juce::String& after);
     void recordBoardMove (NodeId id, std::optional<juce::Point<float>> before, std::optional<juce::Point<float>> after);
     void recordGroups (juce::var before, juce::var after);
+    void recordMidi (juce::var before, juce::var after);
 
     Applied undo();
     Applied redo();
@@ -78,7 +79,8 @@ private:
         extraState,
         rename,
         boardMove,
-        groups
+        groups,
+        midi
     };
 
     struct Entry

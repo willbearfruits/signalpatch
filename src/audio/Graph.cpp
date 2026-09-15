@@ -1,4 +1,5 @@
 #include "Graph.h"
+#include "MidiMap.h"
 
 #include <map>
 
@@ -622,7 +623,41 @@ bool PatchDocument::removeNode (NodeId id)
                                            [id] (const auto& knob) { return knob.first == id; }), group.knobs.end());
     }
     groups.erase (std::remove_if (groups.begin(), groups.end(), [] (const PedalGroup& group) { return group.members.empty(); }), groups.end());
+    midiMappings.erase (std::remove_if (midiMappings.begin(), midiMappings.end(), [id] (const MidiMapping& mapping)
+    {
+        return (mapping.target == MidiMapping::Target::parameter || mapping.target == MidiMapping::Target::bypass
+                || mapping.target == MidiMapping::Target::command) && mapping.node == id;
+    }), midiMappings.end());
     return true;
+}
+
+const std::vector<MidiMapping>& PatchDocument::getMidiMappings() const noexcept
+{
+    return midiMappings;
+}
+
+void PatchDocument::setMidiMappings (std::vector<MidiMapping> mappings)
+{
+    mappings.erase (std::remove_if (mappings.begin(), mappings.end(), [this] (const MidiMapping& mapping)
+    {
+        switch (mapping.target)
+        {
+            case MidiMapping::Target::parameter:
+            {
+                const auto* node = findNode (mapping.node);
+                return node == nullptr || ! juce::isPositiveAndBelow (mapping.parameter, node->processor->getNumParameters());
+            }
+            case MidiMapping::Target::bypass:
+            case MidiMapping::Target::command:
+                return findNode (mapping.node) == nullptr;
+            case MidiMapping::Target::groupBypass:
+                return std::none_of (groups.begin(), groups.end(), [&] (const PedalGroup& group) { return group.id == mapping.groupId; });
+            case MidiMapping::Target::slot:
+                return mapping.slot < 0;
+        }
+        return false;
+    }), mappings.end());
+    midiMappings = std::move (mappings);
 }
 
 void PatchDocument::setGroups (std::vector<PedalGroup> newGroups)
@@ -745,6 +780,7 @@ bool PatchDocument::removeConnection (const Connection& connection)
 void PatchDocument::clearUserPatch()
 {
     groups.clear();
+    midiMappings.clear();
     nodes.erase (std::remove_if (nodes.begin(), nodes.end(), [] (const NodeModel& node) { return ! node.hardware; }),
                  nodes.end());
     connections.clear();
@@ -835,6 +871,8 @@ juce::var PatchDocument::toJson() const
     root->setProperty ("connections", connectionValues);
     if (! groups.empty())
         root->setProperty ("groups", groupsToJson());
+    if (! midiMappings.empty())
+        root->setProperty ("midi", midiMappingsToJson (midiMappings));
     return juce::var (root.release());
 }
 
@@ -1069,6 +1107,7 @@ juce::Result PatchDocument::loadJson (const juce::var& value)
         }
     }
     groupsFromJson (root->getProperty ("groups"));
+    setMidiMappings (midiMappingsFromJson (root->getProperty ("midi")));
 
     return juce::Result::ok();
 }

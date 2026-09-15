@@ -2,9 +2,11 @@
 
 #include "Graph.h"
 #include "PatchHistory.h"
+#include "MidiMap.h"
 
 #include <array>
 #include <atomic>
+#include <functional>
 #include <unordered_map>
 
 namespace signalpatch
@@ -30,9 +32,25 @@ class PatchEngine final : private juce::AudioIODeviceCallback,
                           private juce::ChangeListener,
                           private juce::AsyncUpdater,
                           private juce::Timer,
+                          private juce::MidiInputCallback,
                           public juce::ChangeBroadcaster
 {
 public:
+    // ---- MIDI control ----
+    // Every available MIDI input is opened; messages hop to the message
+    // thread and are applied against the patch's mappings. The UI can arm a
+    // learn hook (it sees the next mapped-able message first) and receives
+    // slot / group targets it owns through onMidiUiTarget.
+    void setMidiMappings (std::vector<MidiMapping> mappings);        // undoable, broadcasts
+    void applyMidiMappingsJson (const juce::var& mappings);           // slot glides adopt the target map
+    [[nodiscard]] const std::vector<MidiMapping>& getMidiMappings() const noexcept { return document.getMidiMappings(); }
+    std::function<bool (const juce::MidiMessage&)> midiLearnHook;     // return true to consume
+    std::function<void (const MidiMapping&, const juce::MidiMessage&)> onMidiUiTarget;
+    std::function<void (NodeId)> onParameterChangedByMidi;           // UI plate refresh
+    [[nodiscard]] juce::StringArray getOpenMidiInputNames() const;
+    [[nodiscard]] bool hasMidiInputs() const noexcept { return midiInputsOpen > 0; }
+    [[nodiscard]] juce::String getLastMidiDescription() const { return lastMidiDescription; }
+
     PatchEngine();
     ~PatchEngine() override;
 
@@ -127,6 +145,10 @@ private:
     void retirePlanFromAudioThread (RenderPlan* plan) noexcept;
     void reclaimRetiredPlans() noexcept;
     void markDocumentEdited();
+    void handleIncomingMidiMessage (juce::MidiInput* source, const juce::MidiMessage& message) override;
+    void handleMidiOnMessageThread (const juce::MidiMessage& message);
+    void refreshMidiInputs();
+    void applyMidiMapping (const MidiMapping& mapping, const juce::MidiMessage& message);
     void writeAutosaveIfDue();
     juce::File autosaveFile() const;
     juce::File audioStateFile() const;
@@ -163,6 +185,10 @@ private:
     std::unordered_map<NodeId, juce::uint32> savedAudioVersions;    // per explicit save target
     std::unordered_map<NodeId, juce::uint32> autosavedAudioVersions; // per autosave
     juce::File savedAudioTarget;
+    int midiInputsOpen = 0;
+    int midiRefreshCountdown = 0;
+    juce::String lastMidiDescription;
+    std::unordered_map<juce::int64, bool> midiCommandGate; // rising-edge detection per (mapping index)
     bool audioCallbackRegistered = false;
     bool restoredAudioDeviceState = false;
     juce::String configuredDeviceSignature;
