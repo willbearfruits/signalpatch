@@ -5,144 +5,107 @@ The single ordered plan for the project. Detail lives in the referenced docs:
 `NAM_ROADMAP.md` (neural amp stages), `PRODUCTION_READINESS.md` (verification
 gates). This file says what comes next and why.
 
-## Where we are (0.1, shipped)
+## Where we are (0.2, shipped 2026-09-14/15)
 
-35 node kinds across utility / effects / voice / instruments / dynamics /
-control; working Neural Amp Modeler node; rack UI with stomp bypass,
-right-click patching and live signal-flow cables; guarded-feedback-only graph
-engine with block-boundary snapshot swaps; Zoom F4 first-launch preference;
-autosave recovery; patch files with per-node extra state. Verified: zero
-allocations on the render path (trap test), 30-minutes-of-audio worst-case
-soak, ASan+UBSan clean, 16 engine tests.
+Everything in 0.1 plus: undo/redo over every edit; a Cabinet node (two IRs,
+blend, cuts, zero-latency convolution); File menu, recent files, portable
+project bundles (patch + models + IRs as a zip); context menus everywhere; a
+much lighter JUCE rack. And **SignalPatch 2** (`signalpatch2`): the same
+engine under a GLFW + OpenGL + NanoVG UI that renders only what changed and
+idles at nothing — rack view with cached face plates, in-canvas menus, file
+browser and text prompts, an AUDIO device menu, and the **Board**: the patch
+arranged by signal flow as pedals, movable, with pedal **groups** (one
+footswitch and up to four knobs over several modules) and five **rig slots**
+whose knob values glide when the modules and cables match.
 
-Deliberate boundaries today: mono effect nodes, no MIDI/OSC, no undo/redo, no
-plug-in hosting, sampler/4-track audio not saved with patches.
+Load-bearing gaps that most requests run into: the engine is **mono**, has
+**no external control** (MIDI/gamepad), and **does not persist recordings**
+(sampler/4-track audio). Two UIs exist; only one should.
+
+## The destination
+
+An ASUS ROG Ally X as a self-contained rig: boot to the Board, a small USB
+interface, a purpose-built foot controller, gamepad for everything the feet
+don't do. Every phase below is ordered by how much closer it gets that box.
 
 ---
 
-## 0.2 — Play it like an instrument
+## 0.3 — One app, and a rig that keeps what you play
 
-The biggest missing MVP pillar is external control. Everything here rides the
-architecture's existing event-queue design (ARCHITECTURE.md "Parameters and
-modulation"): external input becomes timestamped engine events on bounded
-queues, never touching the callback directly.
+- **Retire the JUCE UI.** Delete `src/ui`, keep `src/audio` and `src/v2`;
+  `signalpatch2` becomes `signalpatch`. One app to build, test and design.
+- **Looper node**: record / overdub / undo-last-layer / half-speed / reverse;
+  loop length settable by first take or locked to the drum machine's bar.
+- **Recording persistence**: sampler, 4-track and looper audio saved as WAV
+  under the project's `assets/audio/` and loaded back with the patch; bundles
+  carry them.
+- **Tuner** (a control node with a Board face).
 
-- **MIDI input device handling** in PatchEngine (JUCE MidiInput on its own
-  thread, fixed-capacity SPSC queue into the callback, note-off capacity
-  reserved per REALTIME_SAFETY).
-- **MIDI Note node** (control outs: pitch, gate, velocity) so the mono synth
-  and pluck become playable; drum machine and sequencer accept MIDI clock or
-  keep their internal clock.
-- **MIDI learn on mod sockets**: right-click a diamond port → "learn CC";
-  mapping persisted in the patch.
-- **Undo/redo** on PatchDocument (command pattern over add/remove
-  node/connection, parameter gestures coalesced) — the document was designed
-  for this and the UI already funnels every mutation through PatchEngine.
-- **Node niceties**: rename in inspector, duplicate node, per-kind presets
-  (JSON snippets of the parameter block).
+Exit: record a loop, save, reopen tomorrow, and it plays.
 
-Exit: play the synth from a keyboard, twist a hardware knob into any mod
-socket, and undo a mistaken cable mid-performance without an audio glitch.
+## 0.4 — Play it without a mouse (control)
 
-## 0.3 — Stereo and the studio loop
+The engine's event-queue design becomes real: every external input is a
+timestamped event on a bounded queue into the callback.
 
-- **Stereo channel policy** per port (ARCHITECTURE.md already specifies
-  fixed/match-upstream/device-derived widths; the compiler and buffers must
-  learn multi-channel ports). Start with stereo variants of delay, reverb,
-  chorus and a Pan node; keep mono nodes valid forever.
-- **Split / merge / pan utilities** (mono→stereo, stereo→mono, L/R split).
-- **Master recorder**: bounce the hardware-output bus to WAV on a writer
-  thread (lock-free FIFO out of the callback) — the 4-track spirit, but for
-  the whole patch.
-- **Sampler / 4-track persistence**: save takes as WAV sidecars next to the
-  patch (`<patch>.assets/`), load them back with the patch. Patches stop
-  being silent shells of recorded work.
+- **MIDI input** (JUCE MidiInput, its own thread, SPSC queue): notes drive
+  the synth/pluck; CC and program change drive the rest.
+- **MIDI learn** on stomps, knobs, group pedals and rig slots, with a
+  learn-mode overlay on the Board; mappings saved in the patch.
+- **Gamepad map** (GLFW): d-pad walks pedals, sticks turn the focused knob,
+  triggers stomp, shoulders change slot, a button opens the palette. The
+  Board must be fully operable with no pointer.
+- **The controller**: a purpose-built foot controller (ESP32-S3, class-
+  compliant USB MIDI so any DAW also understands it): footswitches with LED
+  feedback, expression inputs, encoders, bank buttons. SignalPatch sends
+  LED/label state back over SysEx so the pedal shows what the Board shows.
+  Firmware lives in its own repo; this repo defines the protocol
+  (`docs/CONTROLLER.md`).
 
-Exit: a stereo patch that records itself, saves, reloads with its audio, and
-sums correctly.
+Exit: a whole song with hands on the guitar only.
 
-## 0.4 — NAM qualification and tone tools
+## 0.5 — Stereo
 
-NAM_ROADMAP Stage 3 and the useful half of Stage 4:
+- Per-port channel policy in the compiler (mono / stereo / match-upstream),
+  buffers and cables that carry two channels; mono nodes stay valid forever.
+- Stereo delay, reverb, chorus, cabinet (dual IR), pan / split / merge,
+  dual-mono NAM with explicit CPU accounting.
+- Board and rack show channel count on ports and cables.
 
-- **Performance qualification**: benchmark matrix (model class × buffer size
-  × sample rate) using the peak-DSP instrumentation; publish supported
-  configurations; warn in the node UI when a model class can't meet the
-  current buffer deadline.
-- **Cabinet/IR node** (convolution via partitioned FFT, impulse loaded like a
-  NAM model through extra state + worker thread).
-- **Model browser**: scan a models directory, quick-switch with crossfade,
-  remember favourites.
-- **Dual-mono NAM wrapper** once stereo lands (explicit CPU accounting).
+Exit: the rig into the interface's two outputs sounds like a record, not a
+demo.
 
-Exit: honest "this model works at this buffer size on this machine" claims,
-and an amp+cab chain that rivals the LV2 plugin rig.
+## 0.6 — The handheld
 
-## 0.5 — Engine maturity and shipping
+- **Ally X bring-up**: OS decision (Linux recommended: native Wayland, the
+  PipeWire/JACK path we already qualify on; Windows kept building), USB
+  interface latency qualification at 64/128, battery vs performance presets.
+- **Boot to Board**: `--board --kiosk --unmute`, 7-inch layout (larger
+  targets, fewer knobs per pedal by default), touch as a first-class pointer.
+- **Gamepad-only recovery** from every state (menus, browser, prompts).
+- Packaging for the box (AppImage/Flatpak), CI for `signalpatch2` on Linux
+  and Windows.
 
-The remaining ARCHITECTURE.md gates plus distribution:
+Exit: pick it up, plug in, play a gig without touching a keyboard.
 
-- **Worker-thread graph compilation** (edits never stall the message thread
-  on big patches).
-- **Latency compensation** for parallel paths (the compiler already computes
-  per-node latency; insert compensation delays where branches re-join).
-- **Probe subscriptions** (telemetry only for visible scopes — matters as
-  patches grow).
-- **TSan pass** over engine cross-thread paths; **live-device wall-clock
-  soak** with xrun logging (PRODUCTION_READINESS open items).
-- **Windows build** brought up and smoke-tested (WASAPI/ASIO), CI for both
-  platforms running the test suite + sanitizers.
-- **Packaging**: version stamping, .desktop entry + icon, AppImage or deb;
-  choose and declare the project licence (required before any distribution —
-  JUCE AGPLv3 vs commercial decision).
+## 0.7 — Pedals you can reuse (sub-patches)
 
-Exit: a stranger can download a build, and a soak on stage hardware produces
-a clean xrun log.
+A group becomes a real module: its own ports, saved to a library, dropped
+into other rigs, shared with other people. Waits for stereo so ports are
+defined once.
 
-## 0.6 — Handheld instrument (the end goal)
+## Beyond
 
-The destination: an ASUS ROG Ally-class handheld as a self-contained guitar
-patching studio, voice processor and synthesizer — SignalPatch not as
-software you operate but as an instrument you hold. Windows support (the
-Ally's native OS) therefore stops being a checkbox and becomes the stage.
-
-- **Controller-first navigation**: full gamepad map (sticks scrub knobs,
-  d-pad walks modules/ports, triggers = stomp switches, shoulder buttons
-  cycle pages). The engine already treats all control as events; the gamepad
-  becomes another event source like MIDI.
-- **Performance mode**: a fullscreen instrument surface — oversized macro
-  knobs, stomp row, drum grid and sampler transport — no patching UI, no
-  window chrome, readable at arm's length on a 7" screen.
-- **Touch-grade targets**: hit areas, drag gestures and long-press menus
-  sized for fingers; pinch zoom on the rack.
-- **Handheld audio profile**: qualification on the Ally's onboard I/O and on
-  a small USB interface (latency, buffer sizes, battery-vs-performance
-  presets; the peak-DSP readout drives an on-device "will this patch glitch"
-  indicator).
-- **Boot-to-instrument**: launch fullscreen into the last patch, unmuted by
-  explicit opt-in, controller-only recoverable from any state.
-
-Exit: pick the handheld up, plug in, and play a gig without touching a
-keyboard, mouse or desktop.
-
-## Beyond (unscheduled, deliberately)
-
-- Plug-in target (VST3/CLAP) hosting the same engine — the standalone-first
-  rule in ARCHITECTURE.md keeps this possible, not scheduled.
-- OSC control surface (phone/tablet patch control; pairs with the existing
-  OSC-based projects elsewhere in this workspace).
-- Patch A/B morphing, scene snapshots for live sets.
-- Third-party node SDK — only after the node contract survives 0.2–0.5
-  unchanged (ARCHITECTURE.md "Node SDK contract").
+TONE3000 in-app browsing and downloads; OSC; plug-in target (VST3/CLAP);
+scene morphing beyond slot glides; a third-party node SDK.
 
 ## Ordering rationale
 
-Control (0.2) precedes stereo (0.3) because a playable mono rig makes music
-today, while stereo without playability is still furniture. NAM qualification
-(0.4) waits for the recorder/persistence loop so benchmarks reflect real
-sessions. Engine maturity (0.5) lands before the handheld phase because a
-stage device needs the Windows build, packaging and TSan-clean engine that
-0.5 delivers — but TSan/CI should be pulled earlier if any 0.2 concurrency
-work feels risky. Everything numbered serves 0.6: the handheld instrument is
-the reason the mono rig must be playable, recordable, qualified and shippable
-first.
+Retiring the JUCE UI first halves every later step. The looper and
+persistence come before control because a foot controller with nothing to
+loop is a light show. Stereo waits for control because a mono rig you can
+play beats a stereo rig you cannot; it comes before sub-patches so the port
+model changes once. The handheld is last as a phase but a constraint
+throughout: from 0.3 on, nothing lands on the Board that cannot be reached
+with a gamepad and nothing lands in the engine that cannot meet a 128-sample
+deadline on a laptop-class CPU.
