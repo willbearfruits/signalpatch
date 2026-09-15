@@ -72,6 +72,47 @@ RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
     : engine (engineToUse), vg (context), font (fontId), menu (context, fontId), prompt (context, fontId), browser (context, fontId)
 {
     engine.addChangeListener (this);
+    engine.onParameterChangedByMidi = [this] (NodeId id) { invalidatePlate (id); dirty = true; };
+    engine.onMidiUiTarget = [this] (const MidiMapping& mapping, const juce::MidiMessage&)
+    {
+        if (mapping.target == MidiMapping::Target::slot)
+            loadSlot (mapping.slot);
+        else if (mapping.target == MidiMapping::Target::groupBypass)
+            for (const auto& pedal : pedals)
+                if (pedal.groupId == mapping.groupId)
+                    toggleGroupBypass (pedal);
+        dirty = true;
+    };
+    engine.midiLearnHook = [this] (const juce::MidiMessage& message) -> bool
+    {
+        if (! learnTarget.has_value())
+            return false;
+        auto mapping = *learnTarget;
+        if (message.isController())        { mapping.source = MidiMapping::Source::controlChange; mapping.number = message.getControllerNumber(); }
+        else if (message.isNoteOn (true))  { mapping.source = MidiMapping::Source::note; mapping.number = message.getNoteNumber(); }
+        else if (message.isProgramChange()){ mapping.source = MidiMapping::Source::programChange; mapping.number = message.getProgramChangeNumber(); }
+        else
+            return false;
+        // Knobs need a continuous source; a note on a knob makes no sense.
+        if (mapping.target == MidiMapping::Target::parameter && mapping.source != MidiMapping::Source::controlChange)
+        {
+            say ("A knob needs a CC (turn something continuous)");
+            return true;
+        }
+        mapping.channel = 0; // any channel: forgiving for a first controller
+        auto mappings = engine.getMidiMappings();
+        // One binding per target; a re-learn replaces the old one.
+        mappings.erase (std::remove_if (mappings.begin(), mappings.end(), [&] (const MidiMapping& existing)
+        {
+            return existing.target == mapping.target && existing.node == mapping.node && existing.parameter == mapping.parameter
+                && existing.command == mapping.command && existing.slot == mapping.slot && existing.groupId == mapping.groupId;
+        }), mappings.end());
+        mappings.push_back (mapping);
+        engine.setMidiMappings (std::move (mappings));
+        learnTarget.reset();
+        say ("Learned " + mapping.sourceLabel());
+        return true;
+    };
 }
 
 RackView::~RackView()
@@ -301,6 +342,49 @@ void RackView::fitToPatch (int width, int height)
     panX = left + (availableW - contentW * fit) * 0.5 - (minX - margin) * fit;
     panY = (height - contentH * fit) * 0.5 - (minY - margin) * fit + 20.0;
     dirty = true;
+}
+
+void RackView::beginMidiLearn (MidiMapping target, const juce::String& what)
+{
+    if (! engine.hasMidiInputs())
+    {
+        say ("No MIDI input found - plug a controller in (it is picked up within a few seconds)");
+        return;
+    }
+    learnTarget = std::move (target);
+    say ("MIDI LEARN " + what + ": move or press the control you want  (Esc cancels)");
+}
+
+void RackView::removeMidiMapping (const std::function<bool (const MidiMapping&)>& matches)
+{
+    auto mappings = engine.getMidiMappings();
+    mappings.erase (std::remove_if (mappings.begin(), mappings.end(), matches), mappings.end());
+    engine.setMidiMappings (std::move (mappings));
+    say ("MIDI mapping removed");
+}
+
+juce::String RackView::midiLabelFor (const std::function<bool (const MidiMapping&)>& matches) const
+{
+    for (const auto& mapping : engine.getMidiMappings())
+        if (matches (mapping))
+            return mapping.sourceLabel();
+    return {};
+}
+
+std::vector<MenuItem> RackView::midiMenuItems (const MidiMapping& target, const juce::String& what, int learnId, int removeId) const
+{
+    juce::ignoreUnused (what);
+    auto same = [&] (const MidiMapping& existing)
+    {
+        return existing.target == target.target && existing.node == target.node && existing.parameter == target.parameter
+            && existing.command == target.command && existing.slot == target.slot && existing.groupId == target.groupId;
+    };
+    const auto label = midiLabelFor (same);
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::item (learnId, label.isEmpty() ? "MIDI learn" : "MIDI re-learn (now " + label + ")"));
+    if (label.isNotEmpty())
+        items.push_back (MenuItem::item (removeId, "Remove MIDI " + label));
+    return items;
 }
 
 juce::Rectangle<float> RackView::buttonBounds (const Layout& layout, juce::Point<float> origin, int index) const noexcept
@@ -586,11 +670,43 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
     for (const auto& connection : engine.getDocument().getConnections())
         if (connection.sourceNode == layout.id || connection.destinationNode == layout.id)
             ++cableCount;
-    enum { bypass = 1, rename, duplicate, resetKnobs, disconnectAll, remove, prevModel, nextModel, prevIr, nextIr, clearIrB };
+    enum { bypass = 1, rename, duplicate, resetKnobs, disconnectAll, remove, prevModel, nextModel, prevIr, nextIr, clearIrB,
+           midiLearnStomp, midiRemoveStomp, midiLearnButtonBase = 3000, midiRemoveButtonBase = 3500 };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (model->processor->getName().toUpperCase()));
     if (layout.stomp)
         items.push_back (MenuItem::item (bypass, model->processor->isBypassed() ? "Enable (unbypass)" : "Bypass", "stomp"));
+    {
+        std::vector<MenuItem> midiItems;
+        if (layout.stomp)
+        {
+            MidiMapping target;
+            target.target = MidiMapping::Target::bypass;
+            target.node = layout.id;
+            for (auto& item : midiMenuItems (target, "footswitch", midiLearnStomp, midiRemoveStomp))
+            {
+                item.text = item.text.replace ("MIDI learn", "Footswitch: learn").replace ("MIDI re-learn", "Footswitch: re-learn").replace ("Remove MIDI", "Footswitch: remove");
+                midiItems.push_back (std::move (item));
+            }
+        }
+        for (std::size_t index = 0; index < layout.buttons.size(); ++index)
+        {
+            const auto& button = layout.buttons[index];
+            if (button.command.startsWith ("load") || button.command.startsWith ("prev") || button.command.startsWith ("next"))
+                continue;
+            MidiMapping target;
+            target.target = MidiMapping::Target::command;
+            target.node = layout.id;
+            target.command = button.command;
+            for (auto& item : midiMenuItems (target, button.label, midiLearnButtonBase + static_cast<int> (index), midiRemoveButtonBase + static_cast<int> (index)))
+            {
+                item.text = item.text.replace ("MIDI learn", button.label + ": learn").replace ("MIDI re-learn", button.label + ": re-learn").replace ("Remove MIDI", button.label + ": remove");
+                midiItems.push_back (std::move (item));
+            }
+        }
+        if (! midiItems.empty())
+            items.push_back (MenuItem::sub ("MIDI", std::move (midiItems)));
+    }
     if (! layout.hardware)
     {
         items.push_back (MenuItem::item (rename, "Rename...", "dbl-click"));
@@ -659,6 +775,17 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
             case nextModel: engine.sendNodeCommand (id, "next-model"); break;
             case prevIr:    engine.sendNodeCommand (id, "prev-ir"); break;
             case nextIr:    engine.sendNodeCommand (id, "next-ir"); break;
+            case midiLearnStomp:
+            {
+                MidiMapping target;
+                target.target = MidiMapping::Target::bypass;
+                target.node = id;
+                beginMidiLearn (target, "footswitch");
+                return;
+            }
+            case midiRemoveStomp:
+                removeMidiMapping ([id] (const MidiMapping& m) { return m.target == MidiMapping::Target::bypass && m.node == id; });
+                return;
             case clearIrB:
             {
                 auto state = current->processor->getExtraState();
@@ -669,7 +796,30 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
                 }
                 break;
             }
-            default: break;
+            default:
+                if (picked >= midiLearnButtonBase && picked < midiRemoveButtonBase)
+                {
+                    if (const auto* layout = layoutFor (id); layout != nullptr && juce::isPositiveAndBelow (picked - midiLearnButtonBase, static_cast<int> (layout->buttons.size())))
+                    {
+                        const auto& button = layout->buttons[static_cast<std::size_t> (picked - midiLearnButtonBase)];
+                        MidiMapping target;
+                        target.target = MidiMapping::Target::command;
+                        target.node = id;
+                        target.command = button.command;
+                        beginMidiLearn (target, button.label);
+                    }
+                    return;
+                }
+                if (picked >= midiRemoveButtonBase)
+                {
+                    if (const auto* layout = layoutFor (id); layout != nullptr && juce::isPositiveAndBelow (picked - midiRemoveButtonBase, static_cast<int> (layout->buttons.size())))
+                    {
+                        const auto command = layout->buttons[static_cast<std::size_t> (picked - midiRemoveButtonBase)].command;
+                        removeMidiMapping ([id, command] (const MidiMapping& m) { return m.target == MidiMapping::Target::command && m.node == id && m.command == command; });
+                    }
+                    return;
+                }
+                break;
         }
         dirty = true;
     });
@@ -687,11 +837,20 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
         for (const auto& connection : engine.getDocument().getConnections())
             if (connection.destinationNode == layout.id && connection.destinationPort == parameter.inputPortIndex)
                 modulation = connection;
-    enum { reset = 1, setValue, zeroDepth, fullDepth, removeModulation };
+    enum { reset = 1, setValue, zeroDepth, fullDepth, removeModulation, midiLearn, midiRemove };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (parameter.name.toUpperCase()));
     items.push_back (MenuItem::item (reset, "Reset to default (" + juce::String (parameter.defaultValue, 2) + ")", "dbl-click"));
     items.push_back (MenuItem::item (setValue, "Set value..."));
+    {
+        MidiMapping target;
+        target.target = MidiMapping::Target::parameter;
+        target.node = layout.id;
+        target.parameter = parameterIndex;
+        items.push_back (MenuItem::line());
+        for (auto& item : midiMenuItems (target, parameter.name, midiLearn, midiRemove))
+            items.push_back (std::move (item));
+    }
     if (parameter.inputPortIndex >= 0)
     {
         items.push_back (MenuItem::line());
@@ -729,6 +888,21 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
                 if (modulation.has_value())
                     engine.disconnect (*modulation);
                 break;
+            case midiLearn:
+            {
+                MidiMapping target;
+                target.target = MidiMapping::Target::parameter;
+                target.node = id;
+                target.parameter = parameterIndex;
+                beginMidiLearn (target, current_parameter.name);
+                return;
+            }
+            case midiRemove:
+                removeMidiMapping ([id, parameterIndex] (const MidiMapping& m)
+                {
+                    return m.target == MidiMapping::Target::parameter && m.node == id && m.parameter == parameterIndex;
+                });
+                return;
             default: return;
         }
         engine.closeEditGesture();
@@ -1111,6 +1285,17 @@ void RackView::showAudioMenu (double x, double y)
         items.push_back (MenuItem::sub ("Output device", std::move (outputs)));
         items.push_back (MenuItem::sub ("Input device", std::move (inputs)));
     }
+    {
+        std::vector<MenuItem> midiItems;
+        const auto names = engine.getOpenMidiInputNames();
+        if (names.isEmpty())
+            midiItems.push_back (MenuItem::item (0, "No MIDI inputs found (plug one in; scanned every few seconds)", {}, false));
+        for (const auto& name : names)
+            midiItems.push_back (MenuItem::item (0, name + "  (open)", {}, false));
+        midiItems.push_back (MenuItem::line());
+        midiItems.push_back (MenuItem::item (600, "Forget every MIDI mapping in this patch", {}, ! engine.getMidiMappings().empty()));
+        items.push_back (MenuItem::sub ("MIDI inputs", std::move (midiItems)));
+    }
     if (device != nullptr)
     {
         std::vector<MenuItem> buffers, rates;
@@ -1129,6 +1314,12 @@ void RackView::showAudioMenu (double x, double y)
         auto& deviceManager = engine.getDeviceManager();
         auto current = deviceManager.getAudioDeviceSetup();
         juce::String error;
+        if (picked == 600)
+        {
+            engine.setMidiMappings ({});
+            say ("MIDI mappings forgotten");
+            return;
+        }
         if (picked >= 100 && picked < 200)
         {
             const auto& types = deviceManager.getAvailableDeviceTypes();
@@ -1622,6 +1813,17 @@ void RackView::drawBoard (int width, int height, double now)
             nvgCircle (vg, ledX, centre.y, 4.0f);
             nvgFillColor (vg, bypassed ? palette::nodeDark : palette::warning);
             nvgFill (vg);
+            const auto midi = isGroup
+                ? midiLabelFor ([&] (const MidiMapping& m) { return m.target == MidiMapping::Target::groupBypass && m.groupId == pedal.groupId; })
+                : midiLabelFor ([&] (const MidiMapping& m) { return m.target == MidiMapping::Target::bypass && m.node == pedal.id; });
+            if (midi.isNotEmpty())
+            {
+                nvgFontFaceId (vg, font);
+                nvgFontSize (vg, 8.5f);
+                nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nvgFillColor (vg, palette::control);
+                nvgText (vg, centre.x + 20.0f, centre.y, midi.toRawUTF8(), nullptr);
+            }
         }
     }
     nvgRestore (vg);
@@ -1657,6 +1859,14 @@ void RackView::drawSlotBar (int width, int height)
         nvgFontSize (vg, 11.0f);
         nvgFillColor (vg, exists ? palette::text : alpha (palette::mutedText, 0.5f));
         nvgText (vg, box.getX() + 36.0f, box.getCentreY(), (exists ? file.getFileNameWithoutExtension() : juce::String ("empty - Shift+click to store")).toRawUTF8(), nullptr);
+        const auto midi = midiLabelFor ([slot] (const MidiMapping& m) { return m.target == MidiMapping::Target::slot && m.slot == slot; });
+        if (midi.isNotEmpty())
+        {
+            nvgFontSize (vg, 9.5f);
+            nvgTextAlign (vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+            nvgFillColor (vg, palette::control);
+            nvgText (vg, box.getRight() - 10.0f, box.getCentreY(), midi.toRawUTF8(), nullptr);
+        }
     }
 }
 
@@ -1778,9 +1988,10 @@ void RackView::showBoardPedalMenu (const Pedal& pedal, double x, double y)
     const auto* model = engine.getDocument().findNode (pedal.id);
     if (model == nullptr)
         return;
-    enum { bypass = 1, groupSelected, autoPlace, openInRack, rename, remove };
+    enum { bypass = 1, groupSelected, autoPlace, openInRack, rename, remove, moreMenu };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (model->processor->getName().toUpperCase()));
+    items.push_back (MenuItem::item (moreMenu, "Module menu (MIDI, models, knobs)..."));
     if (boardSelection.size() >= 2)
         items.push_back (MenuItem::item (groupSelected, "Group the " + juce::String (boardSelection.size()) + " selected pedals into one..."));
     if (pedal.stomp)
@@ -1794,13 +2005,18 @@ void RackView::showBoardPedalMenu (const Pedal& pedal, double x, double y)
         items.push_back (MenuItem::item (remove, "Delete module", "Del"));
     }
     const auto id = pedal.id;
-    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, id] (int picked)
+    const auto menuX = x, menuY = y;
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, id, menuX, menuY] (int picked)
     {
         const auto* current = engine.getDocument().findNode (id);
         if (current == nullptr)
             return;
         switch (picked)
         {
+            case moreMenu:
+                if (const auto* layout = layoutFor (id))
+                    showModuleMenu (*layout, menuX, menuY);
+                return;
             case bypass: engine.setNodeBypassed (id, ! current->processor->isBypassed()); break;
             case groupSelected: groupSelection(); break;
             case autoPlace: engine.setBoardPosition (id, std::nullopt); boardDirty = true; break;
@@ -1840,10 +2056,20 @@ void RackView::showGroupMenu (const Pedal& pedal, double x, double y)
             group = &candidate;
     if (group == nullptr)
         return;
-    enum { bypass = 1, rename, ungroup, autoPlace };
+    enum { bypass = 1, rename, ungroup, autoPlace, midiLearn, midiRemove };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (group->name.toUpperCase() + "  (" + juce::String (group->members.size()) + " modules)"));
     items.push_back (MenuItem::item (bypass, "Toggle all members", "stomp"));
+    {
+        MidiMapping target;
+        target.target = MidiMapping::Target::groupBypass;
+        target.groupId = group->id;
+        for (auto& item : midiMenuItems (target, "footswitch", midiLearn, midiRemove))
+        {
+            item.text = item.text.replace ("MIDI learn", "Footswitch: MIDI learn").replace ("MIDI re-learn", "Footswitch: re-learn").replace ("Remove MIDI", "Footswitch: remove MIDI");
+            items.push_back (std::move (item));
+        }
+    }
     // Knob picker: every member parameter, ticked when exposed (max four).
     std::vector<MenuItem> knobItems;
     int knobId = 2000;
@@ -1893,6 +2119,19 @@ void RackView::showGroupMenu (const Pedal& pedal, double x, double y)
                         g.name = name.trim();
                 engine.setGroups (std::move (edited));
             });
+            return;
+        }
+        if (picked == midiLearn)
+        {
+            MidiMapping target;
+            target.target = MidiMapping::Target::groupBypass;
+            target.groupId = groupId;
+            beginMidiLearn (target, "group footswitch");
+            return;
+        }
+        if (picked == midiRemove)
+        {
+            removeMidiMapping ([groupId] (const MidiMapping& m) { return m.target == MidiMapping::Target::groupBypass && m.groupId == groupId; });
             return;
         }
         if (picked == ungroup)
@@ -2022,6 +2261,8 @@ bool RackView::tryGlideToPatch (const juce::var& target)
     }
     if (root->hasProperty ("groups") || ! document.getGroups().empty())
         engine.applyGroupsJson (root->getProperty ("groups"));
+    if (root->hasProperty ("midi") || ! document.getMidiMappings().empty())
+        engine.applyMidiMappingsJson (root->getProperty ("midi"));
     glide = std::move (plan);
     return true;
 }
@@ -2050,6 +2291,26 @@ bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, d
         const auto slot = static_cast<int> ((x - left - 12.0) / (slotW + 10.0f));
         if (slot >= 0 && slot < slotCount)
         {
+            if (button == GLFW_MOUSE_BUTTON_RIGHT)
+            {
+                MidiMapping target;
+                target.target = MidiMapping::Target::slot;
+                target.slot = slot;
+                auto items = midiMenuItems (target, "slot", 1, 2);
+                items.insert (items.begin(), MenuItem::sectionHeader ("SLOT " + juce::String (slot + 1)));
+                items.push_back (MenuItem::line());
+                items.push_back (MenuItem::item (3, "Store the current rig here", "Shift+click"));
+                items.push_back (MenuItem::item (4, "Clear this slot", {}, slotFile (slot).existsAsFile()));
+                menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, slot, target] (int picked)
+                {
+                    if (picked == 1) beginMidiLearn (target, "slot " + juce::String (slot + 1));
+                    else if (picked == 2) removeMidiMapping ([slot] (const MidiMapping& m) { return m.target == MidiMapping::Target::slot && m.slot == slot; });
+                    else if (picked == 3) storeSlot (slot);
+                    else if (picked == 4) { slotFile (slot).deleteFile(); if (activeSlot == slot) activeSlot = -1; say ("Slot cleared"); }
+                    dirty = true;
+                });
+                return true;
+            }
             if (shift) storeSlot (slot); else loadSlot (slot);
         }
         return true;
@@ -2654,12 +2915,21 @@ void RackView::drawPlateStatic (const Layout& layout, const NodeModel& model)
     nvgStrokeWidth (vg, 1.0f);
     nvgStroke (vg);
 
-    // Knobs.
+    // Knobs (with their MIDI binding, if any).
     for (std::size_t knob = 0; knob < layout.knobParameters.size(); ++knob)
     {
-        const auto& parameter = model.processor->getParameter (layout.knobParameters[knob]);
-        drawKnob (knobCentre (layout, origin, static_cast<int> (knob)), 22.0f, parameter.getNormalisedValue(), colour,
-                  parameter.name.toUpperCase(), formatValue (parameter));
+        const auto index = layout.knobParameters[knob];
+        const auto& parameter = model.processor->getParameter (index);
+        const auto centre = knobCentre (layout, origin, static_cast<int> (knob));
+        drawKnob (centre, 22.0f, parameter.getNormalisedValue(), colour, parameter.name.toUpperCase(), formatValue (parameter));
+        const auto midi = midiLabelFor ([&] (const MidiMapping& m) { return m.target == MidiMapping::Target::parameter && m.node == layout.id && m.parameter == index; });
+        if (midi.isNotEmpty())
+        {
+            nvgFontSize (vg, 8.0f);
+            nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor (vg, palette::control);
+            nvgText (vg, centre.x, centre.y + 22.0f + 22.0f, midi.toRawUTF8(), nullptr);
+        }
     }
 
     // Stomp switch body (its LED and label are live).
@@ -2828,6 +3098,12 @@ void RackView::drawNode (const Layout& layout, double now)
         nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
         nvgFillColor (vg, alpha (palette::mutedText, 0.8f));
         nvgText (vg, centre.x + 22.0f, centre.y, bypassed ? "BYP" : "ON", nullptr);
+        const auto midi = midiLabelFor ([&] (const MidiMapping& m) { return m.target == MidiMapping::Target::bypass && m.node == layout.id; });
+        if (midi.isNotEmpty())
+        {
+            nvgFillColor (vg, palette::control);
+            nvgText (vg, centre.x + 22.0f, centre.y + 11.0f, midi.toRawUTF8(), nullptr);
+        }
     }
 
     for (std::size_t index = 0; index < layout.buttons.size(); ++index)
@@ -2901,6 +3177,29 @@ void RackView::drawHud (int width, int height, double now)
                     + "   |   " + juce::String (fps, 0) + " fps  " + juce::String (lastFrameMs, 2) + " ms/frame  "
                     + juce::String (plateRenders) + " plates rasterised";
     nvgText (vg, 150.0f, 17.0f, line.toRawUTF8(), nullptr);
+    {
+        const auto inputs = engine.getOpenMidiInputNames();
+        const auto midiLine = inputs.isEmpty() ? juce::String ("MIDI: none")
+                            : "MIDI: " + juce::String (inputs.size()) + (inputs.size() == 1 ? " input" : " inputs")
+                              + (engine.getLastMidiDescription().isNotEmpty() ? "   " + engine.getLastMidiDescription() : juce::String());
+        float bounds[4] {};
+        nvgTextBounds (vg, 150.0f, 17.0f, line.toRawUTF8(), nullptr, bounds);
+        nvgFillColor (vg, inputs.isEmpty() ? alpha (palette::mutedText, 0.6f) : palette::control);
+        nvgText (vg, bounds[2] + 24.0f, 17.0f, midiLine.toRawUTF8(), nullptr);
+    }
+    if (learnTarget.has_value())
+    {
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, static_cast<float> (width) * 0.5f - 230.0f, 44.0f, 460.0f, 34.0f, 6.0f);
+        nvgFillColor (vg, alpha (palette::control, 0.9f));
+        nvgFill (vg);
+        nvgFontSize (vg, 13.0f);
+        nvgTextLetterSpacing (vg, 0.8f);
+        nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgFillColor (vg, palette::nodeDark);
+        nvgText (vg, static_cast<float> (width) * 0.5f, 61.0f, "MIDI LEARN - move or press a control on your controller   (Esc cancels)", nullptr);
+        nvgTextLetterSpacing (vg, 0.0f);
+    }
 
     // View toggle, AUDIO and FILE buttons and the current patch name.
     nvgBeginPath (vg);
@@ -3594,6 +3893,12 @@ void RackView::key (int keyCode, bool pressed, int mods)
     }
     else if (keyCode == GLFW_KEY_ESCAPE)
     {
+        if (learnTarget.has_value())
+        {
+            learnTarget.reset();
+            say ("MIDI learn cancelled");
+            return;
+        }
         engine.setPanicMuted (true);
         say ("PANIC: muted");
     }

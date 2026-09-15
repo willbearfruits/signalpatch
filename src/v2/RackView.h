@@ -208,6 +208,13 @@ private:
     };
     std::optional<BoardDrag> boardDrag;
     std::optional<Glide> glide;
+
+    // MIDI learn: the next CC / note / program change binds to this target.
+    std::optional<MidiMapping> learnTarget;
+    void beginMidiLearn (MidiMapping target, const juce::String& what);
+    void removeMidiMapping (const std::function<bool (const MidiMapping&)>& matches);
+    [[nodiscard]] juce::String midiLabelFor (const std::function<bool (const MidiMapping&)>& matches) const;
+    [[nodiscard]] std::vector<MenuItem> midiMenuItems (const MidiMapping& target, const juce::String& what, int learnId, int removeId) const;
     std::vector<NodeId> boardSelection; // multi-select for grouping
     int selectedGroup = -1;
     [[nodiscard]] bool isBoardSelected (NodeId id) const noexcept;

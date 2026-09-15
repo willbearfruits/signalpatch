@@ -133,7 +133,7 @@ int main (int argc, char** argv)
         if (rack.isAnimating() || rack.needsRender())
             glfwPollEvents();
         else
-            glfwWaitEventsTimeout (0.02);
+            glfwWaitEventsTimeout (engine.hasMidiInputs() ? 0.004 : 0.02); // MIDI is applied on this loop: keep it snappy
         juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
 
         const auto now = glfwGetTime();
