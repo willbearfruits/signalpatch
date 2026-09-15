@@ -2191,6 +2191,18 @@ void RackView::pollGamepad (double now)
     // A menu, browser or prompt on top: the pad becomes a keyboard for it.
     if (menu.isOpen() || browser.isOpen() || prompt.isOpen())
     {
+        if (prompt.isOpen())
+        {
+            prompt.setKeyboardVisible (true); // no physical keyboard assumed while a pad drives
+            if (pressed (GLFW_GAMEPAD_BUTTON_B))
+                key (GLFW_KEY_BACKSPACE, true, 0);
+            if (pressed (GLFW_GAMEPAD_BUTTON_X))
+                key (GLFW_KEY_SPACE, true, 0);
+            if (pressed (GLFW_GAMEPAD_BUTTON_Y))
+                prompt.acceptNow();
+            if (pressed (GLFW_GAMEPAD_BUTTON_START))
+                key (GLFW_KEY_ESCAPE, true, 0);
+        }
         const int arrows[4][2] = { { GLFW_GAMEPAD_BUTTON_DPAD_UP, GLFW_KEY_UP }, { GLFW_GAMEPAD_BUTTON_DPAD_DOWN, GLFW_KEY_DOWN },
                                    { GLFW_GAMEPAD_BUTTON_DPAD_LEFT, GLFW_KEY_LEFT }, { GLFW_GAMEPAD_BUTTON_DPAD_RIGHT, GLFW_KEY_RIGHT } };
         for (const auto& [button, keyCode] : arrows)
@@ -2204,10 +2216,24 @@ void RackView::pollGamepad (double now)
         }
         if (pressed (GLFW_GAMEPAD_BUTTON_A))
             key (GLFW_KEY_ENTER, true, 0);
-        if (pressed (GLFW_GAMEPAD_BUTTON_B))
+        if (pressed (GLFW_GAMEPAD_BUTTON_B) && ! prompt.isOpen())
             key (GLFW_KEY_ESCAPE, true, 0);
         if (pressed (GLFW_GAMEPAD_BUTTON_X) && browser.isOpen())
             key (GLFW_KEY_BACKSPACE, true, 0);
+        rememberButtons();
+        return;
+    }
+    prompt.setKeyboardVisible (false);
+
+    if (pressed (GLFW_GAMEPAD_BUTTON_GUIDE))
+    {
+        showFileMenu (static_cast<double> (windowW) - 215.0, 34.0);
+        rememberButtons();
+        return;
+    }
+    if (pressed (GLFW_GAMEPAD_BUTTON_LEFT_THUMB) && mode == Mode::rack)
+    {
+        showCanvasMenu (static_cast<double> (windowW) * 0.5, static_cast<double> (windowH) * 0.5);
         rememberButtons();
         return;
     }

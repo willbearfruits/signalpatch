@@ -321,18 +321,51 @@ void TextPrompt::open (juce::String promptTitle, juce::String initial, std::func
     active = true;
 }
 
+juce::String TextPrompt::keyAt (int row, int column)
+{
+    static const char* rows[keyboardRows] = { "ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZ0123", "456789-_.'", nullptr };
+    if (row < keyboardRows - 1)
+        return juce::String::charToString (static_cast<juce::juce_wchar> (rows[row][column]));
+    // Last row: wide keys.
+    return column < 4 ? "SPACE" : column < 7 ? "DEL" : "OK";
+}
+
+void TextPrompt::pressHighlightedKey()
+{
+    const auto key = keyAt (keyRow, keyColumn);
+    if (key == "OK")
+        acceptNow();
+    else if (key == "DEL")
+        text = text.dropLastCharacters (1);
+    else if (key == "SPACE")
+        character (' ');
+    else
+        character (key[0]);
+}
+
+void TextPrompt::acceptNow()
+{
+    active = false;
+    if (accept)
+        accept (text);
+}
+
 bool TextPrompt::key (int keyCode, int mods)
 {
     if (! active)
         return false;
     if (keyCode == GLFW_KEY_ESCAPE)
         active = false;
+    else if (keyboardVisible && (keyCode == GLFW_KEY_LEFT || keyCode == GLFW_KEY_RIGHT))
+        keyColumn = (keyColumn + (keyCode == GLFW_KEY_RIGHT ? 1 : keyboardColumns - 1)) % keyboardColumns;
+    else if (keyboardVisible && (keyCode == GLFW_KEY_UP || keyCode == GLFW_KEY_DOWN))
+        keyRow = (keyRow + (keyCode == GLFW_KEY_DOWN ? 1 : keyboardRows - 1)) % keyboardRows;
+    else if (keyboardVisible && keyCode == GLFW_KEY_SPACE)
+        character (' ');
+    else if (keyboardVisible && (keyCode == GLFW_KEY_ENTER || keyCode == GLFW_KEY_KP_ENTER))
+        pressHighlightedKey();
     else if (keyCode == GLFW_KEY_ENTER || keyCode == GLFW_KEY_KP_ENTER)
-    {
-        active = false;
-        if (accept)
-            accept (text);
-    }
+        acceptNow();
     else if (keyCode == GLFW_KEY_BACKSPACE)
     {
         if ((mods & GLFW_MOD_CONTROL) != 0)
@@ -356,7 +389,8 @@ void TextPrompt::draw (int windowWidth, int windowHeight, double now)
 {
     if (! active)
         return;
-    const float w = 420.0f, h = 92.0f;
+    const float keyH = 30.0f, keyGap = 5.0f;
+    const float w = 420.0f, h = 92.0f + (keyboardVisible ? static_cast<float> (keyboardRows) * (keyH + keyGap) + 6.0f : 0.0f);
     const auto x = (windowWidth - w) * 0.5f, y = (windowHeight - h) * 0.42f;
     nvgBeginPath (vg);
     nvgRect (vg, 0, 0, static_cast<float> (windowWidth), static_cast<float> (windowHeight));
@@ -393,7 +427,35 @@ void TextPrompt::draw (int windowWidth, int windowHeight, double now)
     }
     nvgFontSize (vg, 9.5f);
     nvgFillColor (vg, alpha (palette::mutedText, 0.7f));
-    nvgText (vg, x + 16.0f, y + 78.0f, "Enter to apply   Esc to cancel", nullptr);
+    nvgText (vg, x + 16.0f, y + 78.0f, keyboardVisible ? "d-pad walks the keys, A presses, B deletes, Y or OK applies   Esc/Start cancels"
+                                                       : "Enter to apply   Esc to cancel", nullptr);
+    if (! keyboardVisible)
+        return;
+    const auto keyW = (w - 28.0f - keyGap * static_cast<float> (keyboardColumns - 1)) / static_cast<float> (keyboardColumns);
+    nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    for (int row = 0; row < keyboardRows; ++row)
+    {
+        const auto top = y + 92.0f + static_cast<float> (row) * (keyH + keyGap);
+        int column = 0;
+        while (column < keyboardColumns)
+        {
+            const auto label = keyAt (row, column);
+            int span = 1;
+            while (column + span < keyboardColumns && keyAt (row, column + span) == label && row == keyboardRows - 1)
+                ++span;
+            const auto left = x + 14.0f + static_cast<float> (column) * (keyW + keyGap);
+            const auto width = keyW * static_cast<float> (span) + keyGap * static_cast<float> (span - 1);
+            const bool highlighted = row == keyRow && keyColumn >= column && keyColumn < column + span;
+            nvgBeginPath (vg);
+            nvgRoundedRect (vg, left, top, width, keyH, 4.0f);
+            nvgFillColor (vg, highlighted ? palette::control : palette::nodeDark);
+            nvgFill (vg);
+            nvgFontSize (vg, label.length() > 1 ? 9.5f : 12.0f);
+            nvgFillColor (vg, highlighted ? palette::nodeDark : palette::text);
+            nvgText (vg, left + width * 0.5f, top + keyH * 0.5f, label.toRawUTF8(), nullptr);
+            column += span;
+        }
+    }
 }
 // ---------------------------------------------------------------- FileBrowser
 

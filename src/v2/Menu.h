@@ -117,10 +117,22 @@ public:
     bool character (juce::juce_wchar codepoint);
     void draw (int windowWidth, int windowHeight, double now);
 
+    // On-screen keyboard for a pad or a touch screen: arrows walk the grid,
+    // Enter presses the highlighted key (OK accepts), Backspace deletes.
+    void setKeyboardVisible (bool visible) noexcept { keyboardVisible = visible; }
+    [[nodiscard]] bool isKeyboardVisible() const noexcept { return keyboardVisible; }
+    void acceptNow();
+
 private:
+    static constexpr int keyboardRows = 5, keyboardColumns = 10;
+    [[nodiscard]] static juce::String keyAt (int row, int column);
+    void pressHighlightedKey();
+
     NVGcontext* vg;
     int font;
     bool active = false;
+    bool keyboardVisible = false;
+    int keyRow = 0, keyColumn = 0;
     juce::String title, text;
     std::function<void (const juce::String&)> accept;
 };

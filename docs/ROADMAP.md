@@ -121,8 +121,9 @@ demo.
   settings menu and by `--profile handheld`. Deliberately later than the
   scale factor itself.
 - **Gamepad-only recovery** from every state: menus, browser and prompts
-  are covered; still missing: the palette, the AUDIO/FILE menus (hold a
-  trigger + stick click?), and typing a name without a keyboard.
+  are covered (prompts grow an on-screen keyboard while a pad drives; Guide
+  opens FILE, the left stick click opens the rack's canvas menu); still
+  missing: the palette and the AUDIO menu.
 - **Realtime scheduling check** on the target OS image: the HUD flags a
   callback thread that is not SCHED_FIFO/RR (rtkit or realtime-privileges).
 - Packaging (AppImage/Flatpak, Windows zip), CI for the app on Linux and
