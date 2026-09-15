@@ -40,20 +40,29 @@ retired but still builds with `-DSIGNALPATCH_BUILD_JUCE_UI=ON`.
 
 ## What it does today
 
-- **36 modules** across seven families:
-  *utility* (gain, 4-ch mixer, crossfade) ·
+- **46 modules** across eight families:
+  *utility* (tuner, gain, 4-ch mixer, crossfade) ·
   *effects* (distortion, SVF filter, delay, reverb, chorus, phaser, tremolo,
   bitcrusher, ring mod, pitch shifter, granular cloud) ·
   *neural* (Neural Amp head and Neural Pedal — any .nam capture, stepped
   through your model folder like a pedal library, each showing its own
-  per-block cost) ·
+  per-block cost — and a Cabinet with two impulse responses and a blend) ·
+  *stereo* (pan, stereo merge, ping-pong delay, stereo chorus, stereo
+  reverb; one drag cables an L/R pair) ·
   *voice* (vowel/formant filter, 12-band vocoder, autotune) ·
-  *instruments* (mono synth, Karplus-Strong pluck, noise, drum machine,
-  live-input sampler, 60 s 4-track tape with varispeed) ·
+  *instruments* (mono synth, Karplus-Strong pluck, noise, drum machine with
+  tap tempo, live-input sampler, **looper** with overdub/undo/half-speed/
+  reverse, 60 s 4-track tape with varispeed) ·
   *dynamics* (compressor, limiter, noise gate, Feedback Guard) ·
-  *control* (LFO, random S&H, envelope follower, 8-step sequencer, macro,
-  FFT spectral follower, and a **Script** module that compiles a per-sample
-  math expression on the fly).
+  *control* (Clock — one tempo for drums, sequencer and looper —, MIDI Note,
+  LFO, random S&H, envelope follower, 8-step sequencer, macro, FFT spectral
+  follower, and a **Script** module that compiles a per-sample math
+  expression on the fly).
+- **Play it without a mouse.** MIDI learn on every knob, stomp, button,
+  group pedal and rig slot (relative encoders, expression pedal
+  calibration); a foot-controller protocol with LED/label feedback over
+  SysEx; a gamepad that walks the Board, stomps, turns knobs, presses pedal
+  buttons and drives every menu, browser and prompt (on-screen keyboard).
 - **Neural Amp Modeler, for real.** Load any `.nam` profile; parsing happens
   on a worker thread and the model swaps into the audio path atomically. The
   model path is saved with the patch, and a benchmark harness qualifies any
@@ -68,10 +77,12 @@ retired but still builds with `-DSIGNALPATCH_BUILD_JUCE_UI=ON`.
   runaway latching). Outputs carry a fixed safety ceiling; loaded patches
   come back muted and fade in deliberately.
 - **Everything is modulatable.** Every knob has a mod socket; any control
-  signal (LFO, envelope, sequencer, spectral band, macro, MIDI later) can
-  drive any parameter.
-- **Session honesty.** Versioned JSON patches, autosave recovery on launch,
-  device/channel identity preserved even when the interface changes.
+  signal (LFO, envelope, sequencer, spectral band, macro, MIDI Note, Clock)
+  can drive any parameter.
+- **Session honesty.** Versioned JSON patches with recordings alongside,
+  portable project zips, autosave recovery on launch, device/channel
+  identity preserved even when the interface changes, undo for everything
+  (a multi-module drag is one step).
 
 ## Engineering posture
 
@@ -79,7 +90,7 @@ The audio callback allocates nothing, locks nothing and never blocks — and
 that is *tested*, not asserted: a global allocation trap arms around a
 worst-case graph (every module, guarded feedback, live NAM inference) in the
 test suite, a 30-minutes-of-audio soak runs the same graph, and the suite
-passes ASan+UBSan. Graph edits compile an immutable snapshot on the message
+passes ASan+UBSan and TSan. Graph edits compile an immutable snapshot on the message
 thread and swap at a block boundary; retired snapshots are reclaimed off the
 audio thread. Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/REALTIME_SAFETY.md`](docs/REALTIME_SAFETY.md),
