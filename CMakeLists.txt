@@ -47,8 +47,19 @@ file(GLOB_RECURSE SIGNALPATCH_UI_SOURCES CONFIGURE_DEPENDS
 
 set(SIGNALPATCH_COMMON_DEFINITIONS
     JUCE_WEB_BROWSER=0
-    JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0)
+# The app talks https to tone3000.com; JUCE's own Linux HTTP has no TLS, libcurl
+# (loaded at runtime) does. Everything else stays off curl.
+set(SIGNALPATCH_NO_CURL JUCE_USE_CURL=0)
+set(SIGNALPATCH_APP_CURL JUCE_USE_CURL=0)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(CURL QUIET)
+    if(TARGET CURL::libcurl)
+        set(SIGNALPATCH_APP_CURL JUCE_USE_CURL=1)
+    else()
+        message(WARNING "SignalPatch: libcurl not found - TONE3000 (https) will be unavailable in the app")
+    endif()
+endif()
 
 # --- Neural Amp Modeler core (third-party, compiled quietly as a static lib).
 # Source resolution order: a local checkout (SIGNALPATCH_NAM_CORE_DIR), then a
@@ -118,7 +129,7 @@ if(SIGNALPATCH_BUILD_JUCE_UI)
         ${SIGNALPATCH_UI_SOURCES})
 
     target_compile_features(signalpatch_juce PRIVATE cxx_std_20)
-    target_compile_definitions(signalpatch_juce PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS})
+    target_compile_definitions(signalpatch_juce PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS} ${SIGNALPATCH_NO_CURL})
 
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(signalpatch_juce PRIVATE JUCE_ALSA=1 JUCE_JACK=1)
@@ -173,7 +184,7 @@ target_sources(signalpatch_tests PRIVATE
     src/audio/Processors.h)
 
 target_compile_features(signalpatch_tests PRIVATE cxx_std_20)
-target_compile_definitions(signalpatch_tests PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS})
+target_compile_definitions(signalpatch_tests PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS} ${SIGNALPATCH_NO_CURL})
 if(NOT MSVC)
     # The tests replace global new/delete for the allocation trap; GCC cannot
     # see the malloc/free pairing is internally consistent.
@@ -250,7 +261,7 @@ if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
         "${nanovg_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/external/glad/include")
     target_compile_features(signalpatch PRIVATE cxx_std_20)
-    target_compile_definitions(signalpatch PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS}
+    target_compile_definitions(signalpatch PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS} ${SIGNALPATCH_APP_CURL}
         JUCE_MODAL_LOOPS_PERMITTED=1) # runDispatchLoopUntil: JUCE pumped from the GLFW frame loop
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(signalpatch PRIVATE JUCE_ALSA=1 JUCE_JACK=1) # Windows: WASAPI/DirectSound defaults
@@ -260,6 +271,9 @@ if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
     if(SIGNALPATCH_HAS_NAM)
         target_compile_definitions(signalpatch PRIVATE SIGNALPATCH_HAS_NAM=1)
         target_link_libraries(signalpatch PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,nam_core>")
+    endif()
+    if(TARGET CURL::libcurl)
+        target_link_libraries(signalpatch PRIVATE CURL::libcurl)
     endif()
     target_link_libraries(signalpatch
         PRIVATE
