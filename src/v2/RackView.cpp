@@ -3720,7 +3720,7 @@ void RackView::drawHud (int width, int height, double now)
         shown = line.upToFirstOccurrenceOf ("   |   ", false, false); // no frame stats
     if (textRight (shown) > rightEdge)
         shown = juce::String (status.sampleRate / 1000.0, 1) + " kHz  " + juce::String (status.bufferSize) + " smp   DSP "
-              + juce::String (status.cpuLoad * 100.0f, 0) + "%   xruns " + juce::String (status.xruns)
+              + juce::String (juce::roundToInt (status.cpuLoad * 100.0f)) + "%   xruns " + juce::String (status.xruns)
               + (status.realtimeThread ? juce::String() : juce::String ("   NO RT"));
     if (textRight (shown) > rightEdge)
         shown = juce::String();

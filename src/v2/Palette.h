@@ -4,6 +4,7 @@
 
 #include <nanovg.h>
 
+#include <array>
 #include <vector>
 
 // Colours for the GPU rack. Same palette as the JUCE rack so patches read
@@ -59,61 +60,6 @@ namespace palette
     inline const NVGcolor selection  = rgb (0xfff0d67a);
 } // namespace palette
 
-inline NVGcolor accent (NodeKind kind) noexcept
-{
-    switch (kind)
-    {
-        case NodeKind::hardwareInput:        return rgb (0xff3fd0b7);
-        case NodeKind::hardwareOutput:       return rgb (0xff4da3ff);
-        case NodeKind::gain:                 return rgb (0xffd9c76a);
-        case NodeKind::mixer:                return rgb (0xffe0b352);
-        case NodeKind::crossfade:            return rgb (0xffd9b16a);
-        case NodeKind::distortion:           return rgb (0xffff7a53);
-        case NodeKind::filter:               return rgb (0xff4fb3e8);
-        case NodeKind::delay:                return rgb (0xff53c7ff);
-        case NodeKind::reverb:               return rgb (0xff6fc7d9);
-        case NodeKind::chorus:               return rgb (0xffff9eb5);
-        case NodeKind::phaser:               return rgb (0xffe08cff);
-        case NodeKind::tremolo:              return rgb (0xffffd166);
-        case NodeKind::bitcrusher:           return rgb (0xfff069c4);
-        case NodeKind::ringMod:              return rgb (0xffe86a8a);
-        case NodeKind::vowelFilter:          return rgb (0xffffab70);
-        case NodeKind::pitchShifter:         return rgb (0xff6fd7b2);
-        case NodeKind::vocoder:              return rgb (0xff62c9c3);
-        case NodeKind::pitchCorrector:       return rgb (0xff7ab8ff);
-        case NodeKind::granular:             return rgb (0xffc9a2ff);
-        case NodeKind::compressor:           return rgb (0xff8fd95e);
-        case NodeKind::limiter:              return rgb (0xff6fce74);
-        case NodeKind::gate:                 return rgb (0xffa8d95e);
-        case NodeKind::feedbackGuard:        return palette::feedback;
-        case NodeKind::monoSynth:            return rgb (0xffffcf5c);
-        case NodeKind::noiseSource:          return rgb (0xffa8b6bf);
-        case NodeKind::pluck:                return rgb (0xffb8e986);
-        case NodeKind::drumMachine:          return rgb (0xffff9552);
-        case NodeKind::sampler:              return rgb (0xff6fe3c2);
-        case NodeKind::fourTrack:            return rgb (0xffd4a373);
-        case NodeKind::lfo:                  return rgb (0xffb48cff);
-        case NodeKind::randomLfo:            return rgb (0xff8f7dff);
-        case NodeKind::envelopeFollower:     return rgb (0xffcf8cff);
-        case NodeKind::stepSequencer:        return rgb (0xff9d8cff);
-        case NodeKind::macro:                return palette::selection;
-        case NodeKind::spectralFollower:     return rgb (0xff8fd0ff);
-        case NodeKind::script:               return rgb (0xff9be564);
-        case NodeKind::neuralAmpPlaceholder: return rgb (0xffb0889a);
-        case NodeKind::neuralPedal:          return rgb (0xffe879b8);
-        case NodeKind::cabinet:              return rgb (0xffd9a066);
-        case NodeKind::looper:               return rgb (0xffff8a80);
-        case NodeKind::pan:                  return rgb (0xff7fd4ff);
-        case NodeKind::stereoMerge:          return rgb (0xff7fd4ff);
-        case NodeKind::stereoDelay:          return rgb (0xff53c7ff);
-        case NodeKind::stereoChorus:         return rgb (0xffff9eb5);
-        case NodeKind::stereoReverb:         return rgb (0xff6fc7d9);
-        case NodeKind::tuner:                return rgb (0xffb8ffd9);
-        case NodeKind::midiNote:             return rgb (0xffc7b3ff);
-        case NodeKind::clock:                return rgb (0xffffd9a3);
-    }
-    return palette::selection;
-}
 struct ModuleEntry
 {
     NodeKind kind;
@@ -173,5 +119,60 @@ inline const std::vector<ModuleEntry>& moduleCatalogue()
         { NodeKind::script,               "SCRIPT",         "CONTROL" },
     };
     return entries;
+}
+
+// Node colours read by family: every module in a family shares one hue, and
+// siblings step a little lighter or darker so cables from neighbours still
+// tell apart. Hardware and the Feedback Guard keep their own signal colours.
+inline NVGcolor familyAccent (const juce::String& group) noexcept
+{
+    if (group == "UTILITY")     return rgb (0xffd6c47c); // sand
+    if (group == "EFFECTS")     return rgb (0xffff8a5c); // coral
+    if (group == "NEURAL")      return rgb (0xffe879b8); // magenta
+    if (group == "STEREO")      return rgb (0xff5fd0ff); // cyan
+    if (group == "VOICE")       return rgb (0xff62d9b8); // teal
+    if (group == "INSTRUMENTS") return rgb (0xffffc850); // amber
+    if (group == "DYNAMICS")    return rgb (0xff8fd95e); // green
+    if (group == "CONTROL")     return rgb (0xffb48cff); // violet
+    return palette::selection;
+}
+
+inline NVGcolor accent (NodeKind kind) noexcept
+{
+    switch (kind)
+    {
+        case NodeKind::hardwareInput:  return rgb (0xff3fd0b7);
+        case NodeKind::hardwareOutput: return rgb (0xff4da3ff);
+        case NodeKind::feedbackGuard:  return palette::feedback;
+        default: break;
+    }
+    static const auto table = []
+    {
+        std::array<NVGcolor, 96> colours {};
+        for (auto& colour : colours)
+            colour = palette::selection;
+        const auto& catalogue = moduleCatalogue();
+        juce::String group;
+        int indexInGroup = 0;
+        for (const auto& entry : catalogue)
+        {
+            if (group != entry.group)
+            {
+                group = entry.group;
+                indexInGroup = 0;
+            }
+            const auto base = familyAccent (group);
+            // 0: base, 1: lighter, 2: darker, 3: lighter still, 4: darker still ...
+            const auto step = (indexInGroup + 1) / 2;
+            const auto amount = 0.09f * static_cast<float> (step);
+            const auto shade = indexInGroup == 0 ? base : (indexInGroup % 2 == 1 ? lighter (base, amount) : darker (base, amount));
+            if (static_cast<std::size_t> (entry.kind) < colours.size())
+                colours[static_cast<std::size_t> (entry.kind)] = shade;
+            ++indexInGroup;
+        }
+        return colours;
+    }();
+    const auto index = static_cast<std::size_t> (kind);
+    return index < table.size() ? table[index] : palette::selection;
 }
 } // namespace signalpatch::v2
