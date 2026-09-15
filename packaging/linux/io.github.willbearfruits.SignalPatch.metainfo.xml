@@ -39,6 +39,11 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.1" date="2026-09-15">
+      <description>
+        <p>Hardening release: a full audit of the 0.3 code with every finding fixed - recordings always saved, no crash on quit, MIDI velocity-0 releases, exact looper overdub and undo, stereo bypass, recordings surviving sample-rate changes. Plus the amp tone stack, the 4-track overhaul and TONE3000 filters and audition.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-09-15">
       <description>
         <p>The GLFW/OpenGL app: rack and pedalboard, pedal groups, five rig slots with knob glides, looper, recordings saved with the patch, MIDI learn and foot-controller feedback, stereo modules, tuner, Clock, TONE3000 browsing, gamepad control, family-coloured modules.</p>

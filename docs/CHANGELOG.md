@@ -3,6 +3,30 @@
 Newest first. Versions are git tags; "Unreleased" is what `main` carries
 beyond the last tag.
 
+## v0.3.1 — 2026-09-15
+
+The hardening release: a seven-dimension audit of everything added since
+v0.2.0 (details in `docs/PRODUCTION_READINESS.md`, pass 3), all findings
+fixed.
+
+- Recordings always reach the saved file (overdubs stopped with PLAY,
+  4-track takes, autosave after recording); crash on quit fixed; New/Open
+  ask about unsaved changes; undoing a delete restores MIDI bindings and
+  groups; slot glides are one undo step.
+- MIDI: velocity-0 note-ons release notes; commands fire on every press;
+  learned bindings keep their channel; replugged controllers reconnect.
+- Looper undo no longer stalls the audio; overdub is exact at half speed,
+  200 % and reverse; 4-track no longer doubles the input while recording
+  or stutters with SYNC.
+- Stereo pedals keep both sides when bypassed; recordings survive a sample
+  rate change; Clock start/reset realigns drums and sequencer; pluck in
+  tune; tuner handles 96 kHz.
+- Neural Amp tone stack (Gain, Bass, Mid, Treble, Presence, Master) and
+  Neural Pedal Tone; 4-track overhaul with reels; TONE3000 filters,
+  photos, audition and cabinet impulses; synth/pluck Pitch input.
+
+ASan/UBSan and TSan clean over 46 tests.
+
 ## v0.3.0 — 2026-09-15
 
 The revert point before the neural-module dials and the 4-track overhaul.
