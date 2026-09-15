@@ -60,7 +60,12 @@ enum class NodeKind
     neuralAmpPlaceholder,
     neuralPedal,
     cabinet,
-    looper
+    looper,
+    pan,
+    stereoMerge,
+    stereoDelay,
+    stereoChorus,
+    stereoReverb
 };
 
 juce::String nodeKindName (NodeKind kind);

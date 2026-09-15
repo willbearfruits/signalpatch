@@ -46,6 +46,11 @@ juce::Colour kindAccent (NodeKind kind)
         case NodeKind::neuralPedal:          return juce::Colour (0xffe879b8);
         case NodeKind::cabinet:              return juce::Colour (0xffd9a066);
         case NodeKind::looper:               return juce::Colour (0xffff8a80);
+        case NodeKind::pan:                  return juce::Colour (0xff7fd4ff);
+        case NodeKind::stereoMerge:          return juce::Colour (0xff7fd4ff);
+        case NodeKind::stereoDelay:          return juce::Colour (0xff53c7ff);
+        case NodeKind::stereoChorus:         return juce::Colour (0xffff9eb5);
+        case NodeKind::stereoReverb:         return juce::Colour (0xff6fc7d9);
     }
 
     jassertfalse;
@@ -96,6 +101,11 @@ juce::String kindTag (NodeKind kind)
         case NodeKind::neuralPedal:          return "NAM";
         case NodeKind::cabinet:              return "CAB";
         case NodeKind::looper:               return "LOOP";
+        case NodeKind::pan:
+        case NodeKind::stereoMerge:
+        case NodeKind::stereoDelay:
+        case NodeKind::stereoChorus:
+        case NodeKind::stereoReverb:         return "ST";
     }
 
     jassertfalse;
@@ -452,6 +462,14 @@ void drawKindGlyph (juce::Graphics& graphics, NodeKind kind,
             graphics.fillEllipse (x + w * 0.5f - 1.5f, y + h * 0.18f - 1.5f, 3.0f, 3.0f);
             graphics.fillEllipse (x + w * 0.68f - 1.5f, y + h * 0.28f - 1.5f, 3.0f, 3.0f);
             return;
+        case NodeKind::pan:
+        case NodeKind::stereoMerge:
+        case NodeKind::stereoDelay:
+        case NodeKind::stereoChorus:
+        case NodeKind::stereoReverb:
+            graphics.drawEllipse (x + w * 0.05f, y + h * 0.2f, w * 0.55f, h * 0.6f, 1.4f);
+            graphics.drawEllipse (x + w * 0.4f, y + h * 0.2f, w * 0.55f, h * 0.6f, 1.4f);
+            return;
         case NodeKind::looper:
             graphics.drawEllipse (x + w * 0.15f, y + h * 0.15f, w * 0.7f, h * 0.7f, 1.6f);
             path.startNewSubPath (x + w * 0.5f, y + h * 0.15f);
@@ -497,6 +515,11 @@ const std::vector<NodePaletteEntry>& nodePalette()
         { NodeKind::neuralAmpPlaceholder, "NEURAL AMP",     "NEURAL",      "Neural Amp Modeler head; load a .nam capture" },
         { NodeKind::neuralPedal,          "NEURAL PEDAL",   "NEURAL",      "NAM pedal capture with wet/dry mix; step models with the arrows" },
         { NodeKind::cabinet,              "CABINET",        "NEURAL",      "Speaker cab impulse response: blend two IRs, low and high cut" },
+        { NodeKind::pan,                  "PAN",            "STEREO",      "Mono in, equal-power L/R out" },
+        { NodeKind::stereoMerge,          "STEREO MERGE",   "STEREO",      "L and R back to mono" },
+        { NodeKind::stereoDelay,          "STEREO DELAY",   "STEREO",      "Ping-pong delay with R time offset" },
+        { NodeKind::stereoChorus,         "STEREO CHORUS",  "STEREO",      "Chorus with L/R phase spread" },
+        { NodeKind::stereoReverb,         "STEREO REVERB",  "STEREO",      "Freeverb stereo room with width" },
         { NodeKind::vowelFilter,          "VOWEL FILTER",   "VOICE",       "Formant filter morphing A-E-I-O-U" },
         { NodeKind::vocoder,              "VOCODER",        "VOICE",       "12-band vocoder: voice shapes carrier" },
         { NodeKind::pitchCorrector,       "AUTOTUNE",       "VOICE",       "Pitch detection snapped to a scale" },

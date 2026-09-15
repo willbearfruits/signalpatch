@@ -103,6 +103,11 @@ inline NVGcolor accent (NodeKind kind) noexcept
         case NodeKind::neuralPedal:          return rgb (0xffe879b8);
         case NodeKind::cabinet:              return rgb (0xffd9a066);
         case NodeKind::looper:               return rgb (0xffff8a80);
+        case NodeKind::pan:                  return rgb (0xff7fd4ff);
+        case NodeKind::stereoMerge:          return rgb (0xff7fd4ff);
+        case NodeKind::stereoDelay:          return rgb (0xff53c7ff);
+        case NodeKind::stereoChorus:         return rgb (0xffff9eb5);
+        case NodeKind::stereoReverb:         return rgb (0xff6fc7d9);
     }
     return palette::selection;
 }
@@ -134,6 +139,11 @@ inline const std::vector<ModuleEntry>& moduleCatalogue()
         { NodeKind::neuralAmpPlaceholder, "NEURAL AMP",     "NEURAL" },
         { NodeKind::neuralPedal,          "NEURAL PEDAL",   "NEURAL" },
         { NodeKind::cabinet,              "CABINET",        "NEURAL" },
+        { NodeKind::pan,                  "PAN",            "STEREO" },
+        { NodeKind::stereoMerge,          "STEREO MERGE",   "STEREO" },
+        { NodeKind::stereoDelay,          "STEREO DELAY",   "STEREO" },
+        { NodeKind::stereoChorus,         "STEREO CHORUS",  "STEREO" },
+        { NodeKind::stereoReverb,         "STEREO REVERB",  "STEREO" },
         { NodeKind::vowelFilter,          "VOWEL FILTER",   "VOICE" },
         { NodeKind::vocoder,              "VOCODER",        "VOICE" },
         { NodeKind::pitchCorrector,       "AUTOTUNE",       "VOICE" },

@@ -753,7 +753,8 @@ void testAllNodeKindsRenderFiniteOutput()
         NodeKind::fourTrack, NodeKind::lfo, NodeKind::randomLfo, NodeKind::envelopeFollower,
         NodeKind::stepSequencer, NodeKind::macro, NodeKind::spectralFollower,
         NodeKind::script, NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal,
-        NodeKind::cabinet, NodeKind::looper
+        NodeKind::cabinet, NodeKind::looper, NodeKind::pan, NodeKind::stereoMerge, NodeKind::stereoDelay,
+        NodeKind::stereoChorus, NodeKind::stereoReverb
     };
 
     for (const auto kind : kinds)
@@ -874,7 +875,8 @@ PatchDocument buildKitchenSinkDocument()
         NodeKind::bitcrusher, NodeKind::ringMod, NodeKind::vowelFilter,
         NodeKind::pitchShifter, NodeKind::pitchCorrector, NodeKind::granular,
         NodeKind::compressor, NodeKind::gate, NodeKind::limiter,
-        NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal, NodeKind::cabinet, NodeKind::looper, NodeKind::script
+        NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal, NodeKind::cabinet, NodeKind::looper, NodeKind::script,
+        NodeKind::pan, NodeKind::stereoMerge, NodeKind::stereoDelay, NodeKind::stereoChorus, NodeKind::stereoReverb
     };
     NodeId previous = 0;
     for (const auto kind : chainKinds)
@@ -1646,6 +1648,85 @@ void testMidiMappingsRoundTripAndScrub()
     expect (reloaded.getMidiMappings().size() == 2, "mappings to a deleted node should be scrubbed");
 }
 
+void testStereoNodes()
+{
+    const int block = 64;
+    // Pan: centre is equal power, hard left is silent on the right.
+    {
+        auto pan = createNodeProcessor (NodeKind::pan);
+        pan->prepare (48000.0, block);
+        juce::AudioBuffer<float> inputs (pan->getNumInputPorts(), block), outputs (2, block);
+        auto run = [&] (float value)
+        {
+            inputs.clear();
+            for (int i = 0; i < block; ++i) inputs.setSample (0, i, 1.0f);
+            pan->getParameter (0).setValue (value);
+            for (int pass = 0; pass < 40; ++pass) pan->render (inputs, outputs, block); // let smoothing settle
+        };
+        run (0.0f);
+        expect (std::abs (outputs.getSample (0, 32) - 0.7071f) < 0.02f && std::abs (outputs.getSample (1, 32) - 0.7071f) < 0.02f,
+                "centre pan is not equal power");
+        run (-100.0f);
+        expect (outputs.getSample (0, 32) > 0.98f && std::abs (outputs.getSample (1, 32)) < 0.02f, "hard left leaks into the right");
+    }
+    // Stereo delay: a click on the left bounces to the right with ping-pong.
+    {
+        auto delay = createNodeProcessor (NodeKind::stereoDelay);
+        delay->getParameter (0).setValue (10.0f);   // 10 ms = 480 samples
+        delay->getParameter (1).setValue (60.0f);   // feedback
+        delay->getParameter (2).setValue (100.0f);  // wet only
+        delay->getParameter (3).setValue (100.0f);  // full ping-pong
+        delay->getParameter (4).setValue (100.0f);  // same time on R
+        delay->getParameter (5).setValue (0.0f);    // do not sum inputs
+        delay->prepare (48000.0, block);
+        juce::AudioBuffer<float> inputs (delay->getNumInputPorts(), block), outputs (2, block);
+        inputs.clear();
+        for (int pass = 0; pass < 40; ++pass) delay->render (inputs, outputs, block);
+        inputs.setSample (0, 0, 1.0f);
+        float leftPeak = 0.0f, rightPeak = 0.0f, rightAtFirstEcho = 0.0f;
+        for (int pass = 0; pass < 40; ++pass)
+        {
+            delay->render (inputs, outputs, block);
+            inputs.clear();
+            for (int i = 0; i < block; ++i)
+            {
+                leftPeak = juce::jmax (leftPeak, std::abs (outputs.getSample (0, i)));
+                rightPeak = juce::jmax (rightPeak, std::abs (outputs.getSample (1, i)));
+            }
+            if (pass == 7) // samples 448..511 hold the first echo at 480
+                for (int i = 0; i < block; ++i) rightAtFirstEcho = juce::jmax (rightAtFirstEcho, std::abs (outputs.getSample (1, i)));
+        }
+        expect (leftPeak > 0.4f, "left echo missing: " + std::to_string (leftPeak));
+        expect (rightPeak > 0.2f, "ping-pong never reached the right: " + std::to_string (rightPeak));
+        expect (rightAtFirstEcho < 0.05f, "right should be silent at the first echo with full ping-pong from L");
+    }
+    // Cabinet: the R output mirrors the main output with one impulse loaded.
+    {
+        auto cab = createNodeProcessor (NodeKind::cabinet);
+        expect (cab->getNumOutputPorts() == 2, "cabinet should have a right output");
+    }
+    // Stereo reverb and chorus produce finite output from a mono left feed.
+    for (const auto kind : { NodeKind::stereoReverb, NodeKind::stereoChorus })
+    {
+        auto node = createNodeProcessor (kind);
+        node->prepare (48000.0, block);
+        juce::AudioBuffer<float> inputs (node->getNumInputPorts(), block), outputs (2, block);
+        float rightEnergy = 0.0f;
+        for (int pass = 0; pass < 60; ++pass)
+        {
+            inputs.clear();
+            for (int i = 0; i < block; ++i) inputs.setSample (0, i, 0.3f * std::sin (static_cast<float> (pass * block + i) * 0.05f));
+            node->render (inputs, outputs, block);
+            for (int i = 0; i < block; ++i)
+            {
+                expect (std::isfinite (outputs.getSample (0, i)) && std::isfinite (outputs.getSample (1, i)), "stereo node produced non-finite output");
+                rightEnergy += outputs.getSample (1, i) * outputs.getSample (1, i);
+            }
+        }
+        expect (rightEnergy > 0.01f, "mono left feed should reach the right channel (sum inputs)");
+    }
+}
+
 int main()
 {
     // Flush every insertion so a crash on CI still shows which test was
@@ -1681,7 +1762,8 @@ int main()
         { "board positions and groups round trip", testBoardPositionsAndGroupsRoundTrip },
         { "looper records, closes, overdubs, undoes", testLooperRecordsClosesOverdubsAndUndoes },
         { "recorded audio saves and loads with the patch", testRecordedAudioSavesAndLoadsWithThePatch },
-        { "midi mappings round trip and scrub", testMidiMappingsRoundTripAndScrub }
+        { "midi mappings round trip and scrub", testMidiMappingsRoundTripAndScrub },
+        { "stereo nodes: pan, ping-pong delay, cabinet R, reverb/chorus", testStereoNodes }
     };
 
     int failures = 0;

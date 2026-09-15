@@ -79,6 +79,11 @@ juce::String nodeKindName (NodeKind kind)
         case NodeKind::neuralPedal:         return "Neural Pedal";
         case NodeKind::cabinet:             return "Cabinet";
         case NodeKind::looper:              return "Looper";
+        case NodeKind::pan:                 return "Pan";
+        case NodeKind::stereoMerge:         return "Stereo Merge";
+        case NodeKind::stereoDelay:         return "Stereo Delay";
+        case NodeKind::stereoChorus:        return "Stereo Chorus";
+        case NodeKind::stereoReverb:        return "Stereo Reverb";
     }
 
     return "Unknown";
@@ -128,6 +133,11 @@ juce::String nodeKindKey (NodeKind kind)
         case NodeKind::neuralPedal:          return "neural-pedal";
         case NodeKind::cabinet:              return "cabinet-ir";
         case NodeKind::looper:               return "looper";
+        case NodeKind::pan:                  return "pan";
+        case NodeKind::stereoMerge:          return "stereo-merge";
+        case NodeKind::stereoDelay:          return "stereo-delay";
+        case NodeKind::stereoChorus:         return "stereo-chorus";
+        case NodeKind::stereoReverb:         return "stereo-reverb";
     }
 
     return "unknown";
@@ -148,7 +158,8 @@ std::optional<NodeKind> nodeKindFromKey (const juce::String& key)
                              NodeKind::randomLfo, NodeKind::envelopeFollower, NodeKind::stepSequencer,
                              NodeKind::macro, NodeKind::spectralFollower, NodeKind::script,
                              NodeKind::neuralAmpPlaceholder, NodeKind::neuralPedal,
-                             NodeKind::cabinet, NodeKind::looper })
+                             NodeKind::cabinet, NodeKind::looper, NodeKind::pan, NodeKind::stereoMerge,
+                             NodeKind::stereoDelay, NodeKind::stereoChorus, NodeKind::stereoReverb })
         if (key == nodeKindKey (kind))
             return kind;
 

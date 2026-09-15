@@ -3618,6 +3618,31 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
                         message = result.wasOk() ? "Cable connected" : result.getErrorMessage();
                         messageUntil = lastTick + 3.0;
                         connected = true;
+                        // Stereo in one drag: an "... L" to "... L" connection also cables the R pair.
+                        if (result.wasOk())
+                        {
+                            const auto* source = engine.getDocument().findNode (cableDrag->sourceNode);
+                            const auto* destination = engine.getDocument().findNode (it->id);
+                            auto siblingR = [] (const DspNode& node, int index, bool output) -> int
+                            {
+                                const auto name = output ? node.getOutputPort (index).name : node.getInputPort (index).name;
+                                if (! name.endsWith (" L") && name != "L")
+                                    return -1;
+                                const auto wanted = name == "L" ? juce::String ("R") : name.dropLastCharacters (1) + "R";
+                                const auto count = output ? node.getNumOutputPorts() : node.getNumInputPorts();
+                                for (int i = 0; i < count; ++i)
+                                    if ((output ? node.getOutputPort (i).name : node.getInputPort (i).name) == wanted)
+                                        return i;
+                                return -1;
+                            };
+                            if (source != nullptr && destination != nullptr)
+                            {
+                                const auto outR = siblingR (*source->processor, cableDrag->sourcePort, true);
+                                const auto inR = siblingR (*destination->processor, port, false);
+                                if (outR >= 0 && inR >= 0 && engine.connect ({ cableDrag->sourceNode, outR, it->id, inR }).wasOk())
+                                    message = "Stereo pair connected (L and R)";
+                            }
+                        }
                         break;
                     }
                 if (connected)

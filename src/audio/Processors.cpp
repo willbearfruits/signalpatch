@@ -3539,6 +3539,7 @@ public:
     {
         addInputPort ("In", SignalType::audio);
         addOutputPort ("Audio", SignalType::audio);
+        addOutputPort ("R (IR B)", SignalType::audio); // stereo cab: A left, B right
         addParameter ("level", "Level", "dB", juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, 0.25f);
         addParameter ("blend", "A <-> B", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 0.0f, 0.5f);
         addParameter ("low-cut", "Low cut", "Hz", juce::NormalisableRange<float> (20.0f, 500.0f, 1.0f, 0.5f), 60.0f, 0.25f);
@@ -3786,6 +3787,8 @@ private:
             slot.convolver.reset();
         lowCut.reset();
         highCut.reset();
+        lowCutR.reset();
+        highCutR.reset();
         lastLowCut = lastHighCut = -1.0f;
     }
 
@@ -3807,11 +3810,13 @@ private:
         if (lowHz != lastLowCut)
         {
             lowCut.set (sampleRate, lowHz, true);
+            lowCutR.set (sampleRate, lowHz, true);
             lastLowCut = lowHz;
         }
         if (highHz != lastHighCut)
         {
             highCut.set (sampleRate, highHz, false);
+            highCutR.set (sampleRate, highHz, false);
             lastHighCut = highHz;
         }
 
@@ -3838,11 +3843,13 @@ private:
 
         const auto* a = slots[0].scratch.data();
         const auto* b = slots[1].scratch.data();
+        auto* outputR = outputs.getNumChannels() > 1 ? outputs.getWritePointer (1) : nullptr;
         for (int sample = 0; sample < frames; ++sample)
         {
             const auto level = juce::Decibels::decibelsToGain (parameterValue (0, inputs, sample));
             const auto blend = juce::jlimit (0.0f, 1.0f, parameterValue (1, inputs, sample) * 0.01f);
             const auto index = static_cast<std::size_t> (sample);
+            const auto dry = std::isfinite (input[sample]) ? input[sample] : 0.0f;
             float value;
             if (ready[0] && ready[1])
                 value = a[index] + blend * (b[index] - a[index]);
@@ -3851,22 +3858,37 @@ private:
             else if (ready[1])
                 value = b[index];
             else
-                value = std::isfinite (input[sample]) ? input[sample] : 0.0f;
+                value = dry;
 
             value = highCut.process (lowCut.process (value)) * level;
             if (! std::isfinite (value))
                 value = 0.0f;
             output[sample] = juce::jlimit (-4.0f, 4.0f, value);
+
+            if (outputR != nullptr)
+            {
+                // Right: impulse B on its own when both are loaded (a two-cab
+                // stereo image), otherwise the same as the main output.
+                float valueR = ready[0] && ready[1] ? b[index] : ready[1] ? b[index] : ready[0] ? a[index] : dry;
+                valueR = highCutR.process (lowCutR.process (valueR)) * level;
+                if (! std::isfinite (valueR))
+                    valueR = 0.0f;
+                outputR[sample] = juce::jlimit (-4.0f, 4.0f, valueR);
+            }
         }
         if (frames < numSamples)
+        {
             juce::FloatVectorOperations::clear (output + frames, numSamples - frames);
+            if (outputR != nullptr)
+                juce::FloatVectorOperations::clear (outputR + frames, numSamples - frames);
+        }
     }
 
     double sampleRate = 48000.0;
     int maximumBlockSize = 128;
     juce::dsp::ConvolutionMessageQueue queue; // declared before the slots: they hold a reference
     std::array<Slot, 2> slots { Slot { queue }, Slot { queue } };
-    Biquad lowCut, highCut;
+    Biquad lowCut, highCut, lowCutR, highCutR;
     float lastLowCut = -1.0f, lastHighCut = -1.0f;
 };
 
@@ -4166,6 +4188,364 @@ private:
     std::atomic<juce::uint32> contentVersion { 0 };
 };
 
+// ---------------------------------------------------------------- stereo
+// Stereo lives on explicit L/R port pairs; the graph's buffers stay mono, so
+// the allocation-free render path is untouched and a stereo path is two
+// cables (the UI connects both in one drag). "Sum inputs" makes a mono cable
+// into In L feed both channels, which is what a guitar rig wants by default.
+
+class PanNode final : public DspNode
+{
+public:
+    PanNode() : DspNode (NodeKind::pan, nodeKindName (NodeKind::pan))
+    {
+        addInputPort ("In", SignalType::audio);
+        addOutputPort ("Out L", SignalType::audio);
+        addOutputPort ("Out R", SignalType::audio);
+        addParameter ("pan", "Pan", "", juce::NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, 0.5f);
+        addParameter ("level", "Level", "dB", juce::NormalisableRange<float> (-24.0f, 12.0f, 0.1f), 0.0f, 0.25f);
+    }
+
+private:
+    void prepareDsp (double, int) override {}
+    void resetDsp() noexcept override {}
+    void processDsp (const juce::AudioBuffer<float>& inputs, juce::AudioBuffer<float>& outputs, int numSamples) noexcept override
+    {
+        const auto* input = inputs.getReadPointer (0);
+        auto* left = outputs.getWritePointer (0);
+        auto* right = outputs.getWritePointer (1);
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const auto position = juce::jlimit (-1.0f, 1.0f, parameterValue (0, inputs, sample) * 0.01f);
+            const auto gain = juce::Decibels::decibelsToGain (parameterValue (1, inputs, sample));
+            const auto angle = (position + 1.0f) * 0.25f * juce::MathConstants<float>::pi; // equal power
+            const auto dry = std::isfinite (input[sample]) ? input[sample] * gain : 0.0f;
+            left[sample] = dry * std::cos (angle);
+            right[sample] = dry * std::sin (angle);
+        }
+    }
+};
+
+class StereoMergeNode final : public DspNode
+{
+public:
+    StereoMergeNode() : DspNode (NodeKind::stereoMerge, nodeKindName (NodeKind::stereoMerge))
+    {
+        addInputPort ("In L", SignalType::audio);
+        addInputPort ("In R", SignalType::audio);
+        addOutputPort ("Out", SignalType::audio);
+        addParameter ("level", "Level", "dB", juce::NormalisableRange<float> (-24.0f, 12.0f, 0.1f), 0.0f, 0.25f);
+    }
+
+private:
+    void prepareDsp (double, int) override {}
+    void resetDsp() noexcept override {}
+    void processDsp (const juce::AudioBuffer<float>& inputs, juce::AudioBuffer<float>& outputs, int numSamples) noexcept override
+    {
+        const auto* left = inputs.getReadPointer (0);
+        const auto* right = inputs.getReadPointer (1);
+        auto* output = outputs.getWritePointer (0);
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const auto gain = juce::Decibels::decibelsToGain (parameterValue (0, inputs, sample));
+            const auto l = std::isfinite (left[sample]) ? left[sample] : 0.0f;
+            const auto r = std::isfinite (right[sample]) ? right[sample] : 0.0f;
+            output[sample] = (l + r) * 0.5f * gain;
+        }
+    }
+};
+
+// Shared by the stereo effects: a pair of interpolated delay lines.
+struct StereoDelayLines
+{
+    std::array<std::vector<float>, 2> lines;
+    std::array<int, 2> write { 0, 0 };
+
+    void prepare (double sampleRate, double seconds, int maximumBlockSize)
+    {
+        for (auto& line : lines)
+            line.assign (static_cast<std::size_t> (std::ceil (sampleRate * seconds)) + static_cast<std::size_t> (maximumBlockSize) + 4u, 0.0f);
+        write = { 0, 0 };
+    }
+    void clear() noexcept
+    {
+        for (auto& line : lines)
+            std::fill (line.begin(), line.end(), 0.0f);
+        write = { 0, 0 };
+    }
+    [[nodiscard]] int size() const noexcept { return static_cast<int> (lines[0].size()); }
+    [[nodiscard]] float read (int channel, float delaySamples) const noexcept
+    {
+        const auto& line = lines[static_cast<std::size_t> (channel)];
+        const auto n = static_cast<int> (line.size());
+        float position = static_cast<float> (write[static_cast<std::size_t> (channel)]) - juce::jlimit (1.0f, static_cast<float> (n - 3), delaySamples);
+        while (position < 0.0f)
+            position += static_cast<float> (n);
+        const auto a = static_cast<int> (position) % n;
+        const auto b = (a + 1) % n;
+        const auto fraction = position - std::floor (position);
+        return line[static_cast<std::size_t> (a)] + fraction * (line[static_cast<std::size_t> (b)] - line[static_cast<std::size_t> (a)]);
+    }
+    void push (int channel, float value) noexcept
+    {
+        auto& line = lines[static_cast<std::size_t> (channel)];
+        auto& index = write[static_cast<std::size_t> (channel)];
+        line[static_cast<std::size_t> (index)] = value;
+        index = (index + 1) % static_cast<int> (line.size());
+    }
+};
+
+class StereoDelayNode final : public DspNode
+{
+public:
+    StereoDelayNode() : DspNode (NodeKind::stereoDelay, nodeKindName (NodeKind::stereoDelay))
+    {
+        addInputPort ("In L", SignalType::audio);
+        addInputPort ("In R", SignalType::audio);
+        addOutputPort ("Out L", SignalType::audio);
+        addOutputPort ("Out R", SignalType::audio);
+        addParameter ("time-ms", "Time", "ms", skewedRange (1.0f, 2000.0f, 180.0f), 320.0f, 0.4f);
+        addParameter ("feedback", "Feedback", "%", juce::NormalisableRange<float> (0.0f, 98.0f, 0.1f), 40.0f, 0.35f);
+        addParameter ("mix", "Mix", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 35.0f, 0.5f);
+        addParameter ("ping-pong", "Ping-pong", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 60.0f, 0.5f);
+        addParameter ("spread", "R offset", "%", juce::NormalisableRange<float> (50.0f, 150.0f, 0.1f), 100.0f, 0.35f);
+        addParameter ("sum-in", "Sum inputs", "", juce::NormalisableRange<float> (0.0f, 1.0f, 1.0f), 1.0f, 0.0f, false);
+    }
+
+private:
+    void prepareDsp (double newSampleRate, int maximumBlockSize) override
+    {
+        sampleRate = newSampleRate;
+        lines.prepare (sampleRate, 2.1 * 1.5, maximumBlockSize);
+    }
+    void resetDsp() noexcept override { lines.clear(); }
+
+    void processDsp (const juce::AudioBuffer<float>& inputs, juce::AudioBuffer<float>& outputs, int numSamples) noexcept override
+    {
+        if (lines.size() < 4)
+            return;
+        const auto* inL = inputs.getReadPointer (0);
+        const auto* inR = inputs.getReadPointer (1);
+        auto* outL = outputs.getWritePointer (0);
+        auto* outR = outputs.getWritePointer (1);
+        const bool sum = parameterValue (5, inputs, 0) > 0.5f;
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const auto timeL = parameterValue (0, inputs, sample) * static_cast<float> (sampleRate * 0.001);
+            const auto timeR = timeL * juce::jlimit (0.5f, 1.5f, parameterValue (4, inputs, sample) * 0.01f);
+            const auto feedback = juce::jlimit (0.0f, 0.98f, parameterValue (1, inputs, sample) * 0.01f);
+            const auto mix = juce::jlimit (0.0f, 1.0f, parameterValue (2, inputs, sample) * 0.01f);
+            const auto cross = juce::jlimit (0.0f, 1.0f, parameterValue (3, inputs, sample) * 0.01f);
+            auto l = std::isfinite (inL[sample]) ? inL[sample] : 0.0f;
+            auto r = std::isfinite (inR[sample]) ? inR[sample] : 0.0f;
+            if (sum)
+            {
+                const auto both = (l + r) * (r == 0.0f || l == 0.0f ? 1.0f : 0.5f);
+                l = both;
+                r = both;
+            }
+            const auto delayedL = lines.read (0, timeL);
+            const auto delayedR = lines.read (1, timeR);
+            // Ping-pong: each line's feedback comes partly from the other side.
+            lines.push (0, std::tanh (l + feedback * (delayedL * (1.0f - cross) + delayedR * cross)));
+            lines.push (1, std::tanh (r * (1.0f - cross) + feedback * (delayedR * (1.0f - cross) + delayedL * cross)));
+            outL[sample] = l + mix * (delayedL - l);
+            outR[sample] = r + mix * (delayedR - r);
+        }
+    }
+
+    double sampleRate = 48000.0;
+    StereoDelayLines lines;
+};
+
+class StereoChorusNode final : public DspNode
+{
+public:
+    StereoChorusNode() : DspNode (NodeKind::stereoChorus, nodeKindName (NodeKind::stereoChorus))
+    {
+        addInputPort ("In L", SignalType::audio);
+        addInputPort ("In R", SignalType::audio);
+        addOutputPort ("Out L", SignalType::audio);
+        addOutputPort ("Out R", SignalType::audio);
+        addParameter ("rate", "Rate", "Hz", skewedRange (0.05f, 6.0f, 0.8f), 0.8f, 0.35f);
+        addParameter ("depth", "Depth", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 45.0f, 0.5f);
+        addParameter ("delay", "Delay", "ms", juce::NormalisableRange<float> (5.0f, 30.0f, 0.1f), 14.0f, 0.35f);
+        addParameter ("mix", "Mix", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 50.0f, 0.5f);
+        addParameter ("spread", "Spread", "deg", juce::NormalisableRange<float> (0.0f, 180.0f, 1.0f), 90.0f, 0.35f);
+        addParameter ("sum-in", "Sum inputs", "", juce::NormalisableRange<float> (0.0f, 1.0f, 1.0f), 1.0f, 0.0f, false);
+    }
+
+private:
+    void prepareDsp (double newSampleRate, int maximumBlockSize) override
+    {
+        sampleRate = newSampleRate;
+        lines.prepare (sampleRate, 0.045, maximumBlockSize);
+        phase = 0.0;
+    }
+    void resetDsp() noexcept override { lines.clear(); phase = 0.0; }
+
+    void processDsp (const juce::AudioBuffer<float>& inputs, juce::AudioBuffer<float>& outputs, int numSamples) noexcept override
+    {
+        if (lines.size() < 4)
+            return;
+        const auto* inL = inputs.getReadPointer (0);
+        const auto* inR = inputs.getReadPointer (1);
+        auto* outL = outputs.getWritePointer (0);
+        auto* outR = outputs.getWritePointer (1);
+        const bool sum = parameterValue (5, inputs, 0) > 0.5f;
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const auto rate = parameterValue (0, inputs, sample);
+            const auto depth = juce::jlimit (0.0f, 1.0f, parameterValue (1, inputs, sample) * 0.01f);
+            const auto centreMs = parameterValue (2, inputs, sample);
+            const auto mix = juce::jlimit (0.0f, 1.0f, parameterValue (3, inputs, sample) * 0.01f);
+            const auto spread = parameterValue (4, inputs, sample) / 360.0f;
+            auto l = std::isfinite (inL[sample]) ? inL[sample] : 0.0f;
+            auto r = std::isfinite (inR[sample]) ? inR[sample] : 0.0f;
+            if (sum)
+            {
+                const auto both = (l + r) * (r == 0.0f || l == 0.0f ? 1.0f : 0.5f);
+                l = both;
+                r = both;
+            }
+            const auto wobbleL = static_cast<float> (std::sin (juce::MathConstants<double>::twoPi * phase));
+            const auto wobbleR = static_cast<float> (std::sin (juce::MathConstants<double>::twoPi * (phase + spread)));
+            const auto msL = juce::jmax (1.0f, centreMs + wobbleL * depth * 8.0f) * static_cast<float> (sampleRate * 0.001);
+            const auto msR = juce::jmax (1.0f, centreMs + wobbleR * depth * 8.0f) * static_cast<float> (sampleRate * 0.001);
+            const auto delayedL = lines.read (0, msL);
+            const auto delayedR = lines.read (1, msR);
+            lines.push (0, l);
+            lines.push (1, r);
+            outL[sample] = l + mix * (delayedL - l);
+            outR[sample] = r + mix * (delayedR - r);
+            phase += rate / sampleRate;
+            phase -= std::floor (phase);
+        }
+    }
+
+    double sampleRate = 48000.0;
+    StereoDelayLines lines;
+    double phase = 0.0;
+};
+
+class StereoReverbNode final : public DspNode
+{
+public:
+    StereoReverbNode() : DspNode (NodeKind::stereoReverb, nodeKindName (NodeKind::stereoReverb))
+    {
+        addInputPort ("In L", SignalType::audio);
+        addInputPort ("In R", SignalType::audio);
+        addOutputPort ("Out L", SignalType::audio);
+        addOutputPort ("Out R", SignalType::audio);
+        addParameter ("size", "Size", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 55.0f, 0.35f);
+        addParameter ("damp", "Damping", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 40.0f, 0.35f);
+        addParameter ("width", "Width", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 100.0f, 0.35f);
+        addParameter ("mix", "Mix", "%", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 30.0f, 0.5f);
+    }
+
+private:
+    static constexpr std::size_t combCount = 8;
+    static constexpr std::size_t allpassCount = 4;
+    static constexpr int stereoSpread = 23; // Freeverb's classic right-channel offset
+
+    struct Side
+    {
+        std::array<std::vector<float>, combCount> combBuffers;
+        std::array<int, combCount> combIndices {};
+        std::array<float, combCount> combFilters {};
+        std::array<std::vector<float>, allpassCount> allpassBuffers;
+        std::array<int, allpassCount> allpassIndices {};
+
+        void prepare (double rate, int offset)
+        {
+            static constexpr int combTunings[combCount] { 1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617 };
+            static constexpr int allpassTunings[allpassCount] { 556, 441, 341, 225 };
+            const auto scale = rate / 44100.0;
+            for (std::size_t comb = 0; comb < combCount; ++comb)
+            {
+                combBuffers[comb].assign (static_cast<std::size_t> (juce::jmax (4, juce::roundToInt ((combTunings[comb] + offset) * scale))), 0.0f);
+                combIndices[comb] = 0;
+                combFilters[comb] = 0.0f;
+            }
+            for (std::size_t allpass = 0; allpass < allpassCount; ++allpass)
+            {
+                allpassBuffers[allpass].assign (static_cast<std::size_t> (juce::jmax (4, juce::roundToInt ((allpassTunings[allpass] + offset) * scale))), 0.0f);
+                allpassIndices[allpass] = 0;
+            }
+        }
+        void clear() noexcept
+        {
+            for (std::size_t comb = 0; comb < combCount; ++comb) { std::fill (combBuffers[comb].begin(), combBuffers[comb].end(), 0.0f); combIndices[comb] = 0; combFilters[comb] = 0.0f; }
+            for (std::size_t allpass = 0; allpass < allpassCount; ++allpass) { std::fill (allpassBuffers[allpass].begin(), allpassBuffers[allpass].end(), 0.0f); allpassIndices[allpass] = 0; }
+        }
+        float process (float fed, float damp, float roomFeedback) noexcept
+        {
+            float wet = 0.0f;
+            for (std::size_t comb = 0; comb < combCount; ++comb)
+            {
+                auto& buffer = combBuffers[comb];
+                auto& index = combIndices[comb];
+                const auto delayed = buffer[static_cast<std::size_t> (index)];
+                wet += delayed;
+                combFilters[comb] = delayed * (1.0f - damp) + combFilters[comb] * damp;
+                if (! std::isfinite (combFilters[comb]))
+                    combFilters[comb] = 0.0f;
+                buffer[static_cast<std::size_t> (index)] = fed + combFilters[comb] * roomFeedback;
+                if (++index >= static_cast<int> (buffer.size()))
+                    index = 0;
+            }
+            for (std::size_t allpass = 0; allpass < allpassCount; ++allpass)
+            {
+                auto& buffer = allpassBuffers[allpass];
+                auto& index = allpassIndices[allpass];
+                const auto buffered = buffer[static_cast<std::size_t> (index)];
+                buffer[static_cast<std::size_t> (index)] = wet + buffered * 0.5f;
+                wet = buffered - wet;
+                if (++index >= static_cast<int> (buffer.size()))
+                    index = 0;
+            }
+            return wet;
+        }
+    };
+
+    void prepareDsp (double newSampleRate, int) override
+    {
+        left.prepare (newSampleRate, 0);
+        right.prepare (newSampleRate, stereoSpread);
+    }
+    void resetDsp() noexcept override { left.clear(); right.clear(); }
+
+    void processDsp (const juce::AudioBuffer<float>& inputs, juce::AudioBuffer<float>& outputs, int numSamples) noexcept override
+    {
+        if (left.combBuffers[0].empty())
+            return;
+        const auto* inL = inputs.getReadPointer (0);
+        const auto* inR = inputs.getReadPointer (1);
+        auto* outL = outputs.getWritePointer (0);
+        auto* outR = outputs.getWritePointer (1);
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const auto size = juce::jlimit (0.0f, 1.0f, parameterValue (0, inputs, sample) * 0.01f);
+            const auto damp = juce::jlimit (0.0f, 0.95f, parameterValue (1, inputs, sample) * 0.01f * 0.9f);
+            const auto width = juce::jlimit (0.0f, 1.0f, parameterValue (2, inputs, sample) * 0.01f);
+            const auto mix = juce::jlimit (0.0f, 1.0f, parameterValue (3, inputs, sample) * 0.01f);
+            const auto roomFeedback = 0.72f + 0.26f * size;
+            const auto l = std::isfinite (inL[sample]) ? inL[sample] : 0.0f;
+            const auto r = std::isfinite (inR[sample]) ? inR[sample] : 0.0f;
+            const auto fed = (l + r) * 0.015f * (r == 0.0f || l == 0.0f ? 1.0f : 0.5f); // Freeverb sums the input
+            const auto wetL = left.process (fed, damp, roomFeedback);
+            const auto wetR = right.process (fed, damp, roomFeedback);
+            const auto wet1 = (1.0f + width) * 0.5f, wet2 = (1.0f - width) * 0.5f;
+            const auto mixedL = wetL * wet1 + wetR * wet2;
+            const auto mixedR = wetR * wet1 + wetL * wet2;
+            outL[sample] = l + mix * (mixedL - l);
+            outR[sample] = (r == 0.0f && l != 0.0f ? l : r) + mix * (mixedR - (r == 0.0f && l != 0.0f ? l : r));
+        }
+    }
+
+    Side left, right;
+};
+
 std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
 {
     switch (kind)
@@ -4208,6 +4588,11 @@ std::shared_ptr<DspNode> createNodeProcessor (NodeKind kind)
         case NodeKind::neuralPedal:          return std::make_shared<NeuralAmpNode> (NodeKind::neuralPedal);
         case NodeKind::cabinet:              return std::make_shared<CabinetNode>();
         case NodeKind::looper:               return std::make_shared<LooperNode>();
+        case NodeKind::pan:                  return std::make_shared<PanNode>();
+        case NodeKind::stereoMerge:          return std::make_shared<StereoMergeNode>();
+        case NodeKind::stereoDelay:          return std::make_shared<StereoDelayNode>();
+        case NodeKind::stereoChorus:         return std::make_shared<StereoChorusNode>();
+        case NodeKind::stereoReverb:         return std::make_shared<StereoReverbNode>();
         case NodeKind::hardwareInput:
         case NodeKind::hardwareOutput:       break;
     }
