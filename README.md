@@ -28,6 +28,16 @@ walks toward that. The dedicated-machine build guide (stripped-down Linux,
 boot-to-instrument kiosk, `--kiosk --unmute` flags, latency budgeting) lives
 in [`docs/APPLIANCE.md`](docs/APPLIANCE.md).
 
+## SignalPatch 2 (current app)
+
+The app is now a GLFW + OpenGL + NanoVG program (`SignalPatch`) over the
+same engine: a rack that renders only what changed, a **Board** that shows
+the patch as pedals (movable, groupable into one pedal, five rig slots whose
+knobs glide between settings), MIDI learn on every knob, stomp, button, group
+and slot, gamepad control, a looper, a tuner, stereo modules, recordings
+saved with the patch, and portable project zips. The original JUCE rack is
+retired but still builds with `-DSIGNALPATCH_BUILD_JUCE_UI=ON`.
+
 ## What it does today
 
 - **36 modules** across seven families:

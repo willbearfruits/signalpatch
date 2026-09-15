@@ -57,6 +57,18 @@ Read `docs/ARCHITECTURE.md` for the full design; the essentials:
 
 **UI repaint budget.** The rack repaints at 30 Hz, but only what moves: `NodeComponent::paint` blits a cached face-plate image (`plateCache`, invalidated on resize/selection) while a transparent `LiveLayer` child draws LED/scope/output-port glow/status, and `repaintLive()` dirties just those rects (a whole-node repaint would re-render every knob underneath). `PatchCanvas` is opaque, caches each cable as a flattened polyline plus two images (quiet core, full-level glow drawn with the live opacity), and skips cables/nodes whose `SignalMeter::getVersion()` has not moved (meters stop bumping below -60 dBFS). `SIGNALPATCH_PAINT_STATS=1` prints paints/s per layer; `SIGNALPATCH_NO_LIVE/NO_CABLES/NO_TIMER=1` are attribution switches. `--gl` routes painting through `juce::OpenGLContext`; it measured ~2.5x the CPU of the software renderer on the reference desktop (RTX 3060 + XWayland), so software is the default.
 
+## SignalPatch 2 (src/v2) — the app
+
+GLFW window (native Wayland when available) + OpenGL 3.3 + NanoVG; JUCE headless with `JUCE_MODAL_LOOPS_PERMITTED=1` so `MessageManager::runDispatchLoopUntil (1)` is pumped from the frame loop (engine timers, async loads, MIDI hops all ride on it). `RackView` owns everything: rack (cached face plates in framebuffers, live overlay per frame, cables), Board (flow layout, movable pedals, groups, five slots with value glides), in-canvas `Menu` / `TextPrompt` / `FileBrowser` (`Menu.*`), MIDI learn, gamepad, UI scale. Frames render only when input, engine state, telemetry or an animation changed. Everything is in logical pixels; `uiScale` is one transform on the frame and inputs are divided by it at the entry points. Node-kind additions also touch `Palette.h` (accent + catalogue) and, for buttons, the `switch` in `rebuildLayouts()`. Never `pkill -f` the app from a tool shell (it matches the shell); after renaming targets delete stale binaries in `build/*_artefacts/`.
+
+## Engine additions since 0.2
+
+- `MidiMap.*`: mappings (CC / note / program → knob, stomp, command, slot, group) saved in the patch (`"midi"`), scrubbed on node deletion, undoable. `PatchEngine` opens every MIDI input (re-scanned for hot-plug), hops messages to the message thread, applies them; `midiLearnHook` lets the UI capture; slot/group targets go to `onMidiUiTarget`.
+- Recorded audio: `hasAudioContent / exportAudioContent / importAudioContent / audioContentVersion` on `DspNode` (looper, 4-track, sampler); `bundle::toJsonWithAudio` writes `assets/audio/<patch>-<id>.wav` next to the patch, only when the version moved; autosave carries audio too.
+- Board state in the document: `NodeModel::boardPosition` (bx/by), `PedalGroup`s (`"groups"`).
+- Stereo is L/R port pairs (Pan, Stereo Merge/Delay/Chorus/Reverb, cabinet `R (IR B)`); buffers stay mono. The rack cables the R pair in the same drag when an "... L" output meets an "... L" input.
+- Looper (undo kept RT-safe by saving pre-overdub samples during the pass), Tuner (YIN on the message thread over a ring-buffer snapshot).
+
 ## Real-time safety is a release gate
 
 `docs/REALTIME_SAFETY.md` is the contract for any callback-reachable code: no allocation, locks, I/O, exceptions, UI calls, or `shared_ptr` last-owner release; bounded loops over prepared storage; finite output on NaN/Inf input; any block length from zero to the prepared maximum. Consult its review checklist before touching `src/audio/`. Verified so far: allocation trap, 30-min-audio soak, ASan+UBSan (see PRODUCTION_READINESS.md; TSan and a live-device soak remain open).
