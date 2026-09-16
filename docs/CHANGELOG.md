@@ -3,7 +3,7 @@
 Newest first. Versions are git tags; "Unreleased" is what `main` carries
 beyond the last tag.
 
-## Unreleased
+## v0.3.2 — 2026-09-16
 
 - **Touch mode** for handhelds (auto on a small high-DPI screen, `--touch` /
   `--no-touch`, or the FILE menu): finger-sized hit targets for ports,
