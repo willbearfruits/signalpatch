@@ -82,6 +82,10 @@ RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
         options.osxLibrarySubFolder = "Application Support";
         settings = std::make_unique<juce::PropertiesFile> (options);
         uiScale = juce::jlimit (0.6f, 2.5f, static_cast<float> (settings->getDoubleValue ("uiScale", 1.0)));
+        touchMode = settings->getBoolValue ("touchMode", false);
+        menu.setTouchMode (touchMode);
+        browser.setTouchMode (touchMode);
+        prompt.setTouchMode (touchMode);
     }
     engine.onParameterChangedByMidi = [this] (NodeId id) { invalidatePlate (id); dirty = true; };
     engine.onMidiUiTarget = [this] (const MidiMapping& mapping, const juce::MidiMessage&)
@@ -190,6 +194,126 @@ bool RackView::redoNow()
     structureDirty = boardDirty = true;
     invalidateAllPlates();
     return done;
+}
+
+void RackView::setTouchMode (bool touch)
+{
+    touchMode = touch;
+    menu.setTouchMode (touch);
+    browser.setTouchMode (touch);
+    prompt.setTouchMode (touch);
+    if (settings != nullptr)
+    {
+        settings->setValue ("touchMode", touch);
+        settings->saveIfNeeded();
+    }
+    dirty = true;
+}
+
+juce::Rectangle<float> RackView::touchButtonBounds (int index) const noexcept
+{
+    // Zoom out / zoom in / fit, bottom right, clear of the slot bar on the Board.
+    const auto size = 52.0f;
+    const auto bottom = static_cast<float> (windowH) - (mode == Mode::board ? slotBarHeight + 14.0f : 18.0f);
+    return { static_cast<float> (windowW) - (3.0f - static_cast<float> (index)) * (size + 10.0f), bottom - size, size, size };
+}
+
+void RackView::connectPending (NodeId destination, int port)
+{
+    if (! pendingSource.has_value())
+        return;
+    const auto source = *pendingSource;
+    pendingSource.reset();
+    const auto result = engine.connect ({ source.first, source.second, destination, port });
+    if (result.failed())
+    {
+        say (result.getErrorMessage());
+        return;
+    }
+    say ("Cable connected");
+    // Same one-gesture stereo pairing the drag does: "... L" to "... L" also cables R.
+    const auto* from = engine.getDocument().findNode (source.first);
+    const auto* to = engine.getDocument().findNode (destination);
+    auto siblingR = [] (const DspNode& node, int index, bool output) -> int
+    {
+        const auto name = output ? node.getOutputPort (index).name : node.getInputPort (index).name;
+        if (! name.endsWith (" L") && name != "L")
+            return -1;
+        const auto wanted = name == "L" ? juce::String ("R") : name.dropLastCharacters (1) + "R";
+        const auto count = output ? node.getNumOutputPorts() : node.getNumInputPorts();
+        for (int i = 0; i < count; ++i)
+            if ((output ? node.getOutputPort (i).name : node.getInputPort (i).name) == wanted)
+                return i;
+        return -1;
+    };
+    if (from != nullptr && to != nullptr)
+    {
+        const auto outR = siblingR (*from->processor, source.second, true);
+        const auto inR = siblingR (*to->processor, port, false);
+        if (outR >= 0 && inR >= 0 && engine.connect ({ source.first, outR, destination, inR }).wasOk())
+            say ("Stereo pair connected (L and R)");
+    }
+    dirty = true;
+}
+
+void RackView::drawTouchButtons()
+{
+    if (! touchMode)
+        return;
+    static const char* labels[] { "-", "+", "FIT" };
+    for (int index = 0; index < 3; ++index)
+    {
+        const auto bounds = touchButtonBounds (index);
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), 10.0f);
+        nvgFillColor (vg, alpha (palette::panelRaised, 0.92f));
+        nvgFill (vg);
+        nvgStrokeColor (vg, nvgRGBAf (1, 1, 1, 0.14f));
+        nvgStrokeWidth (vg, 1.0f);
+        nvgStroke (vg);
+        nvgFontFaceId (vg, font);
+        nvgFontSize (vg, index == 2 ? 13.0f : 22.0f);
+        nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgFillColor (vg, palette::text);
+        nvgText (vg, bounds.getCentreX(), bounds.getCentreY() - (index == 2 ? 0.0f : 2.0f), labels[index], nullptr);
+    }
+}
+
+bool RackView::touchButtonPressed (double x, double y)
+{
+    if (! touchMode)
+        return false;
+    for (int index = 0; index < 3; ++index)
+    {
+        if (! touchButtonBounds (index).contains (static_cast<float> (x), static_cast<float> (y)))
+            continue;
+        if (index == 2)
+        {
+            if (mode == Mode::board) fitBoard(); else fitToPatch (windowW, windowH);
+        }
+        else if (mode == Mode::board)
+        {
+            const auto factor = index == 0 ? 1.0f / 1.25f : 1.25f;
+            const auto centreX = windowW * 0.5, centreY = (windowH - slotBarHeight) * 0.5;
+            const auto before = toBoard (centreX, centreY);
+            boardScale = juce::jlimit (0.35f, 1.35f, boardScale * factor);
+            boardPanX = centreX - before.x * boardScale;
+            boardPanY = centreY - before.y * boardScale;
+        }
+        else
+        {
+            const auto factor = index == 0 ? 1.0 / 1.25 : 1.25;
+            const auto centreX = (windowW + (paletteVisible ? paletteWidth : 0.0f)) * 0.5, centreY = windowH * 0.5;
+            const auto before = toWorld (centreX, centreY);
+            targetZoom = juce::jlimit (0.25, 3.0, targetZoom * factor);
+            zoom = targetZoom;
+            panX = centreX - before.x * zoom;
+            panY = centreY - before.y * zoom;
+        }
+        dirty = true;
+        return true;
+    }
+    return false;
 }
 
 void RackView::focusLost()
@@ -731,7 +855,8 @@ void RackView::requestQuit()
 
 void RackView::showFileMenu (double x, double y)
 {
-    enum { newPatch = 1, openPatch, save, saveAs, exportBundle, unmute, quit, audioSettings, tone3000Browse };
+    enum { newPatch = 1, openPatch, save, saveAs, exportBundle, unmute, quit, audioSettings, tone3000Browse,
+           touchToggle, scaleUp, scaleDown, fitView };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (currentFile == juce::File() ? "UNTITLED" : currentFile.getFileName().toUpperCase()));
     items.push_back (MenuItem::item (newPatch, "New patch", "Ctrl+N"));
@@ -743,12 +868,29 @@ void RackView::showFileMenu (double x, double y)
     items.push_back (MenuItem::item (unmute, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute", "M"));
     items.push_back (MenuItem::item (audioSettings, "Audio device and buffer...")); // so a pad (Guide) reaches it too
     items.push_back (MenuItem::item (tone3000Browse, "Browse TONE3000 captures...", "Ctrl+T"));
+    items.push_back (MenuItem::line());
+    // Everything a touch screen needs without a keyboard.
+    items.push_back (MenuItem::item (touchToggle, touchMode ? juce::String (juce::CharPointer_UTF8 ("\xe2\x97\x8f  Touch mode (big targets, tap to connect)"))
+                                                            : juce::String ("Touch mode (big targets, tap to connect)")));
+    items.push_back (MenuItem::item (scaleUp, "Bigger UI (" + juce::String (juce::roundToInt (uiScale * 100.0f)) + "%)", "Ctrl+"));
+    items.push_back (MenuItem::item (scaleDown, "Smaller UI", "Ctrl-"));
+    items.push_back (MenuItem::item (fitView, "Fit to window", "F"));
     items.push_back (MenuItem::item (quit, "Quit", "Ctrl+Q"));
     menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, x, y] (int picked)
     {
         switch (picked)
         {
             case audioSettings: showAudioMenu (x, y); break;
+            case touchToggle:
+                setTouchMode (! touchMode);
+                say (touchMode ? "Touch mode on: tap an output then an input to connect, hold for menus"
+                               : "Touch mode off");
+                break;
+            case scaleUp:   setUiScale (uiScale * 1.15f); break;
+            case scaleDown: setUiScale (uiScale / 1.15f); break;
+            case fitView:
+                if (mode == Mode::board) fitBoard(); else fitToPatch (windowW, windowH);
+                break;
             case tone3000Browse: key (GLFW_KEY_T, true, GLFW_MOD_CONTROL); break;
             case newPatch:
                 whenChangesAreSettled ("start a new patch", [this]
@@ -3218,7 +3360,7 @@ bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, d
     if (! pedal->tray)
     {
         for (std::size_t knob = 0; knob < pedal->knobs.size(); ++knob)
-            if (pedalKnobCentre (*pedal, static_cast<int> (knob)).getDistanceFrom (board) <= 24.0f)
+            if (pedalKnobCentre (*pedal, static_cast<int> (knob)).getDistanceFrom (board) <= 24.0f * touchHit())
             {
                 const auto [ownerId, parameterIndex] = pedal->knobs[knob];
                 const auto* owner = engine.getDocument().findNode (ownerId);
@@ -3235,7 +3377,7 @@ bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, d
                 dirty = true;
                 return true;
             }
-        if (pedal->stomp && pedalStompCentre (*pedal).getDistanceFrom (board) <= 18.0f)
+        if (pedal->stomp && pedalStompCentre (*pedal).getDistanceFrom (board) <= 18.0f * touchHit())
         {
             if (isGroup)
                 toggleGroupBypass (*pedal);
@@ -3467,6 +3609,18 @@ void RackView::tick (double now)
     {
         animating = true; // caret blink
         dirty = true;
+    }
+    if (touchMode && pressActive && ! longPressFired && ! menu.isOpen() && ! prompt.isOpen() && ! browser.isOpen() && ! toneBrowser.isOpen())
+    {
+        animating = true; // keep frames coming so the press can ripen
+        if (now - pressTime > 0.5 && ! draggingNode.has_value() && ! knobDrag.has_value() && ! cableDrag.has_value()
+            && ! boardDrag.has_value() && ! marquee.has_value() && ! paletteDrag.has_value()
+            && juce::Point<double> (mouseX, mouseY).getDistanceFrom ({ pressX, pressY }) < 8.0)
+        {
+            longPressFired = true;   // a held finger is a right click
+            mouseButton (GLFW_MOUSE_BUTTON_RIGHT, true, 0, pressX * uiScale, pressY * uiScale);
+            mouseButton (GLFW_MOUSE_BUTTON_RIGHT, false, 0, pressX * uiScale, pressY * uiScale);
+        }
     }
     pollGamepad (now);
     if (toneBrowser.consumeDirty())
@@ -4143,7 +4297,8 @@ void RackView::drawHud (int width, int height, double now)
     const auto hint = message.isNotEmpty() ? message
         : mode == Mode::board
             ? juce::String ("drag pedals to place them  |  Shift+click to select several, right-click to group them into one pedal  |  1-5 load a slot (knobs glide), Shift+1-5 store  |  Tab rack")
-            : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan, Shift+drag selects  |  wheel zooms  |  Del  Ctrl+A  Ctrl+Z  Ctrl+D  Ctrl+T TONE3000  M mute  F fit  |  Ctrl +/- UI scale  |  Tab board");
+            : touchMode ? juce::String ("touch: tap an output then an input to connect  |  hold for a menu  |  drag the space to pan, double tap fits  |  - + FIT bottom right  |  palette: tap adds")
+                        : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan, Shift+drag selects  |  wheel zooms  |  Del  Ctrl+A  Ctrl+Z  Ctrl+D  Ctrl+T TONE3000  M mute  F fit  |  Ctrl +/- UI scale  |  Tab board");
     nvgText (vg, 16.0f, static_cast<float> (height) - 10.0f, hint.toRawUTF8(), nullptr);
 }
 
@@ -4199,6 +4354,7 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
         nvgFill (vg);
         drawBoard (width, height, now);
         drawSlotBar (width, height);
+        drawTouchButtons();
         drawHud (width, height, now);
         menu.draw (width, height);
         browser.draw (width, height);
@@ -4224,6 +4380,26 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
     for (const auto& connection : engine.getDocument().getConnections())
         drawCable (connection, selectedCable.has_value() && *selectedCable == connection, now);
 
+    if (pendingSource.has_value() && ! cableDrag.has_value())
+    {
+        if (const auto* source = layoutFor (pendingSource->first))
+        {
+            const auto a = outputPortCentre (*source, nodePosition (source->id), pendingSource->second);
+            const auto b = toWorld (mouseX, mouseY);
+            juce::Point<float> c1, c2;
+            bezier (a, b, c1, c2);
+            nvgBeginPath (vg);
+            nvgMoveTo (vg, a.x, a.y);
+            nvgBezierTo (vg, c1.x, c1.y, c2.x, c2.y, b.x, b.y);
+            nvgStrokeColor (vg, alpha (accent (source->kind), 0.75f));
+            nvgStrokeWidth (vg, 2.0f);
+            nvgStroke (vg);
+            nvgBeginPath (vg);
+            nvgCircle (vg, a.x, a.y, 9.0f);
+            nvgStrokeColor (vg, accent (source->kind));
+            nvgStroke (vg);
+        }
+    }
     if (cableDrag.has_value())
     {
         if (const auto* source = layoutFor (cableDrag->sourceNode))
@@ -4264,6 +4440,7 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
     nvgRestore (vg);
 
     drawPalette (height);
+    drawTouchButtons();
     drawHud (width, height, now);
     menu.draw (width, height);
     browser.draw (width, height);
@@ -4433,7 +4610,34 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
 {
     x /= uiScale;
     y /= uiScale;
+    // Long press stands in for a right click (tick() fires it).
+    if (button == GLFW_MOUSE_BUTTON_LEFT)
+    {
+        if (pressed)
+        {
+            pressActive = true;
+            longPressFired = false;
+            pressX = x;
+            pressY = y;
+            pressTime = lastTick;
+        }
+        else
+        {
+            pressActive = false;
+            if (longPressFired)
+            {
+                longPressFired = false; // the menu already opened on this press
+                return;
+            }
+        }
+    }
     if (prompt.isOpen())
+    {
+        prompt.mouseButton (button, pressed, static_cast<float> (x), static_cast<float> (y));
+        dirty = true;
+        return;
+    }
+    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && touchButtonPressed (x, y))
         return;
     if (toneBrowser.isOpen())
     {
@@ -4454,12 +4658,12 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
         return;
     }
     // HUD: the FILE button top-right of the header strip.
-    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < 34.0 && x >= windowW - 240.0 && x < windowW - 190.0)
+    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < (touchMode ? 52.0 : 34.0) && x >= windowW - 240.0 && x < windowW - 190.0)
     {
         showFileMenu (x, 34.0);
         return;
     }
-    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < 34.0 && x >= windowW - 300.0 && x < windowW - 246.0)
+    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < (touchMode ? 52.0 : 34.0) && x >= windowW - 300.0 && x < windowW - 246.0)
     {
         showAudioMenu (x, 34.0);
         return;
@@ -4499,7 +4703,7 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
         return; // clicks on the panel never reach the canvas
 
     // View toggle in the header strip.
-    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < hudHeight && x >= windowW - 392.0 && x < windowW - 306.0)
+    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < (touchMode ? hudHeight * 1.5f : hudHeight) && x >= windowW - 392.0 && x < windowW - 306.0)
     {
         setMode (mode == Mode::rack ? Mode::board : Mode::rack);
         return;
@@ -4519,19 +4723,19 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
             if (! bounds.expanded (10.0f * hit).contains (world))
                 continue;
             for (std::size_t knob = 0; knob < it->knobParameters.size(); ++knob)
-                if (knobCentre (*it, origin, static_cast<int> (knob)).getDistanceFrom (world) <= 26.0f)
+                if (knobCentre (*it, origin, static_cast<int> (knob)).getDistanceFrom (world) <= 26.0f * touchHit())
                 {
                     showKnobMenu (*it, it->knobParameters[knob], x, y);
                     return;
                 }
             for (int port = 0; port < it->outputs; ++port)
-                if (outputPortCentre (*it, origin, port).getDistanceFrom (world) <= 11.0f * hit)
+                if (outputPortCentre (*it, origin, port).getDistanceFrom (world) <= 11.0f * hit * touchHit())
                 {
                     showPortMenu (*it, true, port, x, y);
                     return;
                 }
             for (int port = 0; port < it->inputs; ++port)
-                if (inputPortCentre (*it, origin, port).getDistanceFrom (world) <= 11.0f * hit)
+                if (inputPortCentre (*it, origin, port).getDistanceFrom (world) <= 11.0f * hit * touchHit())
                 {
                     showPortMenu (*it, false, port, x, y);
                     return;
@@ -4544,7 +4748,7 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
                 return;
             }
         }
-        if (const auto cable = cableNear (world, 7.0f * hit))
+        if (const auto cable = cableNear (world, 7.0f * hit * touchHit()))
         {
             selectedCable = cable;
             selectedNode = 0;
@@ -4560,14 +4764,14 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
         if (draggingNode.has_value() || knobDrag.has_value() || sequencerDrag.has_value())
             engine.closeEditGesture();
         sequencerDrag.reset();
+        bool connected = false;
         if (cableDrag.has_value())
         {
-            bool connected = false;
             for (auto it = layouts.rbegin(); it != layouts.rend(); ++it)
             {
                 const auto origin = nodePosition (it->id);
                 for (int port = 0; port < it->inputs; ++port)
-                    if (inputPortCentre (*it, origin, port).getDistanceFrom (world) <= 14.0f * hit)
+                    if (inputPortCentre (*it, origin, port).getDistanceFrom (world) <= 14.0f * hit * touchHit())
                     {
                         const auto result = engine.connect ({ cableDrag->sourceNode, cableDrag->sourcePort, it->id, port });
                         message = result.wasOk() ? "Cable connected" : result.getErrorMessage();
@@ -4603,6 +4807,13 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
                 if (connected)
                     break;
             }
+        }
+        if (! connected && cableDrag.has_value()
+            && juce::Point<double> (x, y).getDistanceFrom ({ pressX, pressY }) < 8.0)
+        {
+            // A tap, not a drag: arm the output and wait for a tap on an input.
+            pendingSource = std::make_pair (cableDrag->sourceNode, cableDrag->sourcePort);
+            say ("Now tap an input to connect (tap the output again to cancel)");
         }
         draggingNode.reset();
         dragStartPositions.clear();
@@ -4665,7 +4876,7 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
             return;
         }
         for (std::size_t knob = 0; knob < layout.knobParameters.size(); ++knob)
-            if (knobCentre (layout, origin, static_cast<int> (knob)).getDistanceFrom (world) <= 26.0f)
+            if (knobCentre (layout, origin, static_cast<int> (knob)).getDistanceFrom (world) <= 26.0f * touchHit())
             {
                 const auto parameterIndex = layout.knobParameters[knob];
                 if (doubleClick)
@@ -4683,21 +4894,32 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
                 dirty = true;
                 return;
             }
-        if (layout.stomp && stompCentre (layout, origin).getDistanceFrom (world) <= 16.0f)
+        if (layout.stomp && stompCentre (layout, origin).getDistanceFrom (world) <= 16.0f * touchHit())
         {
             engine.setNodeBypassed (layout.id, ! model->processor->isBypassed());
             dirty = true;
             return;
         }
         for (int port = 0; port < layout.outputs; ++port)
-            if (outputPortCentre (layout, origin, port).getDistanceFrom (world) <= 11.0f * hit)
+            if (outputPortCentre (layout, origin, port).getDistanceFrom (world) <= 11.0f * hit * touchHit())
             {
+                if (pendingSource.has_value() && *pendingSource == std::make_pair (layout.id, port))
+                {
+                    pendingSource.reset(); // tapping the armed output again disarms it
+                    say ("Connection cancelled");
+                    return;
+                }
                 cableDrag = CableDrag { layout.id, port, model->processor->getOutputPort (port).type, world.x, world.y };
                 return;
             }
         for (int port = 0; port < layout.inputs; ++port)
-            if (inputPortCentre (layout, origin, port).getDistanceFrom (world) <= 11.0f * hit)
+            if (inputPortCentre (layout, origin, port).getDistanceFrom (world) <= 11.0f * hit * touchHit())
             {
+                if (pendingSource.has_value())
+                {
+                    connectPending (layout.id, port);
+                    return;
+                }
                 // Grab an existing cable by its plug and re-route it.
                 for (const auto& connection : engine.getDocument().getConnections())
                     if (connection.destinationNode == layout.id && connection.destinationPort == port)
@@ -4743,7 +4965,7 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
         return;
     }
 
-    if (const auto cable = cableNear (world, 7.0f * hit))
+    if (const auto cable = cableNear (world, 7.0f * hit * touchHit()))
     {
         selectedCable = cable;
         selectedNode = 0;
@@ -4751,6 +4973,23 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
         dirty = true;
         return;
     }
+    if (pendingSource.has_value())
+    {
+        pendingSource.reset();
+        say ("Connection cancelled");
+        dirty = true;
+        return;
+    }
+    const auto canvasTapTime = lastTick;
+    if (canvasTapTime - lastClickTime < 0.35 && juce::Point<double> (x, y).getDistanceFrom ({ lastClickX, lastClickY }) < 12.0)
+    {
+        lastClickTime = canvasTapTime;
+        fitToPatch (windowW, windowH); // double tap on the canvas: fit the patch
+        return;
+    }
+    lastClickTime = canvasTapTime;
+    lastClickX = x;
+    lastClickY = y;
     selectedNode = 0;
     selectedCable.reset();
     if ((mods & GLFW_MOD_SHIFT) != 0)

@@ -374,6 +374,41 @@ bool TextPrompt::key (int keyCode, int mods)
     return true;
 }
 
+juce::Rectangle<float> TextPrompt::keyBounds (int row, int column, int span) const noexcept
+{
+    const auto left = lastPanel.getX() + 14.0f + static_cast<float> (column) * (lastKeyWidth + lastKeyGap);
+    const auto top = lastPanel.getY() + 92.0f + static_cast<float> (row) * (lastKeyHeight + lastKeyGap);
+    return { left, top, lastKeyWidth * static_cast<float> (span) + lastKeyGap * static_cast<float> (span - 1), lastKeyHeight };
+}
+
+bool TextPrompt::mouseButton (int button, bool pressed, float x, float y)
+{
+    if (! active)
+        return false;
+    if (! pressed || button != GLFW_MOUSE_BUTTON_LEFT)
+        return true;
+    if (keyboardVisible && lastKeyWidth > 0.0f)
+        for (int row = 0; row < keyboardRows; ++row)
+            for (int column = 0; column < keyboardColumns;)
+            {
+                const auto label = keyAt (row, column);
+                int span = 1;
+                while (column + span < keyboardColumns && keyAt (row, column + span) == label && row == keyboardRows - 1)
+                    ++span;
+                if (keyBounds (row, column, span).contains (x, y))
+                {
+                    keyRow = row;
+                    keyColumn = column;
+                    pressHighlightedKey();
+                    return true;
+                }
+                column += span;
+            }
+    if (! lastPanel.isEmpty() && ! lastPanel.contains (x, y))
+        active = false; // a tap outside the panel cancels
+    return true;
+}
+
 void TextPrompt::padKey (int keyCode)
 {
     if (! active)
@@ -399,9 +434,10 @@ void TextPrompt::draw (int windowWidth, int windowHeight, double now)
 {
     if (! active)
         return;
-    const float keyH = 30.0f, keyGap = 5.0f;
+    const float keyH = lastKeyHeight > 0.0f ? lastKeyHeight : 30.0f, keyGap = lastKeyGap;
     const float w = 420.0f, h = 92.0f + (keyboardVisible ? static_cast<float> (keyboardRows) * (keyH + keyGap) + 6.0f : 0.0f);
     const auto x = (windowWidth - w) * 0.5f, y = (windowHeight - h) * 0.42f;
+    lastPanel = { x, y, w, h };
     nvgBeginPath (vg);
     nvgRect (vg, 0, 0, static_cast<float> (windowWidth), static_cast<float> (windowHeight));
     nvgFillColor (vg, nvgRGBAf (0, 0, 0, 0.35f));
@@ -442,10 +478,13 @@ void TextPrompt::draw (int windowWidth, int windowHeight, double now)
     if (! keyboardVisible)
         return;
     const auto keyW = (w - 28.0f - keyGap * static_cast<float> (keyboardColumns - 1)) / static_cast<float> (keyboardColumns);
+    lastKeyWidth = keyW;
+    lastKeyHeight = keyH;
+    lastKeyGap = keyGap;
     nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
     for (int row = 0; row < keyboardRows; ++row)
     {
-        const auto top = y + 92.0f + static_cast<float> (row) * (keyH + keyGap);
+        const auto top = keyBounds (row, 0, 1).getY();
         int column = 0;
         while (column < keyboardColumns)
         {
@@ -453,8 +492,9 @@ void TextPrompt::draw (int windowWidth, int windowHeight, double now)
             int span = 1;
             while (column + span < keyboardColumns && keyAt (row, column + span) == label && row == keyboardRows - 1)
                 ++span;
-            const auto left = x + 14.0f + static_cast<float> (column) * (keyW + keyGap);
-            const auto width = keyW * static_cast<float> (span) + keyGap * static_cast<float> (span - 1);
+            const auto bounds = keyBounds (row, column, span);
+            const auto left = bounds.getX();
+            const auto width = bounds.getWidth();
             const bool highlighted = row == keyRow && keyColumn >= column && keyColumn < column + span;
             nvgBeginPath (vg);
             nvgRoundedRect (vg, left, top, width, keyH, 4.0f);

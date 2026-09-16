@@ -161,6 +161,15 @@ latency; ASIO needs Steinberg's SDK and is off in these builds
 controller of a handheld is seen as a gamepad, so the Board's pad map
 applies from the start.
 
+### Touch screens and handhelds
+
+On a small high-DPI panel (an ROG Ally and friends) the app starts in
+**touch mode**: finger-sized targets, **tap an output then an input** to
+connect instead of dragging, **long press** for the menu a right click
+would open, double tap on empty canvas to fit, and `-` / `+` / `FIT`
+buttons in the corner. `--touch` and `--no-touch` force it; the FILE menu
+carries the toggle, the UI scale and Fit, so no keyboard is needed.
+
 ### Flatpak
 
 ```sh

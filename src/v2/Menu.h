@@ -74,9 +74,18 @@ public:
     void draw (int windowWidth, int windowHeight);
     void setWindowSize (int width, int height) noexcept { windowW = width; windowH = height; }
 
-    static constexpr float itemHeight = 24.0f;
-    static constexpr float headerHeight = 20.0f;
-    static constexpr float separatorHeight = 9.0f;
+    /** Touch: rows, panels and the on-screen keyboard grow so a finger can hit them. */
+    void setTouchMode (bool touch) noexcept
+    {
+        const auto scale = touch ? 1.9f : 1.0f;
+        itemHeight = 24.0f * scale;
+        headerHeight = 20.0f * scale;
+        separatorHeight = 9.0f * scale;
+    }
+
+    float itemHeight = 24.0f;
+    float headerHeight = 20.0f;
+    float separatorHeight = 9.0f;
     static constexpr float padding = 6.0f;
 
 private:
@@ -120,14 +129,18 @@ public:
     // On-screen keyboard for a pad or a touch screen: arrows walk the grid,
     // Enter presses the highlighted key (OK accepts), Backspace deletes.
     void setKeyboardVisible (bool visible) noexcept { keyboardVisible = visible; }
+    void setTouchMode (bool touch) noexcept { lastKeyHeight = touch ? 46.0f : 30.0f; }
     [[nodiscard]] bool isKeyboardVisible() const noexcept { return keyboardVisible; }
     void acceptNow();
     /** The gamepad: A presses the highlighted key, the d-pad walks the grid. */
     void padKey (int key);
+    /** A tap on the on-screen keyboard. Returns true when the prompt handled it. */
+    bool mouseButton (int button, bool pressed, float x, float y);
 
 private:
     static constexpr int keyboardRows = 5, keyboardColumns = 10;
     [[nodiscard]] static juce::String keyAt (int row, int column);
+    [[nodiscard]] juce::Rectangle<float> keyBounds (int row, int column, int span) const noexcept;
     void pressHighlightedKey();
 
     NVGcontext* vg;
@@ -135,6 +148,8 @@ private:
     bool active = false;
     bool keyboardVisible = false;
     int keyRow = 0, keyColumn = 0;
+    juce::Rectangle<float> lastPanel;   // where draw() put the panel, for taps
+    float lastKeyWidth = 0.0f, lastKeyHeight = 30.0f, lastKeyGap = 5.0f;
     juce::String title, text;
     std::function<void (const juce::String&)> accept;
 };
@@ -149,6 +164,7 @@ public:
 
     void open (juce::String title, const juce::File& directory, juce::StringArray extensions,
                std::function<void (const juce::File&)> onPick);
+    void setTouchMode (bool touch) noexcept { rowHeight = touch ? 40.0f : 22.0f; }
     [[nodiscard]] bool isOpen() const noexcept { return active; }
     void close() noexcept { active = false; }
 
@@ -187,7 +203,7 @@ private:
     double lastClickTime = -1.0;
     int lastClickRow = -1;
 
-    static constexpr float rowHeight = 22.0f;
+    float rowHeight = 22.0f;
     static constexpr float headerHeight = 58.0f;
 };
 } // namespace signalpatch::v2

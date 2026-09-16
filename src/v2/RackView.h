@@ -49,6 +49,9 @@ public:
     /** Close request from the window or Ctrl+Q: asks about unsaved changes first. */
     void requestQuit();
     void focusLost();
+    /** Touch: fat hit targets, tap-to-connect, long-press menus, on-screen zoom buttons. */
+    void setTouchMode (bool touch);
+    [[nodiscard]] bool isTouchMode() const noexcept { return touchMode; }
 
 private:
     struct Button
@@ -167,6 +170,19 @@ private:
     bool redoNow();
     int patchEpoch = 0;
     bool swallowSpaceCharacter = false;
+    bool touchMode = false;
+    /** Hit radii multiplier: a finger is about 9 mm wide, a mouse pointer is one pixel. */
+    [[nodiscard]] float touchHit() const noexcept { return touchMode ? 2.4f : 1.0f; }
+    // Tap to connect: tap an output, then tap an input (dragging still works).
+    std::optional<std::pair<NodeId, int>> pendingSource;
+    // Long press stands in for a right click.
+    bool pressActive = false, longPressFired = false;
+    double pressX = 0.0, pressY = 0.0, pressTime = 0.0;
+    [[nodiscard]] juce::Rectangle<float> touchButtonBounds (int index) const noexcept;
+    void drawTouchButtons();
+    void connectPending (NodeId destination, int port);
+    /** Handles a tap on the zoom / fit buttons. */
+    bool touchButtonPressed (double x, double y);
     /** Runs proceed now, or after asking what to do with unsaved changes. */
     void whenChangesAreSettled (const juce::String& action, std::function<void()> proceed);
     /** Merges one key into a node's extra state if the node is still the kind the caller meant. */

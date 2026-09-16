@@ -3,6 +3,17 @@
 Newest first. Versions are git tags; "Unreleased" is what `main` carries
 beyond the last tag.
 
+## Unreleased
+
+- **Touch mode** for handhelds (auto on a small high-DPI screen, `--touch` /
+  `--no-touch`, or the FILE menu): finger-sized hit targets for ports,
+  knobs, stomps and buttons; **tap an output then an input to connect**
+  (the armed output draws a cable to your finger); **long press** opens the
+  context menu that a right click would; double tap on empty canvas fits;
+  on-screen zoom / fit buttons; taller menu and file-browser rows; the
+  on-screen keyboard is tappable; the FILE menu carries UI scale and fit so
+  a tablet never needs Ctrl.
+
 ## v0.3.1 — 2026-09-15
 
 The hardening release: a seven-dimension audit of everything added since

@@ -91,6 +91,8 @@ int main (int argc, char** argv)
                          "  --board        start on the pedalboard view\n"
                          "  --kiosk        fullscreen on the primary monitor, no decorations (handheld / stage)\n"
                          "  --unmute       fade in right away instead of the safe muted start\n"
+                         "  --touch        finger-sized targets, tap to connect, long press for menus\n"
+                         "  --no-touch     keep the pointer layout on a touch screen\n"
                          "  --scale=1.25   UI scale (also SIGNALPATCH_SCALE, and Ctrl +/- in the app)\n");
             glfwTerminate();
             return 0;
@@ -155,10 +157,15 @@ int main (int argc, char** argv)
             rack.setUiScale (static_cast<float> (std::atof (env)));
     }
     bool unmute = false;
+    int touchFlag = -1; // -1 = decide from the screen
     for (int index = 1; index < argc; ++index)
     {
         const juce::String argument (argv[index]);
-        if (argument == "--board")
+        if (argument == "--touch")
+            touchFlag = 1;
+        else if (argument == "--no-touch")
+            touchFlag = 0;
+        else if (argument == "--board")
             startOnBoard = true;
         else if (argument == "--unmute")
             unmute = true;
@@ -169,6 +176,26 @@ int main (int argc, char** argv)
     }
     if (unmute)
         rack.unmuteAtStart(); // a stage boot: the rig should sound without a key press
+    {
+        // A handheld (a small panel driven at a high scale factor) gets touch mode
+        // the first time it runs; after that the setting the user chose wins.
+        bool touch = rack.isTouchMode();
+        if (touchFlag >= 0)
+            touch = touchFlag == 1;
+        else if (auto* primary = glfwGetPrimaryMonitor())
+        {
+            int widthMm = 0, heightMm = 0;
+            glfwGetMonitorPhysicalSize (primary, &widthMm, &heightMm);
+            float contentX = 1.0f, contentY = 1.0f;
+            glfwGetWindowContentScale (window, &contentX, &contentY);
+            if (widthMm > 0 && widthMm <= 210 && contentX >= 1.25f)
+                touch = true; // about 8 inches or less, scaled up: a handheld screen
+        }
+        if (touch != rack.isTouchMode())
+            rack.setTouchMode (touch);
+        if (touch && rack.getUiScale() < 1.2f)
+            rack.setUiScale (1.35f);
+    }
     glfwSetWindowUserPointer (window, &rack);
     glfwSetCursorPosCallback (window, [] (GLFWwindow* w, double x, double y) { rackFor (w)->mouseMove (x, y); });
     glfwSetMouseButtonCallback (window, [] (GLFWwindow* w, int button, int action, int mods)
