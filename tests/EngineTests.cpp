@@ -2767,8 +2767,194 @@ void testMidiNoteNodeDrivesGateAndPitch()
     expect (outputs.getSample (0, 20) == 0.0f, "notes on another channel should be ignored");
 }
 
+void testExamplePatchesLoadAndSound()
+{
+    const auto folder = juce::File (juce::String (SIGNALPATCH_SOURCE_DIR)).getChildFile ("examples");
+    auto files = folder.findChildFiles (juce::File::findFiles, false, "*.signalpatch");
+    files.sort();
+    expect (files.size() >= 5, "the example patches are missing from " + folder.getFullPathName().toStdString());
+    for (const auto& file : files)
+    {
+        const auto name = file.getFileName().toStdString();
+        const auto parsed = juce::JSON::parse (file);
+        expect (! parsed.isVoid(), name + " is not valid JSON");
+        PatchDocument document;
+        document.configureHardware (channelNames ("Input", 6), channelNames ("Output", 2));
+        document.prepareAll (sampleRate, blockSize);
+        expectOk (document.loadJson (parsed), name + " did not load");
+        const auto* savedCables = parsed.getProperty ("connections", {}).getArray();
+        expect (savedCables != nullptr && static_cast<int> (document.getConnections().size()) == savedCables->size(),
+                name + ": a cable was rejected (a port index is wrong)");
+        expect (document.getGroups().size() == 1 && ! document.getGroups()[0].knobs.empty(), name + " should be one pedal with knobs on the Board");
+        for (const auto& knob : document.getGroups()[0].knobs)
+        {
+            const auto* owner = document.findNode (knob.first);
+            expect (owner != nullptr && juce::isPositiveAndBelow (knob.second, owner->processor->getNumParameters()),
+                    name + ": a pedal knob points at nothing");
+        }
+        // Every knob named in the file exists on its module (a typo would silently keep the default).
+        if (const auto* nodes = parsed.getProperty ("nodes", {}).getArray())
+            for (const auto& saved : *nodes)
+            {
+                const auto* model = document.findNode (static_cast<NodeId> (static_cast<juce::int64> (saved.getProperty ("id", 0))));
+                expect (model != nullptr, name + ": a module did not load");
+                if (const auto* parameters = saved.getProperty ("parameters", {}).getArray())
+                    for (const auto& parameter : *parameters)
+                    {
+                        bool found = false;
+                        for (int index = 0; index < model->processor->getNumParameters(); ++index)
+                            found = found || model->processor->getParameter (index).id == parameter.getProperty ("id", {}).toString();
+                        expect (found, name + ": no knob called " + parameter.getProperty ("id", {}).toString().toStdString());
+                    }
+            }
+
+        auto compiled = GraphCompiler::compile (document, blockSize);
+        expect (compiled.succeeded(), name + " did not compile: " + compiled.error.toStdString());
+        std::vector<float> output;
+        renderPlanBlocks (*compiled.plan, 1500, false, false, nullptr, &output); // two seconds of a 180 Hz tone
+        float peak = 0.0f;
+        for (const auto sample : output)
+            peak = juce::jmax (peak, std::abs (sample));
+        expect (peak > 0.02f, name + " made no sound");
+        expect (peak <= 1.0f, name + " went over full scale");
+    }
+}
+
+// SIGNALPATCH_RENDER_EXAMPLES=<folder>: each example patch played by a plucked
+// test string for eight seconds, written as <name>.wav (mono, float) next to the
+// dry signal, for listening and for measuring. Knobs can be set first:
+// SIGNALPATCH_RENDER_SET="whammy:Treadle:value=1"
+void renderExamplePatches (const juce::File& outputFolder)
+{
+    outputFolder.createDirectory();
+    const auto seconds = 8.0;
+    const auto totalBlocks = static_cast<int> (seconds * sampleRate / blockSize);
+
+    // A crude guitar: a Karplus-Strong string re-plucked every 1.5 s, walking E2 A2 D3 G3.
+    std::vector<float> dry (static_cast<std::size_t> (totalBlocks) * blockSize, 0.0f);
+    {
+        const double notes[] = { 82.41, 110.0, 146.83, 196.0, 164.81, 220.0 };
+        std::vector<float> line;
+        juce::Random random (7);
+        std::size_t cursor = 0;
+        float last = 0.0f;
+        for (std::size_t sample = 0; sample < dry.size(); ++sample)
+        {
+            if (sample % static_cast<std::size_t> (sampleRate * 1.5) == 0)
+            {
+                const auto period = static_cast<std::size_t> (sampleRate / notes[(sample / static_cast<std::size_t> (sampleRate * 1.5)) % 6]);
+                line.assign (period, 0.0f);
+                for (auto& value : line)
+                    value = random.nextFloat() * 2.0f - 1.0f;
+                cursor = 0;
+            }
+            const auto value = line[cursor];
+            line[cursor] = 0.996f * 0.5f * (value + last);
+            last = value;
+            cursor = (cursor + 1) % line.size();
+            // The last three seconds are a muted guitar: only its noise floor, which is what
+            // a self-oscillating patch (or a gate) has to be judged on.
+            dry[sample] = sample < static_cast<std::size_t> (5.0 * sampleRate) ? 0.5f * value
+                                                                                : 0.0001f * (random.nextFloat() * 2.0f - 1.0f);
+        }
+    }
+    const auto writeWav = [&] (const juce::String& name, const std::vector<float>& samples)
+    {
+        const auto file = outputFolder.getChildFile (name + ".wav");
+        file.deleteFile();
+        juce::WavAudioFormat format;
+        std::unique_ptr<juce::AudioFormatWriter> writer (format.createWriterFor (new juce::FileOutputStream (file), sampleRate, 1, 32, {}, 0));
+        if (writer == nullptr)
+            return;
+        const float* channels[] = { samples.data() };
+        writer->writeFromFloatArrays (channels, 1, static_cast<int> (samples.size()));
+    };
+    writeWav ("_dry", dry);
+
+    const juce::String settings (std::getenv ("SIGNALPATCH_RENDER_SET") != nullptr ? std::getenv ("SIGNALPATCH_RENDER_SET") : "");
+    const auto folder = juce::File (juce::String (SIGNALPATCH_SOURCE_DIR)).getChildFile ("examples");
+    for (const auto& file : folder.findChildFiles (juce::File::findFiles, false, "*.signalpatch"))
+    {
+        PatchDocument document;
+        document.configureHardware (channelNames ("Input", 6), channelNames ("Output", 2));
+        document.prepareAll (sampleRate, blockSize);
+        if (document.loadJson (juce::JSON::parse (file)).failed())
+            continue;
+        for (const auto& setting : juce::StringArray::fromTokens (settings, ",", {}))
+        {
+            const auto parts = juce::StringArray::fromTokens (setting.replace ("=", ":"), ":", {});
+            if (parts.size() != 4 || parts[0] != file.getFileNameWithoutExtension())
+                continue;
+            for (auto& node : document.getNodes())
+                if (node.processor->getName() == parts[1])
+                    for (int index = 0; index < node.processor->getNumParameters(); ++index)
+                        if (node.processor->getParameter (index).id == parts[2])
+                            node.processor->getParameter (index).setValue (parts[3].getFloatValue());
+        }
+        auto compiled = GraphCompiler::compile (document, blockSize);
+        if (! compiled.succeeded())
+            continue;
+        std::vector<float> wet (dry.size(), 0.0f), right (blockSize, 0.0f);
+        std::vector<float> silence (blockSize, 0.0f);
+        bool tripped = false;
+        for (int block = 0; block < totalBlocks; ++block)
+        {
+            const float* inputs[] = { dry.data() + static_cast<std::size_t> (block) * blockSize, silence.data(), silence.data(), silence.data(), silence.data(), silence.data() };
+            float* outputs[] = { wet.data() + static_cast<std::size_t> (block) * blockSize, right.data() };
+            compiled.plan->render (inputs, 6, outputs, 2, 0, blockSize);
+        }
+        for (const auto& node : document.getNodes())
+            tripped = tripped || node.processor->safetyTripped();
+        writeWav (file.getFileNameWithoutExtension(), wet);
+        std::cout << "  rendered " << file.getFileNameWithoutExtension() << (tripped ? "   (a Feedback Guard TRIPPED)" : "") << "\n";
+    }
+}
+
+// SIGNALPATCH_DUMP_NODES=1: every module's ports and knobs as JSON, for writing
+// patches by hand or by script. Port and parameter order is what patches store.
+void dumpNodeRegistry()
+{
+    juce::Array<juce::var> kinds;
+    for (int index = 0; index <= static_cast<int> (NodeKind::clock); ++index)
+    {
+        const auto kind = static_cast<NodeKind> (index);
+        auto node = createNodeProcessor (kind);
+        if (node == nullptr)
+            continue;
+        auto object = std::make_unique<juce::DynamicObject>();
+        object->setProperty ("kind", nodeKindKey (kind));
+        object->setProperty ("name", nodeKindName (kind));
+        juce::Array<juce::var> inputs, outputs, parameters;
+        for (int port = 0; port < node->getNumInputPorts(); ++port)
+            inputs.add (node->getInputPort (port).name + (node->getInputPort (port).type == SignalType::audio ? " (audio)" : " (control)"));
+        for (int port = 0; port < node->getNumOutputPorts(); ++port)
+            outputs.add (node->getOutputPort (port).name + (node->getOutputPort (port).type == SignalType::audio ? " (audio)" : " (control)"));
+        for (int parameterIndex = 0; parameterIndex < node->getNumParameters(); ++parameterIndex)
+        {
+            const auto& parameter = node->getParameter (parameterIndex);
+            parameters.add (parameter.id + " '" + parameter.name + "' " + juce::String (parameter.range.start) + ".." + juce::String (parameter.range.end)
+                            + " " + parameter.unit + " default " + juce::String (parameter.defaultValue) + " modPort " + juce::String (parameter.inputPortIndex));
+        }
+        object->setProperty ("inputs", inputs);
+        object->setProperty ("outputs", outputs);
+        object->setProperty ("parameters", parameters);
+        kinds.add (juce::var (object.release()));
+    }
+    std::cout << juce::JSON::toString (juce::var (kinds), false) << "\n";
+}
+
 int main()
 {
+    if (const auto* renderTo = std::getenv ("SIGNALPATCH_RENDER_EXAMPLES"))
+    {
+        renderExamplePatches (juce::File (juce::String (renderTo)));
+        return 0;
+    }
+    if (std::getenv ("SIGNALPATCH_DUMP_NODES") != nullptr)
+    {
+        dumpNodeRegistry();
+        return 0;
+    }
     // Flush every insertion so a crash on CI still shows which test was
     // running (pipes are fully buffered otherwise).
     std::cout.setf (std::ios::unitbuf);
@@ -2797,6 +2983,7 @@ int main()
         { "several cores render the same samples as one", testParallelRenderMatchesSerial },
         { "parallel work is detected only where it exists", testParallelCandidateDetection },
         { "rendering on several cores performs no allocation", testParallelRenderDoesNotAllocate },
+        { "example patches load, compile and make sound", testExamplePatchesLoadAndSound },
         { "undo coalesces knob gestures", testUndoCoalescesKnobGestures },
         { "knob travel and curve: narrow, bend, reverse, save, undo", testParameterShapeNarrowsBendsAndSurvives },
         { "a modulated knob reports where it is", testModulatedKnobReportsWhereItIs },

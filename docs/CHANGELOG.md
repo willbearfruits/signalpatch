@@ -4,6 +4,8 @@ Newest first. "Unreleased" is what `main` has beyond the last tag.
 
 ## Unreleased
 
+- Five example patches under FILE > Examples, each one pedal on the Board:
+  Clouds, Whammy, Fuzz Factory, Rainbow Machine, Slicer (`examples/`).
 - Neural captures cost about a third of what they did. The build now targets
   AVX2 (`SIGNALPATCH_CPU_BASELINE`, default `x86-64-v3`) and uses the fast
   `tanh` the official NAM plugin runs with. A "standard" WaveNet went from

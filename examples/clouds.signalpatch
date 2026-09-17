@@ -1,0 +1,342 @@
+{
+  "schema": 1,
+  "format": "signalpatch",
+  "nodes": [
+    {
+      "id": 1,
+      "kind": "hardware-input",
+      "name": "Hardware Inputs",
+      "x": 60,
+      "y": 200,
+      "parameters": []
+    },
+    {
+      "id": 2,
+      "kind": "hardware-output",
+      "name": "Hardware Outputs",
+      "x": 1600,
+      "y": 200,
+      "parameters": []
+    },
+    {
+      "id": 100,
+      "kind": "granular-cloud",
+      "name": "Grains",
+      "x": 380,
+      "y": 80,
+      "parameters": [
+        {
+          "id": "position",
+          "value": 35,
+          "depth": 0.45
+        },
+        {
+          "id": "size",
+          "value": 190,
+          "depth": 0.0
+        },
+        {
+          "id": "density",
+          "value": 12,
+          "depth": 0.5
+        },
+        {
+          "id": "pitch",
+          "value": 0,
+          "depth": 0.0
+        },
+        {
+          "id": "spread",
+          "value": 65,
+          "depth": 0.0
+        },
+        {
+          "id": "feedback",
+          "value": 30,
+          "depth": 0.0
+        },
+        {
+          "id": "mix",
+          "value": 75,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 101,
+      "kind": "granular-cloud",
+      "name": "Octave Grains",
+      "x": 380,
+      "y": 520,
+      "parameters": [
+        {
+          "id": "position",
+          "value": 55,
+          "depth": 0.35
+        },
+        {
+          "id": "size",
+          "value": 120,
+          "depth": 0.0
+        },
+        {
+          "id": "density",
+          "value": 9,
+          "depth": 0.0
+        },
+        {
+          "id": "pitch",
+          "value": 12,
+          "depth": 0.0
+        },
+        {
+          "id": "spread",
+          "value": 80,
+          "depth": 0.0
+        },
+        {
+          "id": "feedback",
+          "value": 20,
+          "depth": 0.0
+        },
+        {
+          "id": "mix",
+          "value": 100,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "kind": "random-lfo",
+      "name": "Wander",
+      "x": 60,
+      "y": 620,
+      "parameters": [
+        {
+          "id": "rate",
+          "value": 0.35,
+          "depth": 0.0
+        },
+        {
+          "id": "smooth",
+          "value": 85,
+          "depth": 0.0
+        },
+        {
+          "id": "depth",
+          "value": 100,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "kind": "envelope-follower",
+      "name": "Touch",
+      "x": 60,
+      "y": 900,
+      "parameters": [
+        {
+          "id": "attack",
+          "value": 25,
+          "depth": 0.0
+        },
+        {
+          "id": "release",
+          "value": 600,
+          "depth": 0.0
+        },
+        {
+          "id": "gain",
+          "value": 18,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "kind": "mixer-4",
+      "name": "Blend",
+      "x": 700,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "level-1",
+          "value": 0,
+          "depth": 0.0
+        },
+        {
+          "id": "level-2",
+          "value": -9,
+          "depth": 0.0
+        },
+        {
+          "id": "level-3",
+          "value": -60,
+          "depth": 0.0
+        },
+        {
+          "id": "level-4",
+          "value": -60,
+          "depth": 0.0
+        },
+        {
+          "id": "master",
+          "value": 5,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 105,
+      "kind": "reverb",
+      "name": "Hall",
+      "x": 1000,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "size",
+          "value": 88,
+          "depth": 0.0
+        },
+        {
+          "id": "damp",
+          "value": 35,
+          "depth": 0.0
+        },
+        {
+          "id": "mix",
+          "value": 45,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 106,
+      "kind": "limiter",
+      "name": "Limiter",
+      "x": 1300,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "ceiling",
+          "value": -1.0,
+          "depth": 0.0
+        },
+        {
+          "id": "release",
+          "value": 80,
+          "depth": 0.0
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "sourceNode": 1,
+      "sourcePort": 0,
+      "destinationNode": 100,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 1,
+      "sourcePort": 0,
+      "destinationNode": 101,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 1,
+      "sourcePort": 0,
+      "destinationNode": 103,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 102,
+      "sourcePort": 0,
+      "destinationNode": 100,
+      "destinationPort": 1
+    },
+    {
+      "sourceNode": 102,
+      "sourcePort": 0,
+      "destinationNode": 101,
+      "destinationPort": 1
+    },
+    {
+      "sourceNode": 103,
+      "sourcePort": 0,
+      "destinationNode": 100,
+      "destinationPort": 3
+    },
+    {
+      "sourceNode": 100,
+      "sourcePort": 0,
+      "destinationNode": 104,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 101,
+      "sourcePort": 0,
+      "destinationNode": 104,
+      "destinationPort": 1
+    },
+    {
+      "sourceNode": 104,
+      "sourcePort": 0,
+      "destinationNode": 105,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 105,
+      "sourcePort": 0,
+      "destinationNode": 106,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 106,
+      "sourcePort": 0,
+      "destinationNode": 2,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 106,
+      "sourcePort": 0,
+      "destinationNode": 2,
+      "destinationPort": 1
+    }
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "name": "Clouds",
+      "members": [
+        100,
+        101,
+        102,
+        103,
+        104,
+        105,
+        106
+      ],
+      "knobs": [
+        {
+          "node": 100,
+          "parameter": 1
+        },
+        {
+          "node": 100,
+          "parameter": 2
+        },
+        {
+          "node": 104,
+          "parameter": 1
+        },
+        {
+          "node": 105,
+          "parameter": 2
+        }
+      ]
+    }
+  ]
+}

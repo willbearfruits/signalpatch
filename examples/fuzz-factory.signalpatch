@@ -1,0 +1,260 @@
+{
+  "schema": 1,
+  "format": "signalpatch",
+  "nodes": [
+    {
+      "id": 1,
+      "kind": "hardware-input",
+      "name": "Hardware Inputs",
+      "x": 60,
+      "y": 200,
+      "parameters": []
+    },
+    {
+      "id": 2,
+      "kind": "hardware-output",
+      "name": "Hardware Outputs",
+      "x": 1580,
+      "y": 200,
+      "parameters": []
+    },
+    {
+      "id": 100,
+      "kind": "noise-gate",
+      "name": "Gate",
+      "x": 380,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "threshold",
+          "value": -38,
+          "depth": 0.0
+        },
+        {
+          "id": "attack",
+          "value": 1,
+          "depth": 0.0
+        },
+        {
+          "id": "release",
+          "value": 60,
+          "depth": 0.0
+        },
+        {
+          "id": "range",
+          "value": 80,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 101,
+      "kind": "distortion",
+      "name": "Fuzz",
+      "x": 680,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "drive",
+          "value": 40,
+          "depth": 0.0
+        },
+        {
+          "id": "tone",
+          "value": 4200,
+          "depth": 0.0
+        },
+        {
+          "id": "mix",
+          "value": 100,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "kind": "filter-svf",
+      "name": "Squeal",
+      "x": 680,
+      "y": 620,
+      "parameters": [
+        {
+          "id": "cutoff",
+          "value": 900,
+          "depth": 0.0
+        },
+        {
+          "id": "resonance",
+          "value": 70,
+          "depth": 0.0
+        },
+        {
+          "id": "mode",
+          "value": 2,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "kind": "gain",
+      "name": "Loop Pad",
+      "x": 980,
+      "y": 620,
+      "parameters": [
+        {
+          "id": "gain-db",
+          "value": -39,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "kind": "feedback-guard",
+      "name": "Stab",
+      "x": 380,
+      "y": 620,
+      "parameters": [
+        {
+          "id": "amount",
+          "value": 55,
+          "depth": 0.0
+        },
+        {
+          "id": "ceiling",
+          "value": -8,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 105,
+      "kind": "gain",
+      "name": "Volume",
+      "x": 980,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "gain-db",
+          "value": -10,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 106,
+      "kind": "limiter",
+      "name": "Limiter",
+      "x": 1280,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "ceiling",
+          "value": -1.0,
+          "depth": 0.0
+        },
+        {
+          "id": "release",
+          "value": 80,
+          "depth": 0.0
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "sourceNode": 1,
+      "sourcePort": 0,
+      "destinationNode": 100,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 100,
+      "sourcePort": 0,
+      "destinationNode": 101,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 101,
+      "sourcePort": 0,
+      "destinationNode": 102,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 102,
+      "sourcePort": 0,
+      "destinationNode": 103,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 103,
+      "sourcePort": 0,
+      "destinationNode": 104,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 104,
+      "sourcePort": 0,
+      "destinationNode": 101,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 101,
+      "sourcePort": 0,
+      "destinationNode": 105,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 105,
+      "sourcePort": 0,
+      "destinationNode": 106,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 106,
+      "sourcePort": 0,
+      "destinationNode": 2,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 106,
+      "sourcePort": 0,
+      "destinationNode": 2,
+      "destinationPort": 1
+    }
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "name": "Fuzz Factory",
+      "members": [
+        100,
+        101,
+        102,
+        103,
+        104,
+        105,
+        106
+      ],
+      "knobs": [
+        {
+          "node": 100,
+          "parameter": 0
+        },
+        {
+          "node": 101,
+          "parameter": 0
+        },
+        {
+          "node": 104,
+          "parameter": 0
+        },
+        {
+          "node": 102,
+          "parameter": 0
+        }
+      ]
+    }
+  ]
+}

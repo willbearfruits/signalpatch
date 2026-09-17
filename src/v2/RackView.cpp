@@ -1029,11 +1029,28 @@ void RackView::requestQuit()
 void RackView::showFileMenu (double x, double y)
 {
     enum { newPatch = 1, openPatch, save, saveAs, exportBundle, unmute, quit, audioSettings, tone3000Browse,
-           touchToggle, scaleUp, scaleDown, fitView, startMutedToggle };
+           touchToggle, scaleUp, scaleDown, fitView, startMutedToggle, exampleBase = 5000 };
+    // Example patches travel next to the executable (or under share/ when installed).
+    juce::Array<juce::File> examples;
+    {
+        const auto exeFolder = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
+        for (const auto& folder : { exeFolder.getChildFile ("examples"),
+                                    exeFolder.getParentDirectory().getChildFile ("share/signalpatch/examples") })
+            if (examples.isEmpty() && folder.isDirectory())
+                examples = folder.findChildFiles (juce::File::findFiles, false, "*.signalpatch");
+        examples.sort();
+    }
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (currentFile == juce::File() ? "UNTITLED" : currentFile.getFileName().toUpperCase()));
     items.push_back (MenuItem::item (newPatch, "New patch", "Ctrl+N"));
     items.push_back (MenuItem::item (openPatch, "Open patch or project zip...", "Ctrl+O"));
+    if (! examples.isEmpty())
+    {
+        std::vector<MenuItem> exampleItems;
+        for (int index = 0; index < examples.size(); ++index)
+            exampleItems.push_back (MenuItem::item (exampleBase + index, examples[index].getFileNameWithoutExtension().replaceCharacter ('-', ' ')));
+        items.push_back (MenuItem::sub ("Examples", std::move (exampleItems)));
+    }
     items.push_back (MenuItem::item (save, "Save", "Ctrl+S"));
     items.push_back (MenuItem::item (saveAs, "Save as...", "Ctrl+Shift+S"));
     items.push_back (MenuItem::item (exportBundle, "Export portable project (.zip)..."));
@@ -1051,8 +1068,18 @@ void RackView::showFileMenu (double x, double y)
     items.push_back (MenuItem::item (scaleDown, "Smaller UI", "Ctrl-"));
     items.push_back (MenuItem::item (fitView, "Fit to window", "F"));
     items.push_back (MenuItem::item (quit, "Quit", "Ctrl+Q"));
-    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, x, y] (int picked)
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, x, y, examples] (int picked)
     {
+        if (picked >= exampleBase && picked - exampleBase < examples.size())
+        {
+            const auto example = examples[picked - exampleBase];
+            whenChangesAreSettled ("open the example", [this, example]
+            {
+                openPatchFile (example);
+                currentFile = juce::File(); // Save asks for a name: the example itself stays as it shipped
+            });
+            return;
+        }
         switch (picked)
         {
             case audioSettings: showAudioMenu (x, y); break;

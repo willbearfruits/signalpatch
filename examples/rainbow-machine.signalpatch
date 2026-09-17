@@ -1,0 +1,265 @@
+{
+  "schema": 1,
+  "format": "signalpatch",
+  "nodes": [
+    {
+      "id": 1,
+      "kind": "hardware-input",
+      "name": "Hardware Inputs",
+      "x": 60,
+      "y": 200,
+      "parameters": []
+    },
+    {
+      "id": 2,
+      "kind": "hardware-output",
+      "name": "Hardware Outputs",
+      "x": 1880,
+      "y": 200,
+      "parameters": []
+    },
+    {
+      "id": 100,
+      "kind": "delay",
+      "name": "Tracking",
+      "x": 380,
+      "y": 480,
+      "parameters": [
+        {
+          "id": "time-ms",
+          "value": 160,
+          "depth": 0.0
+        },
+        {
+          "id": "feedback",
+          "value": 0,
+          "depth": 0.0
+        },
+        {
+          "id": "mix",
+          "value": 100,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 101,
+      "kind": "pitch-shifter",
+      "name": "Pitch",
+      "x": 680,
+      "y": 480,
+      "parameters": [
+        {
+          "id": "pitch",
+          "value": 5,
+          "depth": 0.0
+        },
+        {
+          "id": "window",
+          "value": 60,
+          "depth": 0.0
+        },
+        {
+          "id": "mix",
+          "value": 100,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "kind": "feedback-guard",
+      "name": "Magic",
+      "x": 520,
+      "y": 900,
+      "parameters": [
+        {
+          "id": "amount",
+          "value": 72,
+          "depth": 0.0
+        },
+        {
+          "id": "ceiling",
+          "value": -6,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "kind": "chorus",
+      "name": "Wobble",
+      "x": 980,
+      "y": 480,
+      "parameters": [
+        {
+          "id": "rate",
+          "value": 0.4,
+          "depth": 0.0
+        },
+        {
+          "id": "depth",
+          "value": 35,
+          "depth": 0.0
+        },
+        {
+          "id": "delay",
+          "value": 12,
+          "depth": 0.0
+        },
+        {
+          "id": "mix",
+          "value": 40,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "kind": "mixer-4",
+      "name": "Blend",
+      "x": 1280,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "level-1",
+          "value": 0,
+          "depth": 0.0
+        },
+        {
+          "id": "level-2",
+          "value": 2,
+          "depth": 0.0
+        },
+        {
+          "id": "level-3",
+          "value": -60,
+          "depth": 0.0
+        },
+        {
+          "id": "level-4",
+          "value": -60,
+          "depth": 0.0
+        },
+        {
+          "id": "master",
+          "value": -3,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 105,
+      "kind": "limiter",
+      "name": "Limiter",
+      "x": 1580,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "ceiling",
+          "value": -1.0,
+          "depth": 0.0
+        },
+        {
+          "id": "release",
+          "value": 80,
+          "depth": 0.0
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "sourceNode": 1,
+      "sourcePort": 0,
+      "destinationNode": 100,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 100,
+      "sourcePort": 0,
+      "destinationNode": 101,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 101,
+      "sourcePort": 0,
+      "destinationNode": 102,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 102,
+      "sourcePort": 0,
+      "destinationNode": 100,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 101,
+      "sourcePort": 0,
+      "destinationNode": 103,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 1,
+      "sourcePort": 0,
+      "destinationNode": 104,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 103,
+      "sourcePort": 0,
+      "destinationNode": 104,
+      "destinationPort": 1
+    },
+    {
+      "sourceNode": 104,
+      "sourcePort": 0,
+      "destinationNode": 105,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 105,
+      "sourcePort": 0,
+      "destinationNode": 2,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 105,
+      "sourcePort": 0,
+      "destinationNode": 2,
+      "destinationPort": 1
+    }
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "name": "Rainbow",
+      "members": [
+        100,
+        101,
+        102,
+        103,
+        104,
+        105
+      ],
+      "knobs": [
+        {
+          "node": 101,
+          "parameter": 0
+        },
+        {
+          "node": 100,
+          "parameter": 0
+        },
+        {
+          "node": 102,
+          "parameter": 0
+        },
+        {
+          "node": 104,
+          "parameter": 1
+        }
+      ]
+    }
+  ]
+}

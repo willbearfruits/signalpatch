@@ -1,0 +1,307 @@
+{
+  "schema": 1,
+  "format": "signalpatch",
+  "nodes": [
+    {
+      "id": 1,
+      "kind": "hardware-input",
+      "name": "Hardware Inputs",
+      "x": 60,
+      "y": 200,
+      "parameters": []
+    },
+    {
+      "id": 2,
+      "kind": "hardware-output",
+      "name": "Hardware Outputs",
+      "x": 1300,
+      "y": 200,
+      "parameters": []
+    },
+    {
+      "id": 100,
+      "kind": "clock",
+      "name": "Tempo",
+      "x": 60,
+      "y": 560,
+      "parameters": [
+        {
+          "id": "bpm",
+          "value": 112,
+          "depth": 0.0
+        },
+        {
+          "id": "beats",
+          "value": 4,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 101,
+      "kind": "step-sequencer-8",
+      "name": "Chop Pattern",
+      "x": 380,
+      "y": 620,
+      "parameters": [
+        {
+          "id": "rate",
+          "value": 4,
+          "depth": 0.0
+        },
+        {
+          "id": "glide",
+          "value": 6,
+          "depth": 0.0
+        },
+        {
+          "id": "step-1",
+          "value": 1,
+          "depth": 0.0
+        },
+        {
+          "id": "step-2",
+          "value": -1,
+          "depth": 0.0
+        },
+        {
+          "id": "step-3",
+          "value": 1,
+          "depth": 0.0
+        },
+        {
+          "id": "step-4",
+          "value": 1,
+          "depth": 0.0
+        },
+        {
+          "id": "step-5",
+          "value": -1,
+          "depth": 0.0
+        },
+        {
+          "id": "step-6",
+          "value": 1,
+          "depth": 0.0
+        },
+        {
+          "id": "step-7",
+          "value": -1,
+          "depth": 0.0
+        },
+        {
+          "id": "step-8",
+          "value": 1,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "kind": "step-sequencer-8",
+      "name": "Filter Pattern",
+      "x": 700,
+      "y": 620,
+      "parameters": [
+        {
+          "id": "rate",
+          "value": 4,
+          "depth": 0.0
+        },
+        {
+          "id": "glide",
+          "value": 25,
+          "depth": 0.0
+        },
+        {
+          "id": "step-1",
+          "value": 0.9,
+          "depth": 0.0
+        },
+        {
+          "id": "step-2",
+          "value": 0.1,
+          "depth": 0.0
+        },
+        {
+          "id": "step-3",
+          "value": 0.5,
+          "depth": 0.0
+        },
+        {
+          "id": "step-4",
+          "value": 0.2,
+          "depth": 0.0
+        },
+        {
+          "id": "step-5",
+          "value": 1.0,
+          "depth": 0.0
+        },
+        {
+          "id": "step-6",
+          "value": 0.3,
+          "depth": 0.0
+        },
+        {
+          "id": "step-7",
+          "value": 0.7,
+          "depth": 0.0
+        },
+        {
+          "id": "step-8",
+          "value": 0.0,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "kind": "gain",
+      "name": "Chop",
+      "x": 380,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "gain-db",
+          "min": -60.0,
+          "max": 0.0,
+          "curve": -0.6,
+          "value": -60.0,
+          "depth": 1.0
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "kind": "filter-svf",
+      "name": "Filter",
+      "x": 700,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "cutoff",
+          "value": 450,
+          "depth": 0.55
+        },
+        {
+          "id": "resonance",
+          "value": 45,
+          "depth": 0.0
+        },
+        {
+          "id": "mode",
+          "value": 0,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 105,
+      "kind": "limiter",
+      "name": "Limiter",
+      "x": 1000,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "ceiling",
+          "value": -1.0,
+          "depth": 0.0
+        },
+        {
+          "id": "release",
+          "value": 80,
+          "depth": 0.0
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "sourceNode": 100,
+      "sourcePort": 1,
+      "destinationNode": 101,
+      "destinationPort": 10
+    },
+    {
+      "sourceNode": 100,
+      "sourcePort": 1,
+      "destinationNode": 102,
+      "destinationPort": 10
+    },
+    {
+      "sourceNode": 101,
+      "sourcePort": 0,
+      "destinationNode": 103,
+      "destinationPort": 1
+    },
+    {
+      "sourceNode": 102,
+      "sourcePort": 0,
+      "destinationNode": 104,
+      "destinationPort": 1
+    },
+    {
+      "sourceNode": 1,
+      "sourcePort": 0,
+      "destinationNode": 103,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 103,
+      "sourcePort": 0,
+      "destinationNode": 104,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 104,
+      "sourcePort": 0,
+      "destinationNode": 105,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 105,
+      "sourcePort": 0,
+      "destinationNode": 2,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 105,
+      "sourcePort": 0,
+      "destinationNode": 2,
+      "destinationPort": 1
+    }
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "name": "Slicer",
+      "members": [
+        100,
+        101,
+        102,
+        103,
+        104,
+        105
+      ],
+      "knobs": [
+        {
+          "node": 100,
+          "parameter": 0
+        },
+        {
+          "node": 104,
+          "parameter": 0
+        },
+        {
+          "node": 104,
+          "parameter": 1
+        },
+        {
+          "node": 101,
+          "parameter": 1
+        }
+      ]
+    }
+  ]
+}

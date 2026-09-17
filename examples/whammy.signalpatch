@@ -1,0 +1,151 @@
+{
+  "schema": 1,
+  "format": "signalpatch",
+  "nodes": [
+    {
+      "id": 1,
+      "kind": "hardware-input",
+      "name": "Hardware Inputs",
+      "x": 60,
+      "y": 200,
+      "parameters": []
+    },
+    {
+      "id": 2,
+      "kind": "hardware-output",
+      "name": "Hardware Outputs",
+      "x": 1000,
+      "y": 200,
+      "parameters": []
+    },
+    {
+      "id": 100,
+      "kind": "macro",
+      "name": "Treadle",
+      "x": 60,
+      "y": 560,
+      "parameters": [
+        {
+          "id": "value",
+          "min": 0.0,
+          "max": 1.0,
+          "curve": 0.0,
+          "value": 0.0,
+          "depth": 0.0
+        },
+        {
+          "id": "slew",
+          "value": 35,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 101,
+      "kind": "pitch-shifter",
+      "name": "Bend",
+      "x": 380,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "pitch",
+          "min": 0.0,
+          "max": 12.0,
+          "curve": 0.0,
+          "value": 0.0,
+          "depth": 1.0
+        },
+        {
+          "id": "window",
+          "value": 38,
+          "depth": 0.0
+        },
+        {
+          "id": "mix",
+          "value": 100,
+          "depth": 0.0
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "kind": "limiter",
+      "name": "Limiter",
+      "x": 700,
+      "y": 200,
+      "parameters": [
+        {
+          "id": "ceiling",
+          "value": -1.0,
+          "depth": 0.0
+        },
+        {
+          "id": "release",
+          "value": 80,
+          "depth": 0.0
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "sourceNode": 1,
+      "sourcePort": 0,
+      "destinationNode": 101,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 100,
+      "sourcePort": 0,
+      "destinationNode": 101,
+      "destinationPort": 1
+    },
+    {
+      "sourceNode": 101,
+      "sourcePort": 0,
+      "destinationNode": 102,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 102,
+      "sourcePort": 0,
+      "destinationNode": 2,
+      "destinationPort": 0
+    },
+    {
+      "sourceNode": 102,
+      "sourcePort": 0,
+      "destinationNode": 2,
+      "destinationPort": 1
+    }
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "name": "Whammy",
+      "members": [
+        100,
+        101,
+        102
+      ],
+      "knobs": [
+        {
+          "node": 100,
+          "parameter": 0
+        },
+        {
+          "node": 101,
+          "parameter": 2
+        },
+        {
+          "node": 101,
+          "parameter": 1
+        },
+        {
+          "node": 100,
+          "parameter": 1
+        }
+      ]
+    }
+  ]
+}

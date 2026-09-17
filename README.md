@@ -45,6 +45,10 @@ like while the sound keeps running. Linux and Windows.
   as a zip with models and impulses. Undo covers every edit. The last
   session comes back on launch, muted until you fade it in.
 
+Five [example patches](examples/) come with it, built after the Whammy,
+Clouds, the Fuzz Factory, the Rainbow Machine and the Slicer (FILE >
+Examples).
+
 <p align="center">
   <img src="docs/assets/board.png" alt="The Board: the same rig as pedals with footswitches and five rig slots" width="49%">
   <img src="docs/assets/tone3000.png" alt="The TONE3000 browser inside the app" width="49%">

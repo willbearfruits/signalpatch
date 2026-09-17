@@ -201,6 +201,7 @@ target_sources(signalpatch_tests PRIVATE
 
 target_compile_features(signalpatch_tests PRIVATE cxx_std_20)
 target_compile_definitions(signalpatch_tests PRIVATE ${SIGNALPATCH_COMMON_DEFINITIONS} ${SIGNALPATCH_NO_CURL})
+target_compile_definitions(signalpatch_tests PRIVATE SIGNALPATCH_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}") # the example patches are loaded by a test
 if(NOT MSVC)
     # The tests replace global new/delete for the allocation trap; GCC cannot
     # see the malloc/free pairing is internally consistent.
@@ -292,6 +293,11 @@ if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
     # The bundled font travels next to the executable (see loadFont in Main.cpp).
     add_custom_command(TARGET signalpatch POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/external/fonts" "$<TARGET_FILE_DIR:signalpatch>/fonts")
+    # So do the example patches (FILE > Examples looks for them there).
+    file(GLOB SIGNALPATCH_EXAMPLE_PATCHES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/*.signalpatch")
+    add_custom_command(TARGET signalpatch POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:signalpatch>/examples"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SIGNALPATCH_EXAMPLE_PATCHES} "$<TARGET_FILE_DIR:signalpatch>/examples")
     set_source_files_properties("${nanovg_SOURCE_DIR}/src/nanovg.c" "${CMAKE_CURRENT_SOURCE_DIR}/external/glad/src/gl.c"
         PROPERTIES COMPILE_OPTIONS "$<IF:$<C_COMPILER_ID:MSVC>,/w,-w>")
     if(SIGNALPATCH_HAS_NAM)
@@ -323,4 +329,5 @@ endif()
 if(TARGET signalpatch)
     install(TARGETS signalpatch RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
     install(DIRECTORY external/fonts/ DESTINATION "${CMAKE_INSTALL_DATADIR}/signalpatch/fonts")
+    install(DIRECTORY examples/ DESTINATION "${CMAKE_INSTALL_DATADIR}/signalpatch/examples" FILES_MATCHING PATTERN "*.signalpatch")
 endif()

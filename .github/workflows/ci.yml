@@ -32,6 +32,7 @@ jobs:
           path: |
             build/signalpatch_artefacts/RelWithDebInfo/SignalPatch
             build/signalpatch_artefacts/RelWithDebInfo/fonts
+            build/signalpatch_artefacts/RelWithDebInfo/examples
           if-no-files-found: error
 
   windows:
@@ -55,4 +56,5 @@ jobs:
           path: |
             build/signalpatch_artefacts/Release/SignalPatch.exe
             build/signalpatch_artefacts/Release/fonts
+            build/signalpatch_artefacts/Release/examples
           if-no-files-found: error
