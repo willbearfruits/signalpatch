@@ -1307,6 +1307,146 @@ void testUndoDeleteBringsBackMidiAndGroups()
     expect (document.getMidiMappings().size() == 1, "and the binding");
 }
 
+void testParameterShapeNarrowsBendsAndSurvives()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    PatchHistory history (document);
+    const auto filter = document.addNode (NodeKind::filter, { 0.0f, 0.0f });
+    auto& cutoff = document.findNode (filter)->processor->getParameter (0);
+    expect (cutoff.hasDefaultShape(), "a fresh knob should cover its whole range");
+    cutoff.setValue (1200.0f);
+
+    // Narrow the travel: the value stays, the ends of the knob are the new limits.
+    const auto before = cutoff.getShape();
+    cutoff.setShape ({ 200.0f, 2000.0f, 0.0f });
+    history.recordParameterShape (filter, 0, before, 1200.0f, cutoff.getShape(), cutoff.getValue());
+    expect (std::abs (cutoff.getValue() - 1200.0f) < 1.0f, "narrowing the travel moved a value that still fits");
+    expect (std::abs (cutoff.valueFromNormalised (0.0f) - 200.0f) < 0.5f, "knob fully down is not the minimum");
+    expect (std::abs (cutoff.valueFromNormalised (1.0f) - 2000.0f) < 1.0f, "knob fully up is not the maximum");
+    cutoff.setValue (9000.0f);
+    expect (std::abs (cutoff.getValue() - 2000.0f) < 1.0f, "a value above the travel should stop at its top");
+    // Modulation is confined to the travel too.
+    cutoff.setValue (1900.0f);
+    cutoff.setModulationDepth (1.0f);
+    cutoff.prepare (sampleRate);
+    expect (cutoff.nextValue (1.0f) <= 2000.5f && cutoff.nextValue (-1.0f) >= 199.5f, "modulation escaped the knob's travel");
+
+    // The curve bends the travel and stays monotonic; its inverse lands on the same knob position.
+    cutoff.setShape ({ 200.0f, 2000.0f, 0.75f });
+    float last = -1.0f;
+    for (int step = 0; step <= 20; ++step)
+    {
+        const auto travel = static_cast<float> (step) / 20.0f;
+        const auto value = cutoff.valueFromNormalised (travel);
+        expect (value >= last, "a curved knob went backwards");
+        expect (std::abs (cutoff.normalisedFromValue (value) - travel) < 2.0e-3f, "curve inverse does not return the knob position");
+        last = value;
+    }
+    const auto straightMiddle = [&] { cutoff.setShape ({ 200.0f, 2000.0f, 0.0f }); return cutoff.valueFromNormalised (0.5f); }();
+    cutoff.setShape ({ 200.0f, 2000.0f, 0.75f });
+    expect (cutoff.valueFromNormalised (0.5f) < straightMiddle, "a positive curve should be finer at the start of the travel");
+
+    // Minimum above maximum turns the knob around.
+    cutoff.setShape ({ 2000.0f, 200.0f, 0.0f });
+    expect (cutoff.valueFromNormalised (0.0f) > cutoff.valueFromNormalised (1.0f), "a reversed travel should run downwards");
+
+    // Saved with the patch, and absent from the JSON while untouched.
+    cutoff.setShape ({ 300.0f, 3000.0f, -0.5f });
+    cutoff.setValue (700.0f);
+    const auto parsed = juce::JSON::parse (juce::JSON::toString (document.toJson(), true));
+    PatchDocument restored;
+    restored.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    expectOk (restored.loadJson (parsed), "patch with a shaped knob did not load");
+    const auto& restoredCutoff = restored.findNode (filter)->processor->getParameter (0);
+    const auto shape = restoredCutoff.getShape();
+    expect (std::abs (shape.minimum - 300.0f) < 0.5f && std::abs (shape.maximum - 3000.0f) < 0.5f && std::abs (shape.curve + 0.5f) < 1.0e-4f,
+            "knob travel and curve did not survive save / load");
+    expect (std::abs (restoredCutoff.getValue() - 700.0f) < 1.0f, "value inside a shaped travel did not survive save / load");
+    expect (restored.findNode (filter)->processor->getParameter (1).hasDefaultShape(), "an untouched knob came back shaped");
+    {
+        bool untouchedWritesShape = false, shapedWritesShape = false;
+        if (const auto* nodes = parsed.getProperty ("nodes", {}).getArray())
+            for (const auto& node : *nodes)
+                if (const auto* parameters = node.getProperty ("parameters", {}).getArray())
+                    for (const auto& saved : *parameters)
+                    {
+                        if (saved.getProperty ("id", {}).toString() == "resonance" && saved.hasProperty ("min"))
+                            untouchedWritesShape = true;
+                        if (saved.getProperty ("id", {}).toString() == "cutoff" && saved.hasProperty ("min") && saved.hasProperty ("curve"))
+                            shapedWritesShape = true;
+                    }
+        expect (shapedWritesShape && ! untouchedWritesShape, "only knobs with an edited travel should write one");
+    }
+
+    // Undo returns both the travel and the value.
+    cutoff.setShape ({ 200.0f, 2000.0f, 0.0f });
+    cutoff.setValue (1200.0f);
+    expect (history.undo() == PatchHistory::Applied::values, "undo of a range edit");
+    expect (cutoff.hasDefaultShape() && std::abs (cutoff.getValue() - 1200.0f) < 1.0f, "undo did not give the knob its whole range back");
+    expect (history.redo() == PatchHistory::Applied::values, "redo of a range edit");
+    expect (std::abs (cutoff.getShape().maximum - 2000.0f) < 0.5f, "redo did not narrow the knob again");
+}
+
+void testModulatedKnobReportsWhereItIs()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    document.prepareAll (sampleRate, blockSize);
+    const auto lfo = document.addNode (NodeKind::lfo, { 0.0f, 0.0f });
+    const auto filter = document.addNode (NodeKind::filter, { 0.0f, 0.0f });
+    document.findNode (lfo)->processor->getParameter (0).setValue (8.0f);
+    auto& cutoff = document.findNode (filter)->processor->getParameter (0);
+    auto& resonance = document.findNode (filter)->processor->getParameter (1);
+    cutoff.setModulationDepth (0.4f);
+    expectOk (document.addConnection ({ PatchDocument::hardwareInputId, 0, filter, 0 }), "input to filter");
+    expectOk (document.addConnection ({ filter, 0, PatchDocument::hardwareOutputId, 0 }), "filter to output");
+    expectOk (document.addConnection ({ lfo, 0, filter, cutoff.inputPortIndex }), "lfo to cutoff");
+    auto compiled = GraphCompiler::compile (document, blockSize);
+    expect (compiled.succeeded(), "modulated filter did not compile");
+
+    std::vector<float> input (blockSize, 0.1f), output (blockSize, 0.0f);
+    const float* inputs[] = { input.data() };
+    float* outputs[] = { output.data() };
+    float lowest = 1.0f, highest = 0.0f;
+    for (int block = 0; block < 400; ++block)
+    {
+        compiled.plan->render (inputs, 1, outputs, 1, 0, blockSize);
+        const auto live = cutoff.getLiveNormalised();
+        expect (live >= 0.0f && live <= 1.0f, "live knob position left 0..1");
+        lowest = juce::jmin (lowest, live);
+        highest = juce::jmax (highest, live);
+    }
+    const auto base = cutoff.getNormalisedValue();
+    expect (highest > base + 0.2f && lowest < base - 0.2f, "a modulated knob should report its swing around the setting");
+    expect (std::abs (resonance.getLiveNormalised() - resonance.getNormalisedValue()) < 1.0e-6f, "a knob with an empty mod socket should sit still");
+
+    // Bypassed: nothing is modulating, the knob rests on its setting.
+    document.findNode (filter)->processor->setBypassed (true);
+    compiled.plan->render (inputs, 1, outputs, 1, 0, blockSize);
+    expect (std::abs (cutoff.getLiveNormalised() - base) < 1.0e-6f, "a bypassed module's knob should rest");
+}
+
+void testUnusedSavedHardwareChannelsDoNotComeBack()
+{
+    // Saved on a device that showed ten inputs (six real, four loopbacks), cabled on input 2 only.
+    PatchDocument source;
+    source.configureHardware (channelNames ("Wide", 10), channelNames ("Output", 2));
+    expectOk (source.addConnection ({ PatchDocument::hardwareInputId, 1, PatchDocument::hardwareOutputId, 0 }), "route on the wide device");
+    const auto parsed = juce::JSON::parse (juce::JSON::toString (source.toJson(), true));
+
+    PatchDocument restored;
+    restored.configureHardware (channelNames ("Six", 6), channelNames ("Output", 2));
+    expectOk (restored.loadJson (parsed), "wide patch on the six-input device");
+    expect (restored.findNode (PatchDocument::hardwareInputId)->processor->getNumOutputPorts() == 6,
+            "saved channels nobody cabled should not come back as placeholders");
+
+    // A smaller device later: only what a cable holds is kept.
+    restored.configureHardware (channelNames ("Mono", 1), channelNames ("Output", 2));
+    expect (restored.findNode (PatchDocument::hardwareInputId)->processor->getNumOutputPorts() == 2,
+            "the cabled channel should stay as a placeholder, the unused ones should go");
+}
+
 void testUndoCoalescesKnobGestures()
 {
     PatchDocument document;
@@ -2468,6 +2608,9 @@ int main()
         { "undo/redo structure round trip", testUndoRedoStructure },
         { "undo delete restores processor and cables", testUndoDeleteRestoresSameProcessorAndCables },
         { "undo coalesces knob gestures", testUndoCoalescesKnobGestures },
+        { "knob travel and curve: narrow, bend, reverse, save, undo", testParameterShapeNarrowsBendsAndSurvives },
+        { "a modulated knob reports where it is", testModulatedKnobReportsWhereItIs },
+        { "unused saved hardware channels do not come back", testUnusedSavedHardwareChannelsDoNotComeBack },
         { "undo of a delete brings back MIDI bindings and groups", testUndoDeleteBringsBackMidiAndGroups },
         { "undo compound gesture moves several modules as one step", testUndoCompoundGestureMovesSeveralModulesAsOneStep },
         { "raw juce convolution sanity", testRawJuceConvolutionSanity },

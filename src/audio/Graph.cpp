@@ -283,6 +283,8 @@ DspParameter::DspParameter (juce::String stableId,
       range (std::move (valueRange)),
       defaultValue (defaultValue)
 {
+    shapeMinimum.store (range.start, std::memory_order_relaxed);
+    shapeMaximum.store (range.end, std::memory_order_relaxed);
     setValue (defaultValue);
     setModulationDepth (defaultModulationDepth);
     smoother.setCurrentAndTargetValue (getNormalisedValue());
@@ -312,20 +314,75 @@ float DspParameter::nextValue (float modulation) noexcept
         smoother.setCurrentAndTargetValue (base);
         smoothed = base;
     }
-    const auto normalised = juce::jlimit (0.0f, 1.0f, smoothed + modulation * depth);
-    return range.convertFrom0to1 (normalised);
+    return valueFromNormalised (smoothed + modulation * depth);
+}
+
+float DspParameter::valueFromNormalised (float normalised) const noexcept
+{
+    auto travel = juce::jlimit (0.0f, 1.0f, normalised);
+    const auto exponent = shapeExponent.load (std::memory_order_relaxed);
+    if (! juce::exactlyEqual (exponent, 1.0f))
+        travel = std::pow (travel, exponent);
+    const auto low = shapeLow.load (std::memory_order_relaxed);
+    const auto high = shapeHigh.load (std::memory_order_relaxed);
+    return range.convertFrom0to1 (juce::jlimit (0.0f, 1.0f, low + travel * (high - low)));
+}
+
+float DspParameter::normalisedFromValue (float value) const noexcept
+{
+    const auto position = range.convertTo0to1 (juce::jlimit (range.start, range.end, value));
+    const auto low = shapeLow.load (std::memory_order_relaxed);
+    const auto span = shapeHigh.load (std::memory_order_relaxed) - low;
+    if (std::abs (span) < 1.0e-6f)
+        return 0.0f;
+    auto travel = juce::jlimit (0.0f, 1.0f, (position - low) / span);
+    const auto exponent = shapeExponent.load (std::memory_order_relaxed);
+    if (! juce::exactlyEqual (exponent, 1.0f))
+        travel = std::pow (travel, 1.0f / exponent);
+    return travel;
+}
+
+void DspParameter::setShape (ParameterShape shape) noexcept
+{
+    if (! std::isfinite (shape.minimum) || ! std::isfinite (shape.maximum) || ! std::isfinite (shape.curve))
+        return;
+    const auto value = getValue();
+    shape.minimum = juce::jlimit (range.start, range.end, shape.minimum);
+    shape.maximum = juce::jlimit (range.start, range.end, shape.maximum);
+    shape.curve = juce::jlimit (-1.0f, 1.0f, shape.curve);
+    if (juce::exactlyEqual (shape.minimum, shape.maximum)) // a knob with no travel is not a knob
+        shape = { range.start, range.end, shape.curve };
+    shapeMinimum.store (shape.minimum, std::memory_order_relaxed);
+    shapeMaximum.store (shape.maximum, std::memory_order_relaxed);
+    shapeCurve.store (shape.curve, std::memory_order_relaxed);
+    shapeLow.store (range.convertTo0to1 (shape.minimum), std::memory_order_relaxed);
+    shapeHigh.store (range.convertTo0to1 (shape.maximum), std::memory_order_relaxed);
+    shapeExponent.store (juce::exactlyEqual (shape.curve, 0.0f) ? 1.0f : std::pow (4.0f, shape.curve), std::memory_order_relaxed);
+    setValue (value);
+}
+
+ParameterShape DspParameter::getShape() const noexcept
+{
+    return { shapeMinimum.load (std::memory_order_relaxed), shapeMaximum.load (std::memory_order_relaxed),
+             shapeCurve.load (std::memory_order_relaxed) };
+}
+
+float DspParameter::getLiveNormalised() const noexcept
+{
+    const auto live = getNormalisedValue() + getLiveModulation() * getModulationDepth();
+    return std::isfinite (live) ? juce::jlimit (0.0f, 1.0f, live) : getNormalisedValue();
 }
 
 void DspParameter::setValue (float value) noexcept
 {
     if (! std::isfinite (value))
         return;
-    setNormalisedValue (range.convertTo0to1 (range.snapToLegalValue (value)));
+    setNormalisedValue (normalisedFromValue (range.snapToLegalValue (value)));
 }
 
 float DspParameter::getValue() const noexcept
 {
-    return range.convertFrom0to1 (getNormalisedValue());
+    return valueFromNormalised (getNormalisedValue());
 }
 
 void DspParameter::setNormalisedValue (float value) noexcept
@@ -403,7 +460,25 @@ void DspNode::render (const juce::AudioBuffer<float>& inputs,
                       juce::AudioBuffer<float>& outputs,
                       int numSamples) noexcept
 {
-    if (isBypassed())
+    // Leave each mod socket's level where the UI can see it: a modulated knob
+    // is drawn where it really is, not where it was set.
+    const bool bypassedNow = isBypassed();
+    for (auto& parameter : parameters)
+    {
+        const auto port = parameter->inputPortIndex;
+        if (port < 0)
+            continue;
+        float level = 0.0f;
+        if (! bypassedNow && numSamples > 0 && port < inputs.getNumChannels() && isInputConnected (port))
+        {
+            level = inputs.getSample (port, 0);
+            level = std::isfinite (level) ? juce::jlimit (-1.0f, 1.0f, level) : 0.0f;
+        }
+        if (! juce::exactlyEqual (level, parameter->getLiveModulation()))
+            parameter->setLiveModulation (level);
+    }
+
+    if (bypassedNow)
     {
         // True pedal bypass: audio inputs pass to audio outputs in order
         // (In L -> Out L, In R -> Out R); a node with one audio input feeds it
@@ -540,7 +615,7 @@ float DspNode::parameterTarget (int parameterIndex, const juce::AudioBuffer<floa
     auto depth = parameter.getModulationDepth();
     if (! std::isfinite (depth))
         depth = 0.0f;
-    return parameter.range.convertFrom0to1 (juce::jlimit (0.0f, 1.0f, base + juce::jlimit (-1.0f, 1.0f, modulation) * depth));
+    return parameter.valueFromNormalised (base + juce::jlimit (-1.0f, 1.0f, modulation) * depth);
 }
 
 float DspNode::parameterValue (int parameterIndex,
@@ -586,8 +661,17 @@ void PatchDocument::configureHardware (const juce::StringArray& rawInputNames,
 
     if (hardwareLayoutConfigured)
     {
+        // Channels the new device lacks stay as placeholders while a cable holds them.
+        int highestCabledInput = -1, highestCabledOutput = -1;
+        for (const auto& connection : connections)
+        {
+            if (connection.sourceNode == hardwareInputId)
+                highestCabledInput = juce::jmax (highestCabledInput, connection.sourcePort);
+            if (connection.destinationNode == hardwareOutputId)
+                highestCabledOutput = juce::jmax (highestCabledOutput, connection.destinationPort);
+        }
         if (const auto* previous = findNode (hardwareInputId))
-            for (int channel = inputNames.size(); channel < previous->processor->getNumOutputPorts(); ++channel)
+            for (int channel = inputNames.size(); channel < juce::jmin (highestCabledInput + 1, previous->processor->getNumOutputPorts()); ++channel)
             {
                 auto name = previous->processor->getOutputPort (channel).name;
                 if (! name.containsIgnoreCase ("missing"))
@@ -596,7 +680,7 @@ void PatchDocument::configureHardware (const juce::StringArray& rawInputNames,
                 inputCallbackChannels.push_back (-1);
             }
         if (const auto* previous = findNode (hardwareOutputId))
-            for (int channel = outputNames.size(); channel < previous->processor->getNumInputPorts(); ++channel)
+            for (int channel = outputNames.size(); channel < juce::jmin (highestCabledOutput + 1, previous->processor->getNumInputPorts()); ++channel)
             {
                 auto name = previous->processor->getInputPort (channel).name;
                 if (! name.containsIgnoreCase ("missing"))
@@ -896,6 +980,13 @@ juce::var PatchDocument::toJson() const
             parameterObject->setProperty ("id", parameter.id);
             parameterObject->setProperty ("value", parameter.getValue());
             parameterObject->setProperty ("depth", parameter.getModulationDepth());
+            if (! parameter.hasDefaultShape())
+            {
+                const auto shape = parameter.getShape();
+                parameterObject->setProperty ("min", shape.minimum);
+                parameterObject->setProperty ("max", shape.maximum);
+                parameterObject->setProperty ("curve", shape.curve);
+            }
             parameterValues.add (juce::var (parameterObject.release()));
         }
         nodeObject->setProperty ("parameters", parameterValues);
@@ -924,6 +1015,22 @@ juce::var PatchDocument::toJson() const
     if (! midiMappings.empty())
         root->setProperty ("midi", midiMappingsToJson (midiMappings));
     return juce::var (root.release());
+}
+
+ParameterShape parameterShapeFromJson (const DspParameter& parameter, const juce::DynamicObject& saved)
+{
+    auto shape = parameter.defaultShape();
+    if (saved.hasProperty ("min")) shape.minimum = static_cast<float> (saved.getProperty ("min"));
+    if (saved.hasProperty ("max")) shape.maximum = static_cast<float> (saved.getProperty ("max"));
+    if (saved.hasProperty ("curve")) shape.curve = static_cast<float> (saved.getProperty ("curve"));
+    return shape;
+}
+
+static void applySavedParameter (DspParameter& parameter, const juce::DynamicObject& saved)
+{
+    parameter.setShape (parameterShapeFromJson (parameter, saved)); // before the value: the value lands inside it
+    parameter.setValue (static_cast<float> (saved.getProperty ("value")));
+    parameter.setModulationDepth (static_cast<float> (saved.getProperty ("depth")));
 }
 
 juce::Result PatchDocument::mergeJson (const juce::var& value, juce::Point<float> offset,
@@ -971,8 +1078,7 @@ juce::Result PatchDocument::mergeJson (const juce::var& value, juce::Point<float
                             auto& parameter = model->processor->getParameter (index);
                             if (parameter.id != parameterId)
                                 continue;
-                            parameter.setValue (static_cast<float> (parameterObject->getProperty ("value")));
-                            parameter.setModulationDepth (static_cast<float> (parameterObject->getProperty ("depth")));
+                            applySavedParameter (parameter, *parameterObject);
                         }
                     }
         }
@@ -1017,6 +1123,19 @@ juce::Result PatchDocument::loadJson (const juce::var& value)
 
     clearUserPatch();
 
+    // A saved hardware channel this device does not have is kept as a
+    // placeholder only while a cable needs it; unused ones simply go.
+    int highestCabledInput = -1, highestCabledOutput = -1;
+    if (const auto* savedCables = root->getProperty ("connections").getArray())
+        for (const auto& savedCable : *savedCables)
+            if (const auto* cable = savedCable.getDynamicObject())
+            {
+                if (static_cast<juce::int64> (cable->getProperty ("sourceNode")) == hardwareInputId)
+                    highestCabledInput = juce::jmax (highestCabledInput, static_cast<int> (cable->getProperty ("sourcePort")));
+                if (static_cast<juce::int64> (cable->getProperty ("destinationNode")) == hardwareOutputId)
+                    highestCabledOutput = juce::jmax (highestCabledOutput, static_cast<int> (cable->getProperty ("destinationPort")));
+            }
+
     juce::StringArray retainedInputNames;
     juce::StringArray retainedOutputNames;
     std::vector<int> retainedInputCallbacks;
@@ -1057,6 +1176,9 @@ juce::Result PatchDocument::loadJson (const juce::var& value)
                 if (portObject == nullptr)
                     continue;
                 const auto physicalIndex = static_cast<int> (portObject->getProperty ("index"));
+                if (physicalIndex >= names.size()
+                    && physicalIndex > (*kind == NodeKind::hardwareInput ? highestCabledInput : highestCabledOutput))
+                    continue;
                 while (names.size() <= physicalIndex)
                 {
                     const auto nextIndex = names.size();
@@ -1130,8 +1252,7 @@ juce::Result PatchDocument::loadJson (const juce::var& value)
                         auto& parameter = model->processor->getParameter (parameterIndex);
                         if (parameter.id == parameterId)
                         {
-                            parameter.setValue (static_cast<float> (parameterObject->getProperty ("value")));
-                            parameter.setModulationDepth (static_cast<float> (parameterObject->getProperty ("depth")));
+                            applySavedParameter (parameter, *parameterObject);
                             break;
                         }
                     }

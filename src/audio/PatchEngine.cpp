@@ -35,8 +35,9 @@ juce::Result PatchEngine::initialise()
     deviceManager.addMidiInputDeviceCallback ({}, this); // every enabled input
     refreshMidiInputs();
     auto deviceResult = openDefaultDevice();
-    if (! restoredAudioDeviceState)
-        configureAllAvailableChannels();
+    // A first launch also asks for 48 kHz / 64 samples; a remembered device keeps
+    // its rate and buffer but still gets every real channel (and no monitor loopbacks).
+    configureAllAvailableChannels (! restoredAudioDeviceState);
     rebuildForCurrentDevice (false);
 
     if (document.getConnections().empty())
@@ -57,6 +58,7 @@ juce::Result PatchEngine::initialise()
                 bundle::loadAudioContent (document, parsed, autosave.getParentDirectory());
                 setPanicMuted (true);
                 restored = compileAndPublish (false, false);
+                sessionRestored = restored;
                 if (restored)
                     graphMessage = "Restored last session muted - press MUTED to fade in";
             }
@@ -104,7 +106,7 @@ void PatchEngine::shutdown()
     }
     callbackRunning.store (false, std::memory_order_release);
 
-    writeAutosaveIfDue();
+    writeAutosaveIfDue (true); // quitting right after an edit must not lose it
     saveAudioDeviceState();
 
     delete pendingPlan.exchange (nullptr, std::memory_order_acq_rel);
@@ -190,7 +192,31 @@ void PatchEngine::applyPreferredCaptureDevice()
     }
 }
 
-void PatchEngine::configureAllAvailableChannels()
+// PipeWire's JACK layer files an interface's output monitors under the same
+// client as its capture ports, so a 6-in / 4-out box turns up with ten
+// "inputs", four of them the rig's own output. They are not inputs: they stay
+// off and the Hardware Inputs module never shows them.
+static bool isLoopbackChannel (const juce::String& channelName)
+{
+    return channelName.startsWithIgnoreCase ("monitor");
+}
+
+// "capture_AUX0" / "playback_FL" are PipeWire's words; on the module the
+// channel reads as the interface's own numbering with the raw tag after it.
+static juce::String channelLabel (const juce::String& channelName, int number, bool isInput)
+{
+    for (const auto* prefix : { "capture_", "playback_" })
+        if (channelName.startsWithIgnoreCase (prefix))
+            return (isInput ? "In " : "Out ") + juce::String (number) + "  " + channelName.substring (static_cast<int> (std::strlen (prefix)));
+    return channelName;
+}
+
+void PatchEngine::useEveryDeviceChannel()
+{
+    configureAllAvailableChannels (false);
+}
+
+void PatchEngine::configureAllAvailableChannels (bool preferLowLatency)
 {
     auto* device = deviceManager.getCurrentAudioDevice();
     if (device == nullptr)
@@ -203,17 +229,23 @@ void PatchEngine::configureAllAvailableChannels()
     setup.useDefaultOutputChannels = false;
     setup.inputChannels.clear();
     setup.outputChannels.clear();
-    if (! inputNames.isEmpty())
-        setup.inputChannels.setRange (0, inputNames.size(), true);
+    for (int channel = 0; channel < inputNames.size(); ++channel)
+        setup.inputChannels.setBit (channel, ! isLoopbackChannel (inputNames[channel]));
     if (! outputNames.isEmpty())
         setup.outputChannels.setRange (0, outputNames.size(), true);
 
-    const auto rates = device->getAvailableSampleRates();
-    if (rates.contains (48000.0))
-        setup.sampleRate = 48000.0;
-    const auto bufferSizes = device->getAvailableBufferSizes();
-    if (bufferSizes.contains (64))
-        setup.bufferSize = 64;
+    if (preferLowLatency)
+    {
+        const auto rates = device->getAvailableSampleRates();
+        if (rates.contains (48000.0))
+            setup.sampleRate = 48000.0;
+        const auto bufferSizes = device->getAvailableBufferSizes();
+        if (bufferSizes.contains (64))
+            setup.bufferSize = 64;
+    }
+    if (setup.inputChannels == device->getActiveInputChannels() && setup.outputChannels == device->getActiveOutputChannels()
+        && ! preferLowLatency)
+        return; // already so
 
     const auto error = deviceManager.setAudioDeviceSetup (setup, true);
     if (error.isNotEmpty())
@@ -241,12 +273,15 @@ void PatchEngine::rebuildForCurrentDevice (bool markDeviceReady)
         const auto activeOutputs = device->getActiveOutputChannels();
         for (int channel = 0; channel < allInputNames.size(); ++channel)
         {
-            inputNames.add (allInputNames[channel]);
-            inputCallbackChannels.push_back (activeInputs[channel] ? activeInputCount++ : -1);
+            const auto callbackChannel = activeInputs[channel] ? activeInputCount++ : -1;
+            if (isLoopbackChannel (allInputNames[channel]))
+                continue;
+            inputNames.add (channelLabel (allInputNames[channel], inputNames.size() + 1, true));
+            inputCallbackChannels.push_back (callbackChannel);
         }
         for (int channel = 0; channel < allOutputNames.size(); ++channel)
         {
-            outputNames.add (allOutputNames[channel]);
+            outputNames.add (channelLabel (allOutputNames[channel], channel + 1, false));
             outputCallbackChannels.push_back (activeOutputs[channel] ? activeOutputCount++ : -1);
         }
 
@@ -409,6 +444,20 @@ void PatchEngine::setModulationDepth (NodeId id, int parameterIndex, float depth
             markDocumentEdited();
         }
     }
+}
+
+void PatchEngine::setParameterShape (NodeId id, int parameterIndex, ParameterShape shape)
+{
+    if (auto* node = document.findNode (id))
+        if (juce::isPositiveAndBelow (parameterIndex, node->processor->getNumParameters()))
+        {
+            auto& parameter = node->processor->getParameter (parameterIndex);
+            const auto shapeBefore = parameter.getShape();
+            const auto valueBefore = parameter.getValue();
+            parameter.setShape (shape);
+            history.recordParameterShape (id, parameterIndex, shapeBefore, valueBefore, parameter.getShape(), parameter.getValue());
+            markDocumentEdited();
+        }
 }
 
 bool PatchEngine::undo()
@@ -836,7 +885,7 @@ void PatchEngine::applyMidiMapping (const MidiMapping& mapping, const juce::Midi
                 parameter.setNormalisedValue (juce::jlimit (0.0f, 1.0f, parameter.getNormalisedValue() + step));
             }
             else
-                parameter.setValue (parameter.range.convertFrom0to1 (mapping.normalised (message.getControllerValue())));
+                parameter.setValue (parameter.valueFromNormalised (mapping.normalised (message.getControllerValue())));
             markDocumentEdited();
             if (onParameterChangedByMidi)
                 onParameterChangedByMidi (mapping.node);
@@ -929,6 +978,7 @@ NodeId PatchEngine::duplicateNode (NodeId id)
     {
         const auto& from = source->processor->getParameter (index);
         auto& to = copy->processor->getParameter (index);
+        to.setShape (from.getShape());
         to.setValue (from.getValue());
         to.setModulationDepth (from.getModulationDepth());
     }
@@ -1256,11 +1306,11 @@ juce::String PatchEngine::currentDeviceSignature()
          + "|" + device->getActiveOutputChannels().toString (2);
 }
 
-void PatchEngine::writeAutosaveIfDue()
+void PatchEngine::writeAutosaveIfDue (bool evenIfJustEdited)
 {
     if (! documentDirty)
         return;
-    if (juce::Time::currentTimeMillis() - lastDocumentChangeMs < 1500)
+    if (! evenIfJustEdited && juce::Time::currentTimeMillis() - lastDocumentChangeMs < 1500)
         return;
 
     const auto file = autosaveFile();

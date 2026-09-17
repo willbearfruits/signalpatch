@@ -74,6 +74,9 @@ public:
     [[nodiscard]] juce::AudioDeviceManager& getDeviceManager() noexcept { return deviceManager; }
     [[nodiscard]] const PatchDocument& getDocument() const noexcept { return document; }
     [[nodiscard]] EngineStatus getStatus() const;
+    /** After the user picks a device: switch on every channel it really has, so the
+        Hardware Inputs / Outputs modules mirror the interface. */
+    void useEveryDeviceChannel();
 
     NodeId addNode (NodeKind kind, juce::Point<float> position);
     bool removeNode (NodeId id);
@@ -82,6 +85,8 @@ public:
     void moveNode (NodeId id, juce::Point<float> position);
     void setParameter (NodeId id, int parameterIndex, float value);
     void setModulationDepth (NodeId id, int parameterIndex, float depth);
+    /** The inspector: a knob's travel (minimum..maximum in real units) and curve. Undoable. */
+    void setParameterShape (NodeId id, int parameterIndex, ParameterShape shape);
     void resetNodeSafety (NodeId id);
     void setNodeBypassed (NodeId id, bool bypassed);
     bool sendNodeCommand (NodeId id, const juce::String& command);
@@ -122,6 +127,10 @@ public:
     void newPatch();
     /** Edits since the last save/load/new (the autosave keeps its own flag). */
     [[nodiscard]] bool hasUnsavedChanges() const noexcept { return modifiedSinceSave; }
+    /** A restored session that had unsaved edits when the app last closed. */
+    void markUnsavedChanges() noexcept { modifiedSinceSave = true; }
+    /** Whether launch brought the last session back from the autosave (rather than a fresh default rig). */
+    [[nodiscard]] bool restoredLastSession() const noexcept { return sessionRestored; }
 
     juce::Result renameNode (NodeId id, const juce::String& newName);
     /** Pedalboard placement; nullopt returns the module to the auto layout. */
@@ -153,7 +162,7 @@ private:
 
     juce::Result openDefaultDevice();
     void applyPreferredCaptureDevice();
-    void configureAllAvailableChannels();
+    void configureAllAvailableChannels (bool preferLowLatency);
     void rebuildForCurrentDevice (bool markDeviceReady);
     bool compileAndPublish (bool markDeviceReady, bool markDirty = true);
     void publishPlan (std::unique_ptr<RenderPlan> plan) noexcept;
@@ -164,7 +173,7 @@ private:
     void handleMidiOnMessageThread (const juce::MidiMessage& message);
     void refreshMidiInputs();
     void applyMidiMapping (const MidiMapping& mapping, const juce::MidiMessage& message);
-    void writeAutosaveIfDue();
+    void writeAutosaveIfDue (bool evenIfJustEdited = false);
     juce::File autosaveFile() const;
     juce::File audioStateFile() const;
     void saveAudioDeviceState();
@@ -198,6 +207,7 @@ private:
     juce::String deviceError;
     bool initialised = false;
     bool modifiedSinceSave = false;
+    bool sessionRestored = false;
     std::unordered_map<NodeId, juce::uint32> savedAudioVersions;    // per explicit save target
     std::unordered_map<NodeId, juce::uint32> autosavedAudioVersions; // per autosave
     juce::File savedAudioTarget;

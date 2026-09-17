@@ -60,6 +60,24 @@ namespace palette
     inline const NVGcolor selection  = rgb (0xfff0d67a);
 } // namespace palette
 
+/** A parameter value the way the plates print it ("1.20 kHz", "35.0 ms"). */
+inline juce::String formatParameterValue (const DspParameter& parameter, float value)
+{
+    const auto& unit = parameter.unit;
+    if (unit == "Hz")
+        return value >= 1000.0f ? juce::String (value / 1000.0f, 2) + " kHz"
+                                : juce::String (value, value < 10.0f ? 2 : 0) + " Hz";
+    if (unit == "ms")
+        return juce::String (value, value >= 100.0f ? 0 : 1) + " ms";
+    if (unit == "dB")
+        return juce::String (value, 1) + " dB";
+    if (unit == "%")
+        return juce::String (value, 1) + "%";
+    if (unit == ":1")
+        return juce::String (value, 1) + ":1";
+    return juce::String (value, 2);
+}
+
 struct ModuleEntry
 {
     NodeKind kind;

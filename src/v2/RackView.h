@@ -3,6 +3,7 @@
 #include "../audio/PatchEngine.h"
 #include "Menu.h"
 #include "ToneBrowser.h"
+#include "Inspector.h"
 
 #include <nanovg.h>
 
@@ -43,12 +44,22 @@ public:
     void setUiScale (float scale);
     [[nodiscard]] float getUiScale() const noexcept { return uiScale; }
     void loadPatchFromCommandLine (const juce::File& file) { openPatchFile (file); }
-    void unmuteAtStart() { engine.setPanicMuted (false); dirty = true; }
-    /** --board: open on the pedalboard instead of the rack. */
-    void showBoard() { setMode (Mode::board); }
+    /** Launch: the view the last session closed with (rack or board, camera, slot,
+        the open file's name, mute when "start muted" is off). patchGiven = a patch
+        came on the command line, so only the view mode is taken. */
+    void restoreSession (bool patchGiven, bool forceBoard, bool forceUnmute);
+    /** The window size the last session closed with (physical pixels), or 0 x 0. */
+    [[nodiscard]] juce::Point<int> savedWindowSize() const
+    {
+        return settings != nullptr ? juce::Point<int> (settings->getIntValue ("session.windowW", 0), settings->getIntValue ("session.windowH", 0))
+                                   : juce::Point<int>();
+    }
+    /** Quit (and every few seconds when something moved): remember the view. */
+    void saveSession();
     /** Close request from the window or Ctrl+Q: asks about unsaved changes first. */
     void requestQuit();
     void focusLost();
+    void windowResized() noexcept { dirty = true; }
     /** Touch: fat hit targets, tap-to-connect, long-press menus, on-screen zoom buttons. */
     void setTouchMode (bool touch);
     [[nodiscard]] bool isTouchMode() const noexcept { return touchMode; }
@@ -129,6 +140,10 @@ private:
     void drawHud (int width, int height, double now);
     void drawKnob (juce::Point<float> centre, float radius, float normalised, NVGcolor accent,
                    const juce::String& label, const juce::String& value);
+    /** Over a knob whose mod socket is cabled: the sweep the modulation can reach, and the knob where it is right now. */
+    void drawKnobModulation (juce::Point<float> centre, float radius, const DspParameter& parameter, NVGcolor accent);
+    [[nodiscard]] bool isKnobModulated (NodeId id, int parameterIndex) const noexcept;
+    std::vector<std::pair<NodeId, int>> modulatedKnobs; // sorted; rebuilt with the layouts
     void bezier (juce::Point<float> a, juce::Point<float> b, juce::Point<float>& c1, juce::Point<float>& c2) const noexcept;
 
     void deleteSelection();
@@ -159,6 +174,8 @@ private:
     TextPrompt prompt;
     FileBrowser browser;
     ToneBrowser toneBrowser;
+    Inspector inspector;
+    void toggleInspector();
     void openToneBrowser (NodeId id, bool impulses, bool slotB);
     // A whole patch was replaced (open, new, a slot with other modules): ids now
     // name different modules, so every drag, overlay, pending learn and glide
@@ -188,6 +205,23 @@ private:
     /** Merges one key into a node's extra state if the node is still the kind the caller meant. */
     bool applyExtraKey (NodeId id, int epoch, std::initializer_list<NodeKind> kinds, const char* key, const juce::String& value);
     juce::File currentFile;
+    // The camera comes back as "this point of the patch in the middle of the view",
+    // applied on the first frame, when the real window size is known.
+    struct SessionCamera
+    {
+        double rackX = 0.0, rackY = 0.0, rackZoom = 0.0;   // zoom 0 = none saved
+        double boardX = 0.0, boardY = 0.0, boardZoom = 0.0;
+    };
+    std::optional<SessionCamera> pendingCamera;
+    // A tiling desktop sizes the window a few times while it maps: the view is
+    // placed again for each size during the first moments, then left alone.
+    double cameraDeadline = 0.0;
+    int cameraAppliedW = 0, cameraAppliedH = 0;
+    void applyPendingCamera (double now);
+    [[nodiscard]] juce::String sessionSignature() const;
+    juce::String savedSessionSignature;
+    double lastSessionCheck = 0.0;
+    bool startMuted = true;
     int controllerSlotSent = -2;
     juce::String controllerRigSent;
     int windowW = 1600, windowH = 1000;

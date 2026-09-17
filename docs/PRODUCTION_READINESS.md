@@ -129,8 +129,8 @@ next swap; feedback-guard delay/reset semantics are pinned by tests.
 | Stress: rapid edits/recompiles | Partial — "recompile churn keeps rendering" test (25 add/connect/compile/remove rounds with parameter bursts); live UI-stall stress not automated |
 | Adversarial signals (NaN/Inf/full-scale/subnormal) | Partial — guard containment + all-kinds sweep tested; per-node NaN injection only for delay/guard |
 | Callback duration measurement | **Closed** — worst-case callback ratio latched in the callback, displayed as "DSP x% (pk y%)" with slow decay |
-| ASan/UBSan runs | **Closed** — full test suite passes under `-fsanitize=address,undefined -fno-sanitize-recover=all` (`build-asan/`; last run 2026-09-15 after the pass-3 follow-up, 46 tests, clean) |
-| TSan run | **Closed** for the test suite — `build-tsan/` (`-fsanitize=thread`, headless modules) runs all 46 tests with zero reports (2026-09-15, after the pass-3 follow-up). The live app (audio callback vs. message thread under a real device) is still not TSan-instrumented. |
+| ASan/UBSan runs | **Closed** — full test suite passes under `-fsanitize=address,undefined -fno-sanitize-recover=all` (`build-asan/`; last run 2026-09-17 with the inspector / live-modulation / session work, 49 tests, clean) |
+| TSan run | **Closed** for the test suite — `build-tsan/` (`-fsanitize=thread`, headless modules) runs all 49 tests with zero reports (2026-09-17, with the inspector / live-modulation work: the per-block `liveModulation` and shape atomics included). The live app (audio callback vs. message thread under a real device) is still not TSan-instrumented. |
 
 ## NAM status vs. NAM_ROADMAP.md
 

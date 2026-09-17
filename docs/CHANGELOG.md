@@ -3,6 +3,36 @@
 Newest first. Versions are git tags; "Unreleased" is what `main` carries
 beyond the last tag.
 
+## Unreleased
+
+- **Inspector** (`I`, or "Inspector..." in a module's menu, or "Range, curve
+  and mod depth..." on a knob): a panel docked on the right that lists the
+  selected module's knobs with the exact value, the **minimum and maximum
+  the knob travels between** (real units; minimum above maximum reverses
+  it), a **curve** for that travel (finer at the bottom or at the top) and
+  the mod socket's depth. Drag a field, click it to type, right-click (hold,
+  on a touch screen) to reset. Saved with the patch and the rig slots,
+  undoable, and everything that turns the knob respects it: the mouse, a
+  mapped MIDI CC or expression pedal, and modulation, which now stays
+  inside the travel.
+- **Modulated knobs move.** A knob with a cable in its mod socket is drawn
+  where it really is, with a ring for the sweep the modulation can reach and
+  a notch where the knob is set (rack and Board).
+- **Hardware Inputs mirrors the interface.** PipeWire files an interface's
+  output monitors among its capture ports, so a 6-in box showed ten inputs,
+  four of them the rig's own output; those loopbacks are left off and never
+  shown. Picking a device in AUDIO switches on every channel it has (it used
+  to enable two), channels read "In 1  AUX0" rather than "capture_AUX0", and
+  a saved channel the device lacks is kept as a placeholder only while a
+  cable uses it.
+- **The session comes back as it was**: rack or Board, the camera, the
+  active slot, the open patch's name and its unsaved mark, the palette, the
+  window size (where the desktop lets a window choose). An edit made in the
+  last second before quitting is no longer lost. FILE > "Start muted" can be
+  switched off so a rig that was sounding comes back sounding (muted stays
+  the default). On Linux the UI settings moved from `~/SignalPatch/` to
+  `~/.config/SignalPatch/` (migrated on first launch).
+
 ## v0.3.2 — 2026-09-16
 
 - **Touch mode** for handhelds (auto on a small high-DPI screen, `--touch` /

@@ -119,6 +119,24 @@ private:
     bool wasAudible = false;
 };
 
+/** The inspector's per-knob shape: the knob's travel covers minimum..maximum
+    (real units inside the parameter's range; minimum above maximum turns the
+    knob around) and is bent by curve (-1..1; 0 straight, above 0 finer at the
+    start of the travel, below 0 finer at the end). */
+struct ParameterShape
+{
+    float minimum = 0.0f, maximum = 1.0f, curve = 0.0f;
+    [[nodiscard]] bool operator== (const ParameterShape& other) const noexcept
+    {
+        return juce::exactlyEqual (minimum, other.minimum) && juce::exactlyEqual (maximum, other.maximum) && juce::exactlyEqual (curve, other.curve);
+    }
+    [[nodiscard]] bool operator!= (const ParameterShape& other) const noexcept { return ! (*this == other); }
+};
+
+class DspParameter;
+/** A saved parameter object's "min" / "max" / "curve", or the parameter's full range where they are absent. */
+ParameterShape parameterShapeFromJson (const DspParameter& parameter, const juce::DynamicObject& saved);
+
 class DspParameter
 {
 public:
@@ -140,6 +158,22 @@ public:
     void setModulationDepth (float value) noexcept;
     [[nodiscard]] float getModulationDepth() const noexcept;
 
+    /** Knob travel (0..1) to real units and back, through the shape. Everything
+        outside the parameter converts with these, never with range directly. */
+    [[nodiscard]] float valueFromNormalised (float normalised) const noexcept;
+    [[nodiscard]] float normalisedFromValue (float value) const noexcept;
+    /** Message thread. The current value stays where it is when the new travel still reaches it. */
+    void setShape (ParameterShape shape) noexcept;
+    [[nodiscard]] ParameterShape getShape() const noexcept;
+    [[nodiscard]] ParameterShape defaultShape() const noexcept { return { range.start, range.end, 0.0f }; }
+    [[nodiscard]] bool hasDefaultShape() const noexcept { return getShape() == defaultShape(); }
+
+    /** Where the knob really is right now: its setting plus whatever the mod
+        socket adds (the audio thread leaves the socket's level once per block). */
+    void setLiveModulation (float modulation) noexcept { liveModulation.store (modulation, std::memory_order_relaxed); }
+    [[nodiscard]] float getLiveModulation() const noexcept { return liveModulation.load (std::memory_order_relaxed); }
+    [[nodiscard]] float getLiveNormalised() const noexcept;
+
     const juce::String id;
     const juce::String name;
     const juce::String unit;
@@ -150,6 +184,10 @@ public:
 private:
     std::atomic<float> baseNormalised { 0.0f };
     std::atomic<float> modulationDepth { 0.5f };
+    std::atomic<float> liveModulation { 0.0f };
+    // The shape, as the callback needs it: the travel's ends as positions in the range, and the exponent.
+    std::atomic<float> shapeLow { 0.0f }, shapeHigh { 1.0f }, shapeExponent { 1.0f };
+    std::atomic<float> shapeMinimum { 0.0f }, shapeMaximum { 1.0f }, shapeCurve { 0.0f }; // as the user typed them
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> smoother;
 };
 

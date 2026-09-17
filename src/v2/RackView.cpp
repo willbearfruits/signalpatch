@@ -46,20 +46,7 @@ namespace
 
     juce::String formatValue (const DspParameter& parameter)
     {
-        const auto value = parameter.getValue();
-        const auto& unit = parameter.unit;
-        if (unit == "Hz")
-            return value >= 1000.0f ? juce::String (value / 1000.0f, 2) + " kHz"
-                                    : juce::String (value, value < 10.0f ? 2 : 0) + " Hz";
-        if (unit == "ms")
-            return juce::String (value, value >= 100.0f ? 0 : 1) + " ms";
-        if (unit == "dB")
-            return juce::String (value, 1) + " dB";
-        if (unit == "%")
-            return juce::String (value, 1) + "%";
-        if (unit == ":1")
-            return juce::String (value, 1) + ":1";
-        return juce::String (value, 2);
+        return formatParameterValue (parameter, parameter.getValue());
     }
 
     juce::Point<float> cubicPoint (juce::Point<float> p0, juce::Point<float> p1,
@@ -71,21 +58,43 @@ namespace
 } // namespace
 
 RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
-    : engine (engineToUse), vg (context), font (fontId), menu (context, fontId), prompt (context, fontId), browser (context, fontId), toneBrowser (context, fontId)
+    : engine (engineToUse), vg (context), font (fontId), menu (context, fontId), prompt (context, fontId), browser (context, fontId), toneBrowser (context, fontId), inspector (context, fontId, engineToUse)
 {
     engine.addChangeListener (this);
+    inspector.askText = [this] (const juce::String& title, const juce::String& initial, std::function<void (const juce::String&)> done)
+    {
+        prompt.open (title, initial, std::move (done));
+        dirty = true;
+    };
+    inspector.changed = [this] (NodeId id) { invalidatePlate (id); dirty = true; };
     {
         juce::PropertiesFile::Options options;
         options.applicationName = "SignalPatch";
         options.filenameSuffix = "settings";
         options.folderName = "SignalPatch";
         options.osxLibrarySubFolder = "Application Support";
+       #if JUCE_LINUX || JUCE_BSD
+        // JUCE would put this in ~/SignalPatch; it belongs with the rest of the app's state.
+        options.folderName = ".config/SignalPatch";
+        {
+            const auto oldFolder = juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile ("SignalPatch");
+            const auto oldFile = oldFolder.getChildFile ("SignalPatch.settings");
+            const auto newFile = options.getDefaultFile();
+            if (oldFile.existsAsFile() && ! newFile.existsAsFile())
+            {
+                newFile.getParentDirectory().createDirectory();
+                if (oldFile.moveFileTo (newFile) && oldFolder.getNumberOfChildFiles (juce::File::findFilesAndDirectories) == 0)
+                    oldFolder.deleteFile();
+            }
+        }
+       #endif
         settings = std::make_unique<juce::PropertiesFile> (options);
         uiScale = juce::jlimit (0.6f, 2.5f, static_cast<float> (settings->getDoubleValue ("uiScale", 1.0)));
         touchMode = settings->getBoolValue ("touchMode", false);
         menu.setTouchMode (touchMode);
         browser.setTouchMode (touchMode);
         prompt.setTouchMode (touchMode);
+        inspector.setTouchMode (touchMode);
     }
     engine.onParameterChangedByMidi = [this] (NodeId id) { invalidatePlate (id); dirty = true; };
     engine.onMidiUiTarget = [this] (const MidiMapping& mapping, const juce::MidiMessage&)
@@ -202,6 +211,7 @@ void RackView::setTouchMode (bool touch)
     menu.setTouchMode (touch);
     browser.setTouchMode (touch);
     prompt.setTouchMode (touch);
+    inspector.setTouchMode (touch);
     if (settings != nullptr)
     {
         settings->setValue ("touchMode", touch);
@@ -215,7 +225,7 @@ juce::Rectangle<float> RackView::touchButtonBounds (int index) const noexcept
     // Zoom out / zoom in / fit, bottom right, clear of the slot bar on the Board.
     const auto size = 52.0f;
     const auto bottom = static_cast<float> (windowH) - (mode == Mode::board ? slotBarHeight + 14.0f : 18.0f);
-    return { static_cast<float> (windowW) - (3.0f - static_cast<float> (index)) * (size + 10.0f), bottom - size, size, size };
+    return { static_cast<float> (windowW) - inspector.dockedWidth() - (3.0f - static_cast<float> (index)) * (size + 10.0f), bottom - size, size, size };
 }
 
 void RackView::connectPending (NodeId destination, int port)
@@ -338,6 +348,7 @@ void RackView::patchReplaced()
     prompt.close();
     browser.close();
     toneBrowser.close();
+    inspector.close();
     learnTarget.reset();
     calibration.reset();
     rackSelection.clear();
@@ -447,9 +458,21 @@ void RackView::releasePlates()
 
 // ---------------------------------------------------------------- layout
 
+bool RackView::isKnobModulated (NodeId id, int parameterIndex) const noexcept
+{
+    return std::binary_search (modulatedKnobs.begin(), modulatedKnobs.end(), std::make_pair (id, parameterIndex));
+}
+
 void RackView::rebuildLayouts()
 {
     layouts.clear();
+    modulatedKnobs.clear();
+    for (const auto& cable : engine.getDocument().getConnections())
+        if (const auto* destination = engine.getDocument().findNode (cable.destinationNode);
+            destination != nullptr && juce::isPositiveAndBelow (cable.destinationPort, destination->processor->getNumInputPorts()))
+            if (const auto parameterIndex = destination->processor->getInputPort (cable.destinationPort).parameterIndex; parameterIndex >= 0)
+                modulatedKnobs.emplace_back (cable.destinationNode, parameterIndex);
+    std::sort (modulatedKnobs.begin(), modulatedKnobs.end());
     for (const auto& node : engine.getDocument().getNodes())
     {
         Layout layout;
@@ -629,6 +652,156 @@ std::optional<Connection> RackView::cableNear (juce::Point<float> world, float r
         }
     }
     return best;
+}
+
+void RackView::toggleInspector()
+{
+    if (inspector.isOpen())
+        inspector.close();
+    else if (selectedNode != 0)
+        inspector.show (selectedNode);
+    else
+        say ("Select a module first: the inspector shows its knobs' ranges, curves and mod depths");
+    dirty = true;
+}
+
+juce::String RackView::sessionSignature() const
+{
+    return juce::String (static_cast<int> (mode)) + "|" + juce::String (panX, 1) + "|" + juce::String (panY, 1) + "|" + juce::String (targetZoom, 3)
+         + "|" + juce::String (boardPanX, 1) + "|" + juce::String (boardPanY, 1) + "|" + juce::String (boardScale, 3)
+         + "|" + juce::String (activeSlot) + "|" + currentFile.getFullPathName() + "|" + juce::String (static_cast<int> (paletteVisible))
+         + "|" + juce::String (static_cast<int> (engine.isPanicMuted())) + "|" + juce::String (static_cast<int> (engine.hasUnsavedChanges()))
+         + "|" + juce::String (windowW) + "x" + juce::String (windowH);
+}
+
+void RackView::saveSession()
+{
+    if (settings == nullptr || pendingCamera.has_value()) // nothing drawn yet: the saved view is still the truth
+        return;
+    // The camera as the patch point in the middle of the view: it survives a window of another size.
+    const auto rackLeft = paletteVisible ? static_cast<double> (paletteWidth) : 0.0;
+    const auto rackCentre = toWorld (rackLeft + (windowW - rackLeft) * 0.5, hudHeight + (windowH - hudHeight) * 0.5);
+    const auto boardCentre = toBoard (windowW * 0.5, hudHeight + (windowH - hudHeight - slotBarHeight) * 0.5);
+    settings->setValue ("session.mode", mode == Mode::board ? "board" : "rack");
+    settings->setValue ("session.rackX", static_cast<double> (rackCentre.x));
+    settings->setValue ("session.rackY", static_cast<double> (rackCentre.y));
+    settings->setValue ("session.rackZoom", targetZoom);
+    if (! pedals.empty())
+    {
+        settings->setValue ("session.boardX", static_cast<double> (boardCentre.x));
+        settings->setValue ("session.boardY", static_cast<double> (boardCentre.y));
+        settings->setValue ("session.boardZoom", static_cast<double> (boardScale));
+    }
+    settings->setValue ("session.slot", activeSlot);
+    settings->setValue ("session.file", currentFile.getFullPathName());
+    settings->setValue ("session.unsaved", engine.hasUnsavedChanges());
+    settings->setValue ("session.muted", engine.isPanicMuted());
+    settings->setValue ("session.palette", paletteVisible);
+    settings->setValue ("session.windowW", static_cast<int> (windowW * uiScale));
+    settings->setValue ("session.windowH", static_cast<int> (windowH * uiScale));
+    settings->saveIfNeeded();
+    savedSessionSignature = sessionSignature();
+}
+
+void RackView::restoreSession (bool patchGiven, bool forceBoard, bool forceUnmute)
+{
+    if (settings == nullptr)
+        return;
+    startMuted = settings->getBoolValue ("startMuted", true);
+    const bool sameRig = ! patchGiven && engine.restoredLastSession();
+    if (sameRig)
+    {
+        const juce::File file (settings->getValue ("session.file"));
+        if (settings->getValue ("session.file").isNotEmpty() && file.existsAsFile())
+        {
+            currentFile = file;
+            if (settings->getBoolValue ("session.unsaved", false))
+                engine.markUnsavedChanges(); // the autosave holds edits the file does not
+        }
+        else
+            engine.markUnsavedChanges();     // a rig that was never saved is still unsaved
+        activeSlot = juce::jlimit (-1, slotCount - 1, settings->getIntValue ("session.slot", -1));
+        paletteVisible = settings->getBoolValue ("session.palette", true);
+        SessionCamera camera;
+        camera.rackX = settings->getDoubleValue ("session.rackX");
+        camera.rackY = settings->getDoubleValue ("session.rackY");
+        camera.rackZoom = settings->getDoubleValue ("session.rackZoom", 0.0);
+        camera.boardX = settings->getDoubleValue ("session.boardX");
+        camera.boardY = settings->getDoubleValue ("session.boardY");
+        camera.boardZoom = settings->getDoubleValue ("session.boardZoom", 0.0);
+        pendingCamera = camera;
+        // Muted start is the safe default (open mics, a loud amp); with it switched
+        // off the rig comes back sounding if it was sounding when the app closed.
+        if (! startMuted && ! settings->getBoolValue ("session.muted", true))
+            engine.setPanicMuted (false);
+    }
+    else
+        pendingCamera = SessionCamera {}; // another rig: fit it, once the real window size is known
+    if (forceUnmute)
+        engine.setPanicMuted (false);
+    if (forceBoard || settings->getValue ("session.mode") == "board")
+        setMode (Mode::board);
+    savedSessionSignature = sessionSignature();
+    dirty = true;
+}
+
+void RackView::applyPendingCamera (double now)
+{
+    if (! pendingCamera.has_value())
+        return;
+    if (cameraDeadline <= 0.0)
+        cameraDeadline = now + 1.5;
+    if (now > cameraDeadline)
+    {
+        pendingCamera.reset();
+        return;
+    }
+    if (cameraAppliedW == windowW && cameraAppliedH == windowH)
+        return;
+    cameraAppliedW = windowW;
+    cameraAppliedH = windowH;
+    const auto camera = *pendingCamera;
+    if (structureDirty)
+        rebuildLayouts();
+    if (camera.rackZoom > 0.0)
+    {
+        const auto left = paletteVisible ? static_cast<double> (paletteWidth) : 0.0;
+        targetZoom = zoom = juce::jlimit (0.25, 3.0, camera.rackZoom);
+        panX = left + (windowW - left) * 0.5 - camera.rackX * zoom;
+        panY = hudHeight + (windowH - hudHeight) * 0.5 - camera.rackY * zoom;
+        // A view with no module in it helps nobody (the patch changed under the saved camera).
+        bool anyVisible = false;
+        for (const auto& layout : layouts)
+        {
+            const auto origin = nodePosition (layout.id);
+            const juce::Rectangle<double> onScreen (origin.x * zoom + panX, origin.y * zoom + panY, layout.w * zoom, layout.h * zoom);
+            anyVisible = anyVisible || onScreen.intersects (juce::Rectangle<double> (left, hudHeight, windowW - left, windowH - hudHeight));
+        }
+        if (! anyVisible)
+            fitToPatch (windowW, windowH);
+    }
+    else
+        fitToPatch (windowW, windowH);
+    if (mode == Mode::board)
+    {
+        if (boardDirty)
+            rebuildBoard();
+        fitBoard();
+        if (camera.boardZoom > 0.0)
+        {
+            boardScale = juce::jlimit (0.35f, 1.35f, static_cast<float> (camera.boardZoom));
+            boardPanX = windowW * 0.5 - camera.boardX * boardScale;
+            boardPanY = hudHeight + (windowH - hudHeight - slotBarHeight) * 0.5 - camera.boardY * boardScale;
+            bool anyVisible = false;
+            for (const auto& pedal : pedals)
+                anyVisible = anyVisible || juce::Rectangle<float> (pedal.x * boardScale + static_cast<float> (boardPanX), pedal.y * boardScale + static_cast<float> (boardPanY),
+                                                                   pedal.w * boardScale, pedal.h * boardScale)
+                                               .intersects (juce::Rectangle<float> (0.0f, hudHeight, static_cast<float> (windowW), static_cast<float> (windowH) - hudHeight - slotBarHeight));
+            if (! anyVisible)
+                fitBoard();
+        }
+    }
+    dirty = true;
 }
 
 void RackView::fitToPatch (int width, int height)
@@ -856,7 +1029,7 @@ void RackView::requestQuit()
 void RackView::showFileMenu (double x, double y)
 {
     enum { newPatch = 1, openPatch, save, saveAs, exportBundle, unmute, quit, audioSettings, tone3000Browse,
-           touchToggle, scaleUp, scaleDown, fitView };
+           touchToggle, scaleUp, scaleDown, fitView, startMutedToggle };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (currentFile == juce::File() ? "UNTITLED" : currentFile.getFileName().toUpperCase()));
     items.push_back (MenuItem::item (newPatch, "New patch", "Ctrl+N"));
@@ -866,6 +1039,8 @@ void RackView::showFileMenu (double x, double y)
     items.push_back (MenuItem::item (exportBundle, "Export portable project (.zip)..."));
     items.push_back (MenuItem::line());
     items.push_back (MenuItem::item (unmute, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute", "M"));
+    items.push_back (MenuItem::item (startMutedToggle, startMuted ? juce::String (juce::CharPointer_UTF8 ("\xe2\x97\x8f  Start muted (safe: press MUTED to fade in)"))
+                                                                  : juce::String ("Start muted (now: comes back as you left it)")));
     items.push_back (MenuItem::item (audioSettings, "Audio device and buffer...")); // so a pad (Guide) reaches it too
     items.push_back (MenuItem::item (tone3000Browse, "Browse TONE3000 captures...", "Ctrl+T"));
     items.push_back (MenuItem::line());
@@ -881,6 +1056,15 @@ void RackView::showFileMenu (double x, double y)
         switch (picked)
         {
             case audioSettings: showAudioMenu (x, y); break;
+            case startMutedToggle:
+                startMuted = ! startMuted;
+                if (settings != nullptr)
+                {
+                    settings->setValue ("startMuted", startMuted);
+                    settings->saveIfNeeded();
+                }
+                say (startMuted ? "The rig will start muted" : "The rig will come back sounding if it was sounding when you quit");
+                break;
             case touchToggle:
                 setTouchMode (! touchMode);
                 say (touchMode ? "Touch mode on: tap an output then an input to connect, hold for menus"
@@ -1051,7 +1235,7 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
         if (connection.sourceNode == layout.id || connection.destinationNode == layout.id)
             ++cableCount;
     enum { bypass = 1, rename, duplicate, resetKnobs, disconnectAll, remove, prevModel, nextModel, prevIr, nextIr, clearIrB, browseTone3000, browseImpulsesA, browseImpulsesB,
-           midiLearnStomp, midiRemoveStomp, midiLearnButtonBase = 3000, midiRemoveButtonBase = 3500 };
+           midiLearnStomp, midiRemoveStomp, inspect, midiLearnButtonBase = 3000, midiRemoveButtonBase = 3500 };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (model->processor->getName().toUpperCase()));
     if (layout.stomp)
@@ -1092,6 +1276,7 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
         items.push_back (MenuItem::item (rename, "Rename...", "dbl-click"));
         items.push_back (MenuItem::item (duplicate, "Duplicate", "Ctrl+D"));
         items.push_back (MenuItem::item (resetKnobs, "Reset knobs to defaults", {}, ! layout.knobParameters.empty()));
+        items.push_back (MenuItem::item (inspect, "Inspector: knob ranges, curves, mod depths...", "I", model->processor->getNumParameters() > 0));
     }
     items.push_back (MenuItem::item (disconnectAll, "Disconnect all cables (" + juce::String (cableCount) + ")", {}, cableCount > 0));
     if (layout.kind == NodeKind::neuralAmpPlaceholder || layout.kind == NodeKind::neuralPedal)
@@ -1124,6 +1309,10 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
         switch (picked)
         {
             case bypass: engine.setNodeBypassed (id, ! current->processor->isBypassed()); break;
+            case inspect:
+                selectedNode = id;
+                inspector.show (id);
+                break;
             case rename:
                 prompt.open ("Rename module", current->processor->getName(), [this, id] (const juce::String& name)
                 {
@@ -1223,11 +1412,14 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
         for (const auto& connection : engine.getDocument().getConnections())
             if (connection.destinationNode == layout.id && connection.destinationPort == parameter.inputPortIndex)
                 modulation = connection;
-    enum { reset = 1, setValue, zeroDepth, fullDepth, removeModulation, midiLearn, midiRemove, midiLearnRelative, midiCalibrate };
+    enum { reset = 1, setValue, zeroDepth, fullDepth, removeModulation, midiLearn, midiRemove, midiLearnRelative, midiCalibrate, inspect };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (parameter.name.toUpperCase()));
     items.push_back (MenuItem::item (reset, "Reset to default (" + juce::String (parameter.defaultValue, 2) + ")", "dbl-click"));
     items.push_back (MenuItem::item (setValue, "Set value..."));
+    items.push_back (MenuItem::item (inspect, parameter.hasDefaultShape() ? juce::String ("Range, curve and mod depth...")
+                                                                          : "Range, curve and mod depth...  (" + formatParameterValue (parameter, parameter.getShape().minimum)
+                                                                                + " to " + formatParameterValue (parameter, parameter.getShape().maximum) + ")", "I"));
     {
         MidiMapping target;
         target.target = MidiMapping::Target::parameter;
@@ -1277,6 +1469,10 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
                     invalidatePlate (id);
                     dirty = true;
                 });
+                return;
+            case inspect:
+                selectedNode = id;
+                inspector.show (id, parameterIndex);
                 return;
             case zeroDepth: engine.setModulationDepth (id, parameterIndex, 0.0f); break;
             case fullDepth: engine.setModulationDepth (id, parameterIndex, 1.0f); break;
@@ -1857,7 +2053,10 @@ void RackView::showAudioMenu (double x, double y)
         {
             const auto& types = deviceManager.getAvailableDeviceTypes();
             if (juce::isPositiveAndBelow (picked - 100, types.size()))
+            {
                 deviceManager.setCurrentAudioDeviceType (types[picked - 100]->getTypeName(), true);
+                engine.useEveryDeviceChannel();
+            }
         }
         else if (auto* type = deviceManager.getCurrentDeviceTypeObject(); type != nullptr && picked >= 200 && picked < 400)
         {
@@ -1868,6 +2067,9 @@ void RackView::showAudioMenu (double x, double y)
                 if (picked >= 300) current.inputDeviceName = names[index]; else current.outputDeviceName = names[index];
                 current.useDefaultInputChannels = current.useDefaultOutputChannels = true;
                 error = deviceManager.setAudioDeviceSetup (current, true);
+                if (error.isEmpty())
+                    engine.useEveryDeviceChannel(); // the modules mirror the interface: every input and output it has
+
             }
         }
         else if (auto* device = deviceManager.getCurrentAudioDevice(); device != nullptr && picked >= 400 && picked < 600)
@@ -2353,6 +2555,9 @@ void RackView::drawBoard (int width, int height, double now)
                     : parameter.name.toUpperCase();
                 drawKnob (pedalKnobCentre (pedal, static_cast<int> (knob)), 19.0f, parameter.getNormalisedValue(),
                           isGroup ? accent (owner->processor->getKind()) : colour, label, formatValue (parameter));
+                if (isKnobModulated (pedal.knobs[knob].first, pedal.knobs[knob].second))
+                    drawKnobModulation (pedalKnobCentre (pedal, static_cast<int> (knob)), 19.0f, parameter,
+                                        isGroup ? accent (owner->processor->getKind()) : colour);
             }
             if (isGroup)
             {
@@ -2776,7 +2981,7 @@ void RackView::pollGamepad (double now)
                     const auto dt = juce::jlimit (0.0, 0.1, now - lastTick);
                     const auto shaped = stick * std::abs (stick); // gentle near the centre
                     const auto next = juce::jlimit (0.0f, 1.0f, parameter.getNormalisedValue() + shaped * 0.7f * static_cast<float> (dt));
-                    engine.setParameter (ownerId, parameterIndex, parameter.range.convertFrom0to1 (next));
+                    engine.setParameter (ownerId, parameterIndex, parameter.valueFromNormalised (next));
                     invalidatePlate (ownerId);
                     animating = true;
                     dirty = true;
@@ -3180,6 +3385,9 @@ bool RackView::tryGlideToPatch (const juce::var& target)
                         const auto& parameter = node->processor->getParameter (index);
                         if (parameter.id != parameterId)
                             continue;
+                        // The knob's travel and curve jump (part of the same undo step); the value then glides inside them.
+                        if (const auto shape = parameterShapeFromJson (parameter, *parameterObject); shape != parameter.getShape())
+                            engine.setParameterShape (id, index, shape);
                         GlideItem item;
                         item.node = id;
                         item.parameter = index;
@@ -3544,6 +3752,16 @@ void RackView::tick (double now)
     lastTick = now;
     animating = false;
 
+    // The view is remembered as it changes, not only on a clean quit.
+    if (pendingCamera.has_value() && cameraDeadline > 0.0 && now > cameraDeadline)
+        pendingCamera.reset();
+    if (now - lastSessionCheck > 4.0)
+    {
+        lastSessionCheck = now;
+        if (! panning && ! draggingNode.has_value() && ! boardDrag.has_value() && sessionSignature() != savedSessionSignature)
+            saveSession();
+    }
+
     if (calibration.has_value() && now - calibration->lastAt > 2.0 && calibration->high > calibration->low)
     {
         // The sweep stopped: keep the range on the mapping (undoable, saved with the patch).
@@ -3800,6 +4018,66 @@ void RackView::drawKnob (juce::Point<float> centre, float radius, float normalis
     nvgFontSize (vg, 10.5f);
     nvgFillColor (vg, palette::mutedText);
     nvgText (vg, centre.x, centre.y + radius + 11.0f, value.toRawUTF8(), nullptr);
+}
+
+void RackView::drawKnobModulation (juce::Point<float> centre, float radius, const DspParameter& parameter, NVGcolor colour)
+{
+    const auto start = juce::MathConstants<float>::pi * 0.75f;
+    const auto end = juce::MathConstants<float>::pi * 2.25f;
+    const auto angleOf = [start, end] (float normalised) { return start + (end - start) * juce::jlimit (0.0f, 1.0f, normalised); };
+    const auto base = parameter.getNormalisedValue();
+    const auto depth = parameter.getModulationDepth();
+    const auto live = parameter.getLiveNormalised();
+
+    // How far the socket can push the knob either way, as a thin outer ring.
+    if (depth > 0.001f)
+    {
+        nvgBeginPath (vg);
+        nvgArc (vg, centre.x, centre.y, radius + 5.5f, angleOf (base - depth), angleOf (base + depth), NVG_CW);
+        nvgStrokeColor (vg, alpha (palette::control, 0.45f));
+        nvgStrokeWidth (vg, 2.0f);
+        nvgLineCap (vg, NVG_BUTT);
+        nvgStroke (vg);
+    }
+    // The track again, then the arc up to where the knob is this instant.
+    nvgBeginPath (vg);
+    nvgArc (vg, centre.x, centre.y, radius, start, end, NVG_CW);
+    nvgStrokeColor (vg, palette::nodeDark);
+    nvgStrokeWidth (vg, 5.6f);
+    nvgLineCap (vg, NVG_ROUND);
+    nvgStroke (vg);
+    if (live > 0.005f)
+    {
+        nvgBeginPath (vg);
+        nvgArc (vg, centre.x, centre.y, radius, start, angleOf (live), NVG_CW);
+        nvgStrokeColor (vg, colour);
+        nvgStrokeWidth (vg, 5.0f);
+        nvgStroke (vg);
+    }
+    // Where the knob is set: a notch that stays put while the rest moves.
+    {
+        const auto angle = angleOf (base);
+        nvgBeginPath (vg);
+        nvgMoveTo (vg, centre.x + std::cos (angle) * (radius - 3.0f), centre.y + std::sin (angle) * (radius - 3.0f));
+        nvgLineTo (vg, centre.x + std::cos (angle) * (radius + 3.0f), centre.y + std::sin (angle) * (radius + 3.0f));
+        nvgStrokeColor (vg, alpha (palette::text, 0.9f));
+        nvgStrokeWidth (vg, 1.6f);
+        nvgLineCap (vg, NVG_BUTT);
+        nvgStroke (vg);
+    }
+    const auto angle = angleOf (live);
+    nvgBeginPath (vg);
+    nvgCircle (vg, centre.x, centre.y, radius - 6.0f);
+    nvgFillPaint (vg, nvgRadialGradient (vg, centre.x - 3.0f, centre.y - 4.0f, 2.0f, radius,
+                                          lighter (palette::nodeTop, 0.18f), palette::nodeDark));
+    nvgFill (vg);
+    nvgBeginPath (vg);
+    nvgMoveTo (vg, centre.x + std::cos (angle) * (radius - 14.0f), centre.y + std::sin (angle) * (radius - 14.0f));
+    nvgLineTo (vg, centre.x + std::cos (angle) * (radius - 7.0f), centre.y + std::sin (angle) * (radius - 7.0f));
+    nvgStrokeColor (vg, palette::control);
+    nvgStrokeWidth (vg, 2.4f);
+    nvgLineCap (vg, NVG_ROUND);
+    nvgStroke (vg);
 }
 
 void RackView::drawPlateStatic (const Layout& layout, const NodeModel& model)
@@ -4073,6 +4351,12 @@ void RackView::drawNode (const Layout& layout, double now)
 
     drawPreviewContent (layout, *model, origin);
 
+    // Knobs with a cable in their mod socket move with the modulation.
+    for (std::size_t knob = 0; knob < layout.knobParameters.size(); ++knob)
+        if (isKnobModulated (layout.id, layout.knobParameters[knob]))
+            drawKnobModulation (knobCentre (layout, origin, static_cast<int> (knob)), 22.0f,
+                                model->processor->getParameter (layout.knobParameters[knob]), colour);
+
     const auto status = layout.kind == NodeKind::tuner || layout.kind == NodeKind::looper ? juce::String() : model->processor->statusText();
     if (status.isNotEmpty())
     {
@@ -4298,7 +4582,7 @@ void RackView::drawHud (int width, int height, double now)
         : mode == Mode::board
             ? juce::String ("drag pedals to place them  |  Shift+click to select several, right-click to group them into one pedal  |  1-5 load a slot (knobs glide), Shift+1-5 store  |  Tab rack")
             : touchMode ? juce::String ("touch: tap an output then an input to connect  |  hold for a menu  |  drag the space to pan, double tap fits  |  - + FIT bottom right  |  palette: tap adds")
-                        : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan, Shift+drag selects  |  wheel zooms  |  Del  Ctrl+A  Ctrl+Z  Ctrl+D  Ctrl+T TONE3000  M mute  F fit  |  Ctrl +/- UI scale  |  Tab board");
+                        : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan, Shift+drag selects  |  wheel zooms  |  Del  Ctrl+A  Ctrl+Z  Ctrl+D  Ctrl+T TONE3000  I inspector  M mute  F fit  |  Ctrl +/- UI scale  |  Tab board");
     nvgText (vg, 16.0f, static_cast<float> (height) - 10.0f, hint.toRawUTF8(), nullptr);
 }
 
@@ -4315,6 +4599,7 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
     menu.setWindowSize (width, height);
     if (structureDirty)
         rebuildLayouts();
+    applyPendingCamera (now); // the session's view, now that the real window size is known
 
     // Plates are rasterised at the settled zoom; while the zoom eases they
     // are drawn scaled, then re-rasterised once when it lands.
@@ -4354,6 +4639,7 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
         nvgFill (vg);
         drawBoard (width, height, now);
         drawSlotBar (width, height);
+        inspector.draw (width, height, hudHeight, slotBarHeight);
         drawTouchButtons();
         drawHud (width, height, now);
         menu.draw (width, height);
@@ -4440,6 +4726,9 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
     nvgRestore (vg);
 
     drawPalette (height);
+    if (inspector.isOpen() && selectedNode != 0 && selectedNode != inspector.node())
+        inspector.show (selectedNode); // the panel follows the selection
+    inspector.draw (width, height, hudHeight, 0.0f);
     drawTouchButtons();
     drawHud (width, height, now);
     menu.draw (width, height);
@@ -4494,6 +4783,11 @@ void RackView::mouseMove (double x, double y)
     if (menu.isOpen())
     {
         menu.mouseMove (static_cast<float> (x), static_cast<float> (y));
+        dirty = true;
+        return;
+    }
+    if (inspector.mouseMove (static_cast<float> (x), static_cast<float> (y)))
+    {
         dirty = true;
         return;
     }
@@ -4569,7 +4863,7 @@ void RackView::mouseMove (double x, double y)
             const auto fine = glfwGetKey (glfwGetCurrentContext(), GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? 0.2f : 1.0f;
             const auto normalised = juce::jlimit (0.0f, 1.0f,
                 knobDrag->startNormalised + static_cast<float> (knobDrag->startY - y) / 180.0f * fine);
-            engine.setParameter (knobDrag->node, knobDrag->parameter, parameter.range.convertFrom0to1 (normalised));
+            engine.setParameter (knobDrag->node, knobDrag->parameter, parameter.valueFromNormalised (normalised));
             invalidatePlate (knobDrag->node);
             dirty = true;
         }
@@ -4654,6 +4948,12 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
     if (menu.isOpen())
     {
         menu.mouseButton (button, pressed, static_cast<float> (x), static_cast<float> (y));
+        dirty = true;
+        return;
+    }
+    if (inspector.isOpen() && (inspector.isDragging() || inspector.contains (static_cast<float> (x), static_cast<float> (y)))
+        && inspector.mouseButton (button, pressed, static_cast<float> (x), static_cast<float> (y), lastTick))
+    {
         dirty = true;
         return;
     }
@@ -5026,6 +5326,11 @@ void RackView::scroll (double dx, double dy, int mods, double x, double y)
         dirty = true;
         return;
     }
+    if (inspector.scroll (dy, static_cast<float> (x), static_cast<float> (y)))
+    {
+        dirty = true;
+        return;
+    }
     if (paletteVisible && x < paletteWidth && y >= hudHeight)
     {
         const auto contentHeight = paletteRowTop (static_cast<int> (moduleCatalogue().size()) - 1) + paletteScroll + 40.0f - hudHeight;
@@ -5215,6 +5520,8 @@ void RackView::key (int keyCode, bool pressed, int mods)
         paletteVisible = ! paletteVisible;
         dirty = true;
     }
+    else if (keyCode == GLFW_KEY_I && (mods & (GLFW_MOD_CONTROL | GLFW_MOD_ALT)) == 0)
+        toggleInspector();
     else if (keyCode == GLFW_KEY_M)
     {
         engine.togglePanic();

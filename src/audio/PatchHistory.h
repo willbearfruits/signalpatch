@@ -42,6 +42,9 @@ public:
     // Continuous edits; before/after are the values around the change.
     void recordParameter (NodeId id, int parameterIndex, float before, float after);
     void recordModulationDepth (NodeId id, int parameterIndex, float before, float after);
+    /** The inspector's travel and curve; the value rides along because a narrower travel can move it. */
+    void recordParameterShape (NodeId id, int parameterIndex, ParameterShape before, float valueBefore,
+                               ParameterShape after, float valueAfter);
     void recordMove (NodeId id, juce::Point<float> before, juce::Point<float> after);
     void recordBypass (NodeId id, bool before, bool after);
     void recordExtraState (NodeId id, juce::var before, juce::var after);
@@ -78,6 +81,7 @@ private:
         cable,         // connection present (after) or absent
         parameter,
         modulationDepth,
+        parameterShape,
         move,
         bypass,
         extraState,
@@ -96,6 +100,7 @@ private:
         bool presentAfter = true;
 
         float floatBefore = 0.0f, floatAfter = 0.0f;
+        ParameterShape shapeBefore, shapeAfter;
         juce::Point<float> pointBefore, pointAfter;
         bool hadPointBefore = true, hasPointAfter = true;
         bool boolBefore = false, boolAfter = false;

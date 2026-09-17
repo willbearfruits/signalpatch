@@ -151,12 +151,16 @@ into other rigs, shared with other people. Waits for stereo so ports are
 defined once. (Daisypatcher has subpatches already; the same shape will
 make the `.dpatch` export in 0.8 line up.)
 
-## 0.7b — The inspector (after the node-by-node review)
+## 0.7b — The inspector (first cut landed; the node-by-node review follows)
 
-Every node gets a pass with notes from playing it; then an inspector panel
-lets the ranges, defaults, skews and units of a node's knobs be edited per
-instance (saved with the patch), so a "Speed 25-400 %" can become "80-120
-%" on the pedal that needs finesse. The Pitch control inputs on the synth
+**Landed:** the inspector panel (`I`): per knob, per instance, saved with
+the patch - the travel (min / max in real units, reversible), a curve, the
+mod depth and the exact value, so a "Speed 25-400 %" can become "80-120 %"
+on the pedal that needs finesse; MIDI and modulation stay inside the travel;
+modulated knobs are drawn where they are. **Still to do:** every node gets a
+pass with notes from playing it, and what the notes ask for (better default
+ranges and curves in the engine, units, per-knob defaults, renaming a knob
+on a pedal's face) goes in afterwards. The Pitch control inputs on the synth
 and pluck (48 st per unit, matching MIDI Note) are the first result of
 that review.
 

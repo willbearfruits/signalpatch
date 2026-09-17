@@ -19,7 +19,8 @@ juce::String PatchHistory::nodeLabel (NodeId id) const
 
 bool PatchHistory::isContinuous (Kind kind) noexcept
 {
-    return kind == Kind::parameter || kind == Kind::modulationDepth || kind == Kind::move || kind == Kind::boardMove;
+    return kind == Kind::parameter || kind == Kind::modulationDepth || kind == Kind::parameterShape
+        || kind == Kind::move || kind == Kind::boardMove;
 }
 
 void PatchHistory::recordNodeAdded (NodeId id)
@@ -113,6 +114,24 @@ void PatchHistory::recordModulationDepth (NodeId id, int parameterIndex, float b
     entry.floatAfter = after;
     if (const auto* node = document.findNode (id))
         entry.description = nodeLabel (id) + " " + node->processor->getParameter (parameterIndex).name.toLowerCase() + " mod depth";
+    push (std::move (entry));
+}
+
+void PatchHistory::recordParameterShape (NodeId id, int parameterIndex, ParameterShape before, float valueBefore,
+                                         ParameterShape after, float valueAfter)
+{
+    if (before == after)
+        return;
+    Entry entry;
+    entry.kind = Kind::parameterShape;
+    entry.node = id;
+    entry.parameterIndex = parameterIndex;
+    entry.shapeBefore = before;
+    entry.shapeAfter = after;
+    entry.floatBefore = valueBefore;
+    entry.floatAfter = valueAfter;
+    if (const auto* node = document.findNode (id))
+        entry.description = nodeLabel (id) + " " + node->processor->getParameter (parameterIndex).name.toLowerCase() + " range";
     push (std::move (entry));
 }
 
@@ -223,6 +242,7 @@ bool PatchHistory::tryCoalesce (const Entry& entry)
         if (compoundGesture == 0 && entry.lastEditMs - top.lastEditMs > gestureWindowMs)
             return false;
         top.floatAfter = entry.floatAfter;
+        top.shapeAfter = entry.shapeAfter;
         top.pointAfter = entry.pointAfter;
         top.hasPointAfter = entry.hasPointAfter;
         top.lastEditMs = entry.lastEditMs;
@@ -346,6 +366,16 @@ PatchHistory::Applied PatchHistory::apply (Entry& entry, bool forward)
                 parameter.setValue (value);
             else
                 parameter.setModulationDepth (value);
+            return Applied::values;
+        }
+        case Kind::parameterShape:
+        {
+            auto* node = document.findNode (entry.node);
+            if (node == nullptr || ! juce::isPositiveAndBelow (entry.parameterIndex, node->processor->getNumParameters()))
+                return Applied::none;
+            auto& parameter = node->processor->getParameter (entry.parameterIndex);
+            parameter.setShape (forward ? entry.shapeAfter : entry.shapeBefore);
+            parameter.setValue (forward ? entry.floatAfter : entry.floatBefore);
             return Applied::values;
         }
         case Kind::move:

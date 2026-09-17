@@ -92,9 +92,13 @@ retired but still builds with `-DSIGNALPATCH_BUILD_JUCE_UI=ON`.
   come back muted and fade in deliberately.
 - **Everything is modulatable.** Every knob has a mod socket; any control
   signal (LFO, envelope, sequencer, spectral band, macro, MIDI Note, Clock)
-  can drive any parameter.
+  can drive any parameter, and a modulated knob is drawn where it really is.
+- **An inspector for every knob** (`I`): the exact value, the minimum and
+  maximum the knob travels between, the curve of that travel and the mod
+  depth - per instance, saved with the patch, respected by MIDI and
+  modulation.
 - **Session honesty.** Versioned JSON patches with recordings alongside,
-  portable project zips, autosave recovery on launch, device/channel
+  portable project zips, the last session back on launch (rig, view, slot), device/channel
   identity preserved even when the interface changes, undo for everything
   (a multi-module drag is one step).
 

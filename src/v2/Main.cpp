@@ -147,6 +147,8 @@ int main (int argc, char** argv)
     // its destructor frees cached plates and thumbnails through them.
     auto rackOwner = std::make_unique<signalpatch::v2::RackView> (engine, vg, font);
     auto& rack = *rackOwner;
+    if (const auto size = rack.savedWindowSize(); ! kiosk && size.x >= 640 && size.y >= 400)
+        glfwSetWindowSize (window, size.x, size.y); // a tiling desktop ignores this, a floating one comes back the same size
     bool startOnBoard = false;
     {
         float contentX = 1.0f, contentY = 1.0f;
@@ -156,7 +158,7 @@ int main (int argc, char** argv)
         if (const auto* env = std::getenv ("SIGNALPATCH_SCALE"))
             rack.setUiScale (static_cast<float> (std::atof (env)));
     }
-    bool unmute = false;
+    bool unmute = false, patchGiven = false;
     int touchFlag = -1; // -1 = decide from the screen
     for (int index = 1; index < argc; ++index)
     {
@@ -171,11 +173,9 @@ int main (int argc, char** argv)
             unmute = true;
         else if (argument.startsWith ("--scale="))
             rack.setUiScale (argument.fromFirstOccurrenceOf ("=", false, false).getFloatValue());
-        else if (argv[index][0] != '-')
+        else if (argv[index][0] != '-' && (patchGiven = true))
             rack.loadPatchFromCommandLine (juce::File::getCurrentWorkingDirectory().getChildFile (argv[index]));
     }
-    if (unmute)
-        rack.unmuteAtStart(); // a stage boot: the rig should sound without a key press
     {
         // A handheld (a small panel driven at a high scale factor) gets touch mode
         // the first time it runs; after that the setting the user chose wins.
@@ -225,6 +225,11 @@ int main (int argc, char** argv)
             if (auto* view = rackFor (w))
                 view->focusLost();
     });
+    glfwSetWindowSizeCallback (window, [] (GLFWwindow* w, int, int)
+    {
+        if (auto* view = rackFor (w))
+            view->windowResized();
+    });
     glfwSetWindowCloseCallback (window, [] (GLFWwindow* w)
     {
         glfwSetWindowShouldClose (w, GLFW_FALSE); // the rack decides after the unsaved-changes question
@@ -235,8 +240,9 @@ int main (int argc, char** argv)
         int width = 0, height = 0;
         glfwGetWindowSize (window, &width, &height);
         rack.fitToPatch (static_cast<int> (width / rack.getUiScale()), static_cast<int> (height / rack.getUiScale()));
-        if (startOnBoard)
-            rack.showBoard();
+        // The last session's view, file name and slot; --board and --unmute (a stage boot:
+        // the rig should sound without a key press) win over what was remembered.
+        rack.restoreSession (patchGiven, startOnBoard, unmute);
     }
 
     while (! glfwWindowShouldClose (window))
@@ -264,6 +270,7 @@ int main (int argc, char** argv)
         glfwSwapBuffers (window);
     }
 
+    rack.saveSession();
     glfwSetWindowUserPointer (window, nullptr);
     rackOwner.reset();        // plates and thumbnails go while their context is alive
     engine.shutdown();
