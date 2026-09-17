@@ -20,6 +20,8 @@ Newest first. "Unreleased" is what `main` has beyond the last tag.
 - The session comes back as it was: rack or Board, camera, slot, file name,
   unsaved mark, window size. An edit made in the last second before quitting
   is no longer lost. FILE > Start muted can be turned off.
+- A Neural Amp, Neural Pedal or Cabinet with nothing cabled into it no
+  longer uses CPU. It used to run its model on silence at full cost.
 - On Linux the UI settings moved from `~/SignalPatch/` to
   `~/.config/SignalPatch/`.
 

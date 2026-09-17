@@ -969,6 +969,13 @@ private:
                      juce::AudioBuffer<float>& outputs,
                      int numSamples) noexcept override
     {
+        if (isInputUnplugged (0))
+        {
+            // Nothing cabled in: a WaveNet fed silence costs as much as one fed a guitar.
+            for (int channel = 0; channel < outputs.getNumChannels(); ++channel)
+                juce::FloatVectorOperations::clear (outputs.getWritePointer (channel), numSamples);
+            return;
+        }
         const auto* input = inputs.getReadPointer (0);
         auto* output = outputs.getWritePointer (0);
         auto* model = activeModel.load (std::memory_order_acquire);
@@ -4155,6 +4162,12 @@ private:
                      juce::AudioBuffer<float>& outputs,
                      int numSamples) noexcept override
     {
+        if (isInputUnplugged (0))
+        {
+            for (int channel = 0; channel < outputs.getNumChannels(); ++channel)
+                juce::FloatVectorOperations::clear (outputs.getWritePointer (channel), numSamples);
+            return; // no convolution for a cabinet nothing plays into
+        }
         const auto* input = inputs.getReadPointer (0);
         auto* output = outputs.getWritePointer (0);
         const auto frames = juce::jmin (numSamples, maximumBlockSize);

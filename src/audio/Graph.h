@@ -310,6 +310,10 @@ protected:
     {
         return port < 0 || port >= 64 || (connectedInputs >> static_cast<unsigned> (port) & 1u) != 0;
     }
+    /** True when a plan is running this node and nothing is cabled into the port:
+        a heavy processor (neural model, convolution) can then skip its work.
+        A node rendered on its own, as the tests do, is never "unplugged". */
+    [[nodiscard]] bool isInputUnplugged (int port) const noexcept { return runByPlan && ! isInputConnected (port); }
     void setReportedLatencySamples (int samples) noexcept { reportedLatencySamples = juce::jmax (0, samples); }
 
     virtual void prepareDsp (double sampleRate, int maximumBlockSize) = 0;
@@ -329,6 +333,7 @@ private:
     std::vector<std::unique_ptr<SignalMeter>> outputMeters;
     int reportedLatencySamples = 0;
     std::atomic<bool> bypassed { false };
+    bool runByPlan = false;            // audio thread only
     std::uint64_t connectedInputs = 0; // audio thread only, set by the running plan per block (a node rendered on its own has no cables)
     friend class RenderPlan;
 };

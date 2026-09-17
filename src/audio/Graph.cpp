@@ -1324,6 +1324,7 @@ void RenderPlan::mixInputs (int nodeIndex, int numSamples) noexcept
             hasSource = true;
         }
 
+        destination.processor->runByPlan = true;
         if (destinationPort < 64)
         {
             const auto bit = std::uint64_t { 1 } << static_cast<unsigned> (destinationPort);
