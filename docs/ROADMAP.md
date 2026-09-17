@@ -33,6 +33,8 @@ both, scaled to the screen.
 - Exporting a rig as a Daisypatcher `.dpatch` so a board built here can run
   on a Daisy Seed pedal. The neural amp, the cabinet, the vocoder and the
   granular module would be marked as desktop-only. Importing the other way.
+- A bootable image: a stripped-down Linux that starts straight into the rig
+  and turns a PC into a dedicated multi-effect. Notes in `HANDHELD.md`.
 - A named screen profile for 7-inch handhelds.
 - OSC, a plug-in build, a node SDK. None of these are planned in detail.
 

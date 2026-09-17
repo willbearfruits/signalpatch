@@ -87,3 +87,36 @@ can start `SignalPatch.exe --kiosk --board --unmute` at logon.
 ## Afterwards
 
 Once it works, stop updating it, and keep an image of the disk.
+
+## Idea: ship this as a bootable image
+
+Not started. Everything above, baked into an image you flash to a stick or
+a disk, so any PC becomes a dedicated multi-effect.
+
+- Boot: kernel, a minimal init, `cage`, then
+  `SignalPatch --kiosk --board --unmute`, restarted if it exits. No desktop
+  and no login.
+- Audio: ALSA directly, no PipeWire. Nothing else on the box makes sound.
+- Kernel: `PREEMPT_RT` (mainline since 6.12), threaded IRQs, performance
+  governor, USB autosuspend off.
+- Disk: read-only root, and a writable partition for patches, models and
+  recordings, so the power can be pulled like on a pedal.
+- Build: an Arch-based image with `mkosi` or `archiso` first, because it
+  covers most PC hardware. Buildroot later if small and reproducible
+  matters more.
+
+What the app would need, since there is no OS around it:
+
+- TONE3000 login without a system browser. The current flow redirects to
+  localhost, which a kiosk cannot do. Either a log-in-on-your-phone flow or
+  a small embedded browser for that one screen.
+- Wi-Fi setup, power off and reboot, and screen brightness in the FILE menu.
+- Import and export of patches and models from a USB stick.
+- An updater that takes a release from the network or a stick.
+
+Limits: NVIDIA is awkward to ship, Intel and AMD are fine. ARM boards are a
+separate project; a Pi 5 lacks the OpenGL 3.3 the app needs, so that means a
+GLES renderer first.
+
+First step when this starts: an image that boots a ThinkPad X250 with the
+Zoom straight to the Board, and measured latency and xruns from it.
