@@ -1,11 +1,15 @@
 #include "PatchEngine.h"
 
 #if JUCE_LINUX
+ #include <fcntl.h>
  #include <sched.h>
+ #include <unistd.h>
 #endif
 #include "PatchBundle.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <thread>
 
 namespace signalpatch
 {
@@ -84,6 +88,26 @@ juce::Result PatchEngine::initialise()
         audioCallbackRegistered = true;
     }
 
+    setRenderThreads (renderThreadSetting);
+   #if JUCE_LINUX
+    // Deep CPU sleep states take up to a millisecond to leave, which shows up as
+    // jitter in when the callback (and the helpers) start. Holding this file open
+    // with 0 written to it keeps the cores in shallow states; closing it, or the
+    // process ending, gives the default back. Needs the realtime group on Arch.
+    if (cpuLatencyFile < 0)
+    {
+        cpuLatencyFile = ::open ("/dev/cpu_dma_latency", O_WRONLY);
+        if (cpuLatencyFile >= 0)
+        {
+            const std::int32_t microseconds = 0;
+            if (::write (cpuLatencyFile, &microseconds, sizeof (microseconds)) != static_cast<ssize_t> (sizeof (microseconds)))
+            {
+                ::close (cpuLatencyFile);
+                cpuLatencyFile = -1;
+            }
+        }
+    }
+   #endif
     startTimerHz (20);
     initialised = true;
     return deviceResult;
@@ -114,6 +138,14 @@ void PatchEngine::shutdown()
     activePlan = nullptr;
     reclaimRetiredPlans();
     deviceManager.closeAudioDevice();
+    renderPool.setHelperCount (0);
+   #if JUCE_LINUX
+    if (cpuLatencyFile >= 0)
+    {
+        ::close (cpuLatencyFile);
+        cpuLatencyFile = -1;
+    }
+   #endif
     initialised = false;
 }
 
@@ -209,6 +241,22 @@ static juce::String channelLabel (const juce::String& channelName, int number, b
         if (channelName.startsWithIgnoreCase (prefix))
             return (isInput ? "In " : "Out ") + juce::String (number) + "  " + channelName.substring (static_cast<int> (std::strlen (prefix)));
     return channelName;
+}
+
+void PatchEngine::setRenderThreads (int threads)
+{
+    renderThreadSetting = juce::jmax (0, threads);
+    auto total = renderThreadSetting;
+    if (total == 0)
+    {
+        // A quarter of the logical cores, four at most: the helpers spin while a block
+        // is being rendered, and the desktop and the UI need the rest.
+        const auto logical = static_cast<int> (std::thread::hardware_concurrency());
+        total = juce::jlimit (1, 4, logical / 4);
+    }
+    if (const auto* forced = std::getenv ("SIGNALPATCH_THREADS"))
+        total = juce::jlimit (1, 16, std::atoi (forced));
+    renderPool.setHelperCount (total - 1);
 }
 
 void PatchEngine::useEveryDeviceChannel()
@@ -581,6 +629,7 @@ EngineStatus PatchEngine::getStatus() const
     status.cpuLoad = cpuLoad.load (std::memory_order_relaxed);
     status.cpuPeak = cpuPeak.load (std::memory_order_relaxed);
     status.running = callbackRunning.load (std::memory_order_relaxed);
+    status.renderThreads = renderedInParallel.load (std::memory_order_relaxed) ? renderPool.getHelperCount() + 1 : 1;
    #if JUCE_LINUX
     {
         const auto scheduler = callbackScheduler.load (std::memory_order_relaxed);
@@ -1127,8 +1176,9 @@ void PatchEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             const auto chunk = juce::jmin (maximumChunk, numSamples - offset);
             activePlan->render (inputChannelData, numInputChannels,
                                 outputChannelData, numOutputChannels,
-                                offset, chunk);
+                                offset, chunk, &renderPool);
         }
+        renderedInParallel.store (activePlan->hasParallelWork() && renderPool.isUsable(), std::memory_order_relaxed);
     }
 
     const auto targetGain = (panicMuted.load (std::memory_order_relaxed) || graphSwapFadingOut) ? 0.0f : 1.0f;

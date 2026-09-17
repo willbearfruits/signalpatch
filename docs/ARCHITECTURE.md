@@ -21,6 +21,13 @@ callback picks it up at the start of a block with a short fade, and pushes
 the old plan onto a retired list. The engine's timer deletes retired plans
 on the message thread, so nothing is freed in the callback.
 
+The plan also holds the graph as tasks: each node with a count of the sources
+it waits for. When heavy nodes (neural models, convolution, FFT work) sit
+side by side, `RenderPool`'s realtime helper threads and the callback take
+ready nodes until the block is done, and the callback returns only after
+every helper has left the block. Otherwise the callback walks the nodes in
+order, alone. Helpers sleep on a futex between blocks and spin inside one.
+
 Knob changes do not recompile. A parameter is an atomic value that the node
 reads and smooths itself.
 

@@ -11,6 +11,21 @@ option(SIGNALPATCH_ENABLE_ASIO "Enable JUCE's ASIO backend on Windows" OFF)
 option(SIGNALPATCH_ALLOW_JUCE_FETCH
        "Fetch the pinned JUCE release when no matching package is installed"
        ON)
+# The neural amp is matrix arithmetic: with AVX2 and FMA a WaveNet costs about a
+# quarter less. x86-64-v3 means any Intel since Haswell (2013) or AMD since
+# Excavator / Zen. Set it to "" for older machines, or to "native" for this one.
+# It applies to every target so Eigen's alignment is the same everywhere.
+set(SIGNALPATCH_CPU_BASELINE "x86-64-v3" CACHE STRING "x86-64 instruction set level to build for (empty = the compiler's default)")
+if(SIGNALPATCH_CPU_BASELINE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    if(MSVC)
+        if(NOT SIGNALPATCH_CPU_BASELINE STREQUAL "x86-64" AND NOT SIGNALPATCH_CPU_BASELINE STREQUAL "x86-64-v2")
+            add_compile_options(/arch:AVX2)
+        endif()
+    else()
+        add_compile_options(-march=${SIGNALPATCH_CPU_BASELINE})
+    endif()
+endif()
+
 option(SIGNALPATCH_ENABLE_NAM "Build the Neural Amp Modeler node against NeuralAmpModelerCore" ON)
 set(SIGNALPATCH_NAM_CORE_DIR
     "$ENV{HOME}/Projects/GitHub/external_clones/neural-amp-modeler-plugin-a2/NeuralAmpModelerCore"
@@ -174,6 +189,7 @@ juce_generate_juce_header(signalpatch_tests)
 target_sources(signalpatch_tests PRIVATE
     tests/EngineTests.cpp
     src/audio/Graph.cpp
+    src/audio/RenderPool.cpp
     src/audio/PatchHistory.cpp
     src/audio/PatchBundle.cpp
     src/audio/MidiMap.cpp

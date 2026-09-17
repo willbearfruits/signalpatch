@@ -1338,12 +1338,36 @@ void RenderPlan::mixInputs (int nodeIndex, int numSamples) noexcept
     }
 }
 
+void RenderPlan::renderNode (int nodeIndex) noexcept
+{
+    auto& node = *renderNodes[static_cast<std::size_t> (nodeIndex)];
+    auto& processor = *node.processor;
+    const auto numSamples = block.numSamples;
+
+    if (nodeIndex == hardwareInputNode)
+    {
+        for (int port = 0; port < node.outputs.getNumChannels(); ++port)
+        {
+            const auto callbackChannel = processor.getOutputPort (port).callbackChannelIndex;
+            if (juce::isPositiveAndBelow (callbackChannel, block.numHardwareInputs)
+                && block.hardwareInputs != nullptr && block.hardwareInputs[callbackChannel] != nullptr)
+                node.outputs.copyFrom (port, 0, block.hardwareInputs[callbackChannel] + block.hardwareOffset, numSamples);
+        }
+    }
+    else if (! processor.isFeedbackGuard()) // a guard plays back what it stored last block
+    {
+        mixInputs (nodeIndex, numSamples);
+    }
+    processor.render (node.inputs, node.outputs, numSamples);
+}
+
 void RenderPlan::render (const float* const* hardwareInputs,
                          int numHardwareInputs,
                          float* const* hardwareOutputs,
                          int numHardwareOutputs,
                          int hardwareOffset,
-                         int numSamples) noexcept
+                         int numSamples,
+                         RenderPool* pool) noexcept
 {
     jassert (numSamples <= maximumBlockSize);
     numSamples = juce::jmin (numSamples, maximumBlockSize);
@@ -1358,32 +1382,24 @@ void RenderPlan::render (const float* const* hardwareInputs,
         node->outputs.clear (0, numSamples);
     }
 
-    for (const auto nodeIndex : executionOrder)
+    block = { hardwareInputs, numHardwareInputs, hardwareOffset, numSamples };
+    if (pool != nullptr && parallelCandidate && pool->isUsable())
     {
-        auto& renderNode = *renderNodes[static_cast<std::size_t> (nodeIndex)];
-        auto& processor = *renderNode.processor;
-
-        if (nodeIndex == hardwareInputNode)
-        {
-            for (int port = 0; port < renderNode.outputs.getNumChannels(); ++port)
-            {
-                const auto callbackChannel = processor.getOutputPort (port).callbackChannelIndex;
-                if (juce::isPositiveAndBelow (callbackChannel, numHardwareInputs)
-                    && hardwareInputs != nullptr && hardwareInputs[callbackChannel] != nullptr)
-                    renderNode.outputs.copyFrom (port, 0, hardwareInputs[callbackChannel] + hardwareOffset, numSamples);
-            }
-            processor.render (renderNode.inputs, renderNode.outputs, numSamples);
-            continue;
-        }
-
-        if (processor.isFeedbackGuard())
-        {
-            processor.render (renderNode.inputs, renderNode.outputs, numSamples);
-            continue;
-        }
-
-        mixInputs (nodeIndex, numSamples);
-        processor.render (renderNode.inputs, renderNode.outputs, numSamples);
+        RenderPool::Job job;
+        job.context = this;
+        job.run = [] (void* context, int taskIndex) noexcept { static_cast<RenderPlan*> (context)->renderNode (taskIndex); };
+        job.taskCount = static_cast<int> (renderNodes.size());
+        job.indegree = taskIndegree.data();
+        job.successorOffsets = taskSuccessorOffsets.data();
+        job.successors = taskSuccessors.data();
+        job.pending = taskPending.get();
+        job.state = taskState.get();
+        pool->run (job);
+    }
+    else
+    {
+        for (const auto nodeIndex : executionOrder)
+            renderNode (nodeIndex);
     }
 
     for (const auto nodeIndex : feedbackNodes)
@@ -1511,6 +1527,65 @@ GraphCompileResult GraphCompiler::compile (const PatchDocument& document,
     {
         result.error = "Unsafe zero-delay cycle blocked. Put a Feedback Guard in every feedback loop.";
         return result;
+    }
+
+    // Tasks for the render pool. The edges are the ones the order above was built
+    // from: a cable into a Feedback Guard is not a dependency (it is read next block).
+    {
+        plan->taskIndegree.assign (static_cast<std::size_t> (nodeCount), 0);
+        plan->taskSuccessorOffsets.assign (static_cast<std::size_t> (nodeCount) + 1, 0);
+        for (int index = 0; index < nodeCount; ++index)
+        {
+            auto& successors = adjacency[static_cast<std::size_t> (index)];
+            std::sort (successors.begin(), successors.end());
+            successors.erase (std::unique (successors.begin(), successors.end()), successors.end()); // two cables, one dependency
+            plan->taskSuccessorOffsets[static_cast<std::size_t> (index) + 1]
+                = plan->taskSuccessorOffsets[static_cast<std::size_t> (index)] + static_cast<int> (successors.size());
+            for (const auto next : successors)
+            {
+                plan->taskSuccessors.push_back (next);
+                ++plan->taskIndegree[static_cast<std::size_t> (next)];
+            }
+        }
+        plan->taskPending = std::make_unique<std::atomic<int>[]> (static_cast<std::size_t> (nodeCount));
+        plan->taskState = std::make_unique<std::atomic<std::uint8_t>[]> (static_cast<std::size_t> (nodeCount));
+
+        // Helpers are worth waking only when heavy nodes sit side by side: count the
+        // heavy ones with something cabled in, and the most of them on any one path.
+        const auto isHeavy = [&] (int index)
+        {
+            const auto& node = *plan->renderNodes[static_cast<std::size_t> (index)];
+            switch (node.processor->getKind())
+            {
+                case NodeKind::neuralAmpPlaceholder: case NodeKind::neuralPedal: case NodeKind::cabinet:
+                case NodeKind::vocoder: case NodeKind::granular: case NodeKind::pitchShifter:
+                case NodeKind::pitchCorrector: case NodeKind::reverb: case NodeKind::stereoReverb:
+                case NodeKind::spectralFollower:
+                    break;
+                default:
+                    return false;
+            }
+            for (const auto& sources : node.incoming)
+                if (! sources.empty())
+                    return true;
+            return false;
+        };
+        int heavyCount = 0, longestHeavyPath = 0;
+        std::vector<int> heavyOnPath (static_cast<std::size_t> (nodeCount), 0);
+        for (const auto nodeIndex : plan->executionOrder)
+        {
+            const auto& node = *plan->renderNodes[static_cast<std::size_t> (nodeIndex)];
+            int upstream = 0;
+            if (! node.processor->isFeedbackGuard())
+                for (const auto& sources : node.incoming)
+                    for (const auto& source : sources)
+                        upstream = juce::jmax (upstream, heavyOnPath[static_cast<std::size_t> (source.nodeIndex)]);
+            const auto heavy = isHeavy (nodeIndex) ? 1 : 0;
+            heavyCount += heavy;
+            heavyOnPath[static_cast<std::size_t> (nodeIndex)] = upstream + heavy;
+            longestHeavyPath = juce::jmax (longestHeavyPath, upstream + heavy);
+        }
+        plan->parallelCandidate = heavyCount > longestHeavyPath;
     }
 
     std::vector<int> pathLatency (static_cast<std::size_t> (nodeCount), 0);

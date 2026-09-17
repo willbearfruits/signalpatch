@@ -14,7 +14,9 @@ them.
 | Callback timing | Measured in the app: average and worst block in the header. |
 | Linux and Windows | CI builds the app and runs the suite on both, from a bare clone. |
 
-The suite has 49 cases. Beyond the above they cover save and load, device
+The suite has 52 cases. Rendering on several cores is checked to be
+bit-identical to one core, allocation-free on the helpers, and clean under
+TSan. Beyond the above they cover save and load, device
 changes with missing channels, undo, the looper and 4-track at odd speeds,
 recordings across sample rates, the clock, MIDI, tuning of the pluck and
 synth, the TONE3000 client, and the inspector's ranges and curves.

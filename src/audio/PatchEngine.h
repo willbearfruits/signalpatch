@@ -32,6 +32,9 @@ struct EngineStatus
     // False when the callback thread runs under the ordinary scheduler
     // (no rtkit / realtime-privileges): expect xruns whenever the desktop is busy.
     bool realtimeThread = true;
+    // Cores the running patch is rendered on: 1, or more when it has heavy
+    // branches side by side and the helper threads have realtime priority.
+    int renderThreads = 1;
 };
 
 class PatchEngine final : private juce::AudioIODeviceCallback,
@@ -74,6 +77,10 @@ public:
     [[nodiscard]] juce::AudioDeviceManager& getDeviceManager() noexcept { return deviceManager; }
     [[nodiscard]] const PatchDocument& getDocument() const noexcept { return document; }
     [[nodiscard]] EngineStatus getStatus() const;
+    /** Audio threads in total (the callback plus helpers); 0 = choose from the CPU, 1 = the callback alone.
+        Helpers are only used by patches with heavy modules side by side. */
+    void setRenderThreads (int threads);
+    [[nodiscard]] int getRenderThreadSetting() const noexcept { return renderThreadSetting; }
     /** After the user picks a device: switch on every channel it really has, so the
         Hardware Inputs / Outputs modules mirror the interface. */
     void useEveryDeviceChannel();
@@ -180,6 +187,10 @@ private:
     [[nodiscard]] juce::String currentDeviceSignature();
 
     juce::AudioDeviceManager deviceManager;
+    RenderPool renderPool;
+    int renderThreadSetting = 0;
+    std::atomic<bool> renderedInParallel { false };
+    int cpuLatencyFile = -1; // /dev/cpu_dma_latency held open at 0: no deep sleep states while audio runs
     PatchDocument document;
     PatchHistory history { document };
 

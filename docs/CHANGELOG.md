@@ -4,6 +4,19 @@ Newest first. "Unreleased" is what `main` has beyond the last tag.
 
 ## Unreleased
 
+- Neural captures cost about a third of what they did. The build now targets
+  AVX2 (`SIGNALPATCH_CPU_BASELINE`, default `x86-64-v3`) and uses the fast
+  `tanh` the official NAM plugin runs with. A "standard" WaveNet went from
+  12.6% to 4.5% of a 64-sample block on a Ryzen 3700X.
+- Patches with heavy modules side by side (two amps into a mixer) are rendered
+  on several cores. Realtime helper threads take nodes as their sources
+  finish; the result is bit-identical to one core. A two-chain rig of four
+  captures went from 26% to 16% of a block on two cores. Single chains are
+  unchanged and wake no helpers. The header shows "on N cores" when it is
+  active; `SIGNALPATCH_THREADS=1` turns it off.
+- While audio runs, `/dev/cpu_dma_latency` is held at 0 (Linux, needs the
+  `realtime` group), which keeps the CPU out of deep sleep states.
+
 - Inspector (`I`, or from a module's or knob's menu): a panel on the right
   listing the selected module's knobs with the exact value, the minimum and
   maximum the knob travels between, a curve, and the mod depth. Drag a

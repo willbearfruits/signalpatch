@@ -5,6 +5,7 @@
 #include <cstdlib>
 
 #if SIGNALPATCH_HAS_NAM
+ #include "NAM/activations.h"
  #include "NAM/get_dsp.h"
 #endif
 
@@ -912,6 +913,11 @@ public:
 private:
     static std::unique_ptr<nam::DSP> parseModel (const juce::String& path, juce::String& error)
     {
+        // The approximation of tanh that the official NAM plugin runs with: a standard
+        // WaveNet spends about a third of its time in tanh otherwise. It is a process-wide
+        // switch that must be set before a model is built, so it is set once, here.
+        static const bool fastTanh = [] { nam::activations::Activation::enable_fast_tanh(); return true; }();
+        juce::ignoreUnused (fastTanh);
         try
         {
             auto loaded = nam::get_dsp (std::filesystem::path (path.toStdString()));

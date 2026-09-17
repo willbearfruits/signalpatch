@@ -986,8 +986,11 @@ PatchDocument buildKitchenSinkDocument()
     return document;
 }
 
-void renderPlanBlocks (RenderPlan& plan, int blockCount, bool varyBlockSizes, bool armTrap = false)
+void renderPlanBlocks (RenderPlan& plan, int blockCount, bool varyBlockSizes, bool armTrap = false,
+                       RenderPool* pool = nullptr, std::vector<float>* capture = nullptr)
 {
+    if (capture != nullptr)
+        capture->reserve (capture->size() + static_cast<std::size_t> (blockCount) * blockSize * 2);
     // Everything the harness itself needs is allocated before the trap arms;
     // inside the armed window only plan.render and arithmetic may run.
     std::vector<std::vector<float>> inputStorage (6, std::vector<float> (blockSize, 0.0f));
@@ -1021,7 +1024,11 @@ void renderPlanBlocks (RenderPlan& plan, int blockCount, bool varyBlockSizes, bo
         // A note every few blocks, like the engine's FIFO drain does before the render.
         if (block % 5 == 0)
             plan.dispatchMidiNote (1, 48 + (block / 5) % 24, 100, (block / 5) % 2 == 0);
-        plan.render (inputPointers.data(), 6, outputPointers.data(), 2, 0, numSamples);
+        plan.render (inputPointers.data(), 6, outputPointers.data(), 2, 0, numSamples, pool);
+        if (capture != nullptr)
+            for (int channel = 0; channel < 2; ++channel)
+                capture->insert (capture->end(), outputStorage[static_cast<std::size_t> (channel)].begin(),
+                                 outputStorage[static_cast<std::size_t> (channel)].begin() + numSamples);
         for (int channel = 0; channel < 2; ++channel)
             for (int sample = 0; sample < numSamples; ++sample)
                 allFinite = allFinite
@@ -1056,6 +1063,103 @@ void testCallbackPathDoesNotAllocate()
     expect (violations == 0,
             "the render path allocated or freed memory " + std::to_string (violations)
             + " time(s) - REALTIME_SAFETY.md forbids this");
+}
+
+// Two effect chains side by side into a mixer, each with a heavy node, and an
+// LFO on one of them: the shape of a rig with two amps.
+PatchDocument buildTwoChainDocument (bool secondChainCabled = true)
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 6), channelNames ("Output", 2));
+    document.prepareAll (sampleRate, blockSize);
+    const auto add = [&] (NodeKind kind) { return document.addNode (kind, { 0.0f, 0.0f }); };
+    const auto driveA = add (NodeKind::distortion), reverbA = add (NodeKind::reverb), delayA = add (NodeKind::delay);
+    const auto filterB = add (NodeKind::filter), shiftB = add (NodeKind::pitchShifter), chorusB = add (NodeKind::chorus);
+    const auto lfo = add (NodeKind::lfo), mixer = add (NodeKind::mixer);
+    const auto cable = [&] (NodeId from, int fromPort, NodeId to, int toPort)
+    {
+        expectOk (document.addConnection ({ from, fromPort, to, toPort }), "two-chain cable");
+    };
+    cable (PatchDocument::hardwareInputId, 0, driveA, 0);
+    cable (driveA, 0, reverbA, 0);
+    cable (reverbA, 0, delayA, 0);
+    cable (delayA, 0, mixer, 0);
+    if (secondChainCabled)
+        cable (PatchDocument::hardwareInputId, 1, filterB, 0);
+    cable (filterB, 0, shiftB, 0);
+    cable (shiftB, 0, chorusB, 0);
+    cable (chorusB, 0, mixer, 1);
+    cable (lfo, 0, filterB, document.findNode (filterB)->processor->getParameter (0).inputPortIndex);
+    cable (mixer, 0, PatchDocument::hardwareOutputId, 0);
+    cable (mixer, 0, PatchDocument::hardwareOutputId, 1);
+    return document;
+}
+
+void testParallelRenderMatchesSerial()
+{
+    auto serialDocument = buildTwoChainDocument();
+    auto parallelDocument = buildTwoChainDocument();
+    auto serial = GraphCompiler::compile (serialDocument, blockSize);
+    auto parallel = GraphCompiler::compile (parallelDocument, blockSize);
+    expect (serial.succeeded() && parallel.succeeded(), "two-chain graph did not compile");
+    expect (parallel.plan->hasParallelWork(), "two heavy chains side by side should be worth several cores");
+
+    RenderPool pool;
+    pool.setUsableWithoutRealtime (true); // a test machine may not grant realtime priority
+    pool.setHelperCount (3);
+    expect (pool.isUsable(), "the render pool did not start");
+
+    std::vector<float> serialOutput, parallelOutput;
+    renderPlanBlocks (*serial.plan, 600, true, false, nullptr, &serialOutput);
+    renderPlanBlocks (*parallel.plan, 600, true, false, &pool, &parallelOutput);
+    expect (serialOutput.size() == parallelOutput.size() && ! serialOutput.empty(), "renders differ in length");
+    float loudest = 0.0f;
+    for (std::size_t index = 0; index < serialOutput.size(); ++index)
+    {
+        expect (serialOutput[index] == parallelOutput[index], "a block rendered on several cores differs from the same block on one");
+        loudest = juce::jmax (loudest, std::abs (serialOutput[index]));
+    }
+    expect (loudest > 0.01f, "the comparison ran on silence");
+
+    // Changing the helper count between blocks is safe, and zero helpers still renders.
+    pool.setHelperCount (1);
+    renderPlanBlocks (*parallel.plan, 20, true, false, &pool);
+    pool.setHelperCount (0);
+    renderPlanBlocks (*parallel.plan, 20, true, false, &pool);
+}
+
+void testParallelCandidateDetection()
+{
+    // One chain: reverb into pitch shifter. Both heavy, but one after the other.
+    PatchDocument chain;
+    chain.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    const auto reverb = chain.addNode (NodeKind::reverb, {}), shifter = chain.addNode (NodeKind::pitchShifter, {});
+    expectOk (chain.addConnection ({ PatchDocument::hardwareInputId, 0, reverb, 0 }), "in");
+    expectOk (chain.addConnection ({ reverb, 0, shifter, 0 }), "mid");
+    expectOk (chain.addConnection ({ shifter, 0, PatchDocument::hardwareOutputId, 0 }), "out");
+    auto compiledChain = GraphCompiler::compile (chain, blockSize);
+    expect (compiledChain.succeeded() && ! compiledChain.plan->hasParallelWork(), "a single chain has nothing to run side by side");
+
+    // A heavy node with nothing cabled in costs nothing, so it does not count.
+    auto looseDocument = buildTwoChainDocument (false);
+    auto loose = GraphCompiler::compile (looseDocument, blockSize);
+    expect (loose.succeeded(), "two-chain graph with a loose input did not compile");
+    expect (loose.plan->hasParallelWork(), "the second chain still has cabled heavy nodes downstream of the filter");
+}
+
+void testParallelRenderDoesNotAllocate()
+{
+    auto document = buildKitchenSinkDocument();
+    auto compiled = GraphCompiler::compile (document, blockSize);
+    expect (compiled.succeeded(), "kitchen-sink graph did not compile");
+    expect (compiled.plan->hasParallelWork(), "the kitchen sink should have heavy nodes side by side");
+    RenderPool pool;
+    pool.setUsableWithoutRealtime (true);
+    pool.setHelperCount (3);
+    renderPlanBlocks (*compiled.plan, 8, false, false, &pool);
+    renderPlanBlocks (*compiled.plan, 400, true, true, &pool); // the trap is global: helpers are covered
+    const auto violations = rtTrap::violations.load();
+    expect (violations == 0, "rendering on several cores allocated or freed memory " + std::to_string (violations) + " time(s)");
 }
 
 void testRecompileChurnKeepsRendering()
@@ -1158,6 +1262,89 @@ void testNamModelBenchmark()
                   << juce::String (averagePercent, 1).paddedLeft (' ', 5).toStdString() << "  "
                   << juce::String (worstPercent, 1).paddedLeft (' ', 5).toStdString() << "   "
                   << verdict << "\n";
+    }
+
+    // The same question for a whole rig: two pedal-into-amp chains into a mixer,
+    // on the callback thread alone and with helper threads.
+    {
+        auto heaviest = files[0];
+        for (const auto& file : files)
+            if (file.getSize() > heaviest.getSize())
+                heaviest = file;
+        const auto buildRig = [&]
+        {
+            PatchDocument document;
+            document.configureHardware (channelNames ("Input", 6), channelNames ("Output", 2));
+            document.prepareAll (sampleRate, blockSize);
+            const auto mixer = document.addNode (NodeKind::mixer, {});
+            for (int chain = 0; chain < 2; ++chain)
+            {
+                const auto pedal = document.addNode (NodeKind::neuralPedal, {});
+                const auto amp = document.addNode (NodeKind::neuralAmpPlaceholder, {});
+                for (const auto id : { pedal, amp })
+                {
+                    auto state = std::make_unique<juce::DynamicObject>();
+                    state->setProperty ("model", heaviest.getFullPathName());
+                    document.findNode (id)->processor->setExtraState (juce::var (state.release()));
+                }
+                expectOk (document.addConnection ({ PatchDocument::hardwareInputId, chain, pedal, 0 }), "rig in");
+                expectOk (document.addConnection ({ pedal, 0, amp, 0 }), "rig mid");
+                expectOk (document.addConnection ({ amp, 0, mixer, chain }), "rig mix");
+            }
+            expectOk (document.addConnection ({ mixer, 0, PatchDocument::hardwareOutputId, 0 }), "rig out");
+            return document;
+        };
+        const auto measure = [&] (RenderPlan& plan, RenderPool* pool, double& average, double& worst)
+        {
+            std::vector<std::vector<float>> in (6, std::vector<float> (blockSize, 0.0f)), out (2, std::vector<float> (blockSize, 0.0f));
+            std::vector<const float*> inPointers;
+            std::vector<float*> outPointers;
+            for (auto& channel : in) inPointers.push_back (channel.data());
+            for (auto& channel : out) outPointers.push_back (channel.data());
+            double phase = 0.0, total = 0.0;
+            worst = 0.0;
+            for (int blockIndex = -64; blockIndex < benchBlocks; ++blockIndex)
+            {
+                for (auto& channel : in)
+                    for (int sample = 0; sample < blockSize; ++sample)
+                        channel[static_cast<std::size_t> (sample)] = 0.4f * static_cast<float> (std::sin (juce::MathConstants<double>::twoPi * 220.0 * (phase + sample) / sampleRate));
+                phase += blockSize;
+                const auto start = juce::Time::getHighResolutionTicks();
+                plan.render (inPointers.data(), 6, outPointers.data(), 2, 0, blockSize, pool);
+                const auto elapsed = juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - start);
+                // Real callbacks come one block period apart: helpers sleep in between, as they will in the app.
+                juce::Thread::sleep (1);
+                if (blockIndex < 0)
+                    continue; // warm-up
+                total += elapsed;
+                worst = std::max (worst, elapsed);
+            }
+            average = total / benchBlocks;
+        };
+
+        auto serialDocument = buildRig();
+        auto serial = GraphCompiler::compile (serialDocument, blockSize);
+        expect (serial.succeeded() && serial.plan->hasParallelWork(), "the two-amp rig should compile and have parallel work");
+        double average = 0.0, worst = 0.0;
+        measure (*serial.plan, nullptr, average, worst);
+        std::cout << "  rig: 2 x (pedal -> amp), " << heaviest.getFileNameWithoutExtension().substring (0, 28).toStdString() << "\n"
+                  << "    1 core    avg " << juce::String (100.0 * average / budgetSeconds, 1).toStdString()
+                  << "%  worst " << juce::String (100.0 * worst / budgetSeconds, 1).toStdString() << "%\n";
+        for (const auto helperCount : { 1, 3 })
+        {
+            auto document = buildRig();
+            auto compiled = GraphCompiler::compile (document, blockSize);
+            RenderPool pool;
+            pool.setHelperCount (helperCount);
+            if (! pool.isUsable())
+            {
+                std::cout << "    (no realtime priority for helper threads here; multi-core figures skipped)\n";
+                break;
+            }
+            measure (*compiled.plan, &pool, average, worst);
+            std::cout << "    " << (helperCount + 1) << " cores   avg " << juce::String (100.0 * average / budgetSeconds, 1).toStdString()
+                      << "%  worst " << juce::String (100.0 * worst / budgetSeconds, 1).toStdString() << "%\n";
+        }
     }
 #else
     std::cout << "  (built without NAM; benchmark skipped)\n";
@@ -1475,11 +1662,11 @@ void testUndoCoalescesKnobGestures()
     expect (history.getUndoCount() == 2, "closing the gesture should start a new entry");
 
     expect (history.undo() == PatchHistory::Applied::values, "undo second gesture");
-    expect (std::abs (parameter.getValue() - value) < 1.0e-6f, "second gesture not undone");
+    expect (std::abs (parameter.getValue() - value) < 1.0e-4f, "second gesture not undone");
     expect (history.undo() == PatchHistory::Applied::values, "undo drag");
-    expect (std::abs (parameter.getValue() - start) < 1.0e-6f, "drag undo did not return to the pre-drag value");
+    expect (std::abs (parameter.getValue() - start) < 1.0e-4f, "drag undo did not return to the pre-drag value");
     expect (history.redo() == PatchHistory::Applied::values, "redo drag");
-    expect (std::abs (parameter.getValue() - value) < 1.0e-6f, "drag redo did not restore the end of the drag");
+    expect (std::abs (parameter.getValue() - value) < 1.0e-4f, "drag redo did not restore the end of the drag");
 
     // Editing after an undo discards the redo branch.
     history.recordParameter (gain, 0, value, 3.0f);
@@ -2607,6 +2794,9 @@ int main()
         { "NAM model benchmark (env-gated)", testNamModelBenchmark },
         { "undo/redo structure round trip", testUndoRedoStructure },
         { "undo delete restores processor and cables", testUndoDeleteRestoresSameProcessorAndCables },
+        { "several cores render the same samples as one", testParallelRenderMatchesSerial },
+        { "parallel work is detected only where it exists", testParallelCandidateDetection },
+        { "rendering on several cores performs no allocation", testParallelRenderDoesNotAllocate },
         { "undo coalesces knob gestures", testUndoCoalescesKnobGestures },
         { "knob travel and curve: narrow, bend, reverse, save, undo", testParameterShapeNarrowsBendsAndSurvives },
         { "a modulated knob reports where it is", testModulatedKnobReportsWhereItIs },

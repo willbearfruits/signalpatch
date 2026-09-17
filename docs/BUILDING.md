@@ -10,6 +10,7 @@ Options:
 | `SIGNALPATCH_ENABLE_NAM` | ON | OFF builds without NeuralAmpModelerCore; the neural modules pass audio through |
 | `SIGNALPATCH_NAM_CORE_DIR` | unset | use a local NeuralAmpModelerCore checkout instead of fetching |
 | `SIGNALPATCH_ALLOW_JUCE_FETCH` | ON | OFF requires an installed JUCE |
+| `SIGNALPATCH_CPU_BASELINE` | `x86-64-v3` | instruction set to build for. AVX2 makes neural captures about a quarter cheaper; set it to empty for CPUs older than 2013 |
 | `SIGNALPATCH_ENABLE_ASIO` | OFF | Windows ASIO; needs Steinberg's SDK and its licence |
 | `SIGNALPATCH_BUILD_JUCE_UI` | OFF | also build the retired JUCE rack (`signalpatch_juce`) |
 
@@ -109,7 +110,8 @@ opens, double tap to fit.
 - `SIGNALPATCH_SOAK_BLOCKS=1687500` runs the allocation-trap graph for 30
   minutes of audio.
 - `SIGNALPATCH_BENCH_NAM_DIR=<folder>` benchmarks `.nam` models against the
-  64-sample deadline.
+  64-sample deadline, then a two-amp rig on one core and on several.
+- `SIGNALPATCH_THREADS=N` in the app forces the number of audio threads.
 
 Sanitizer builds live in `build-asan/` (`-fsanitize=address,undefined`) and
 `build-tsan/` (`-fsanitize=thread -DSIGNALPATCH_BUILD_V2=OFF`).

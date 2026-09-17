@@ -4,6 +4,8 @@
 
 #include <JuceHeader.h>
 
+#include "RenderPool.h"
+
 #include <array>
 #include <atomic>
 #include <memory>
@@ -445,12 +447,17 @@ public:
     RenderPlan (const RenderPlan&) = delete;
     RenderPlan& operator= (const RenderPlan&) = delete;
 
+    /** With a usable pool, and a graph that has heavy branches side by side,
+        the nodes are rendered on several cores; the result is the same either way. */
     void render (const float* const* hardwareInputs,
                  int numHardwareInputs,
                  float* const* hardwareOutputs,
                  int numHardwareOutputs,
                  int hardwareOffset,
-                 int numSamples) noexcept;
+                 int numSamples,
+                 RenderPool* pool = nullptr) noexcept;
+    /** Whether the graph has heavy nodes (neural models, convolution, FFT work) that do not depend on each other. */
+    [[nodiscard]] bool hasParallelWork() const noexcept { return parallelCandidate; }
 
     [[nodiscard]] int getMaximumBlockSize() const noexcept { return maximumBlockSize; }
     [[nodiscard]] int getGraphLatencySamples() const noexcept { return graphLatencySamples; }
@@ -478,6 +485,21 @@ private:
 
     explicit RenderPlan (int maximumBlockSizeToUse);
     void mixInputs (int nodeIndex, int numSamples) noexcept;
+    void renderNode (int nodeIndex) noexcept;
+
+    // What one block needs, set by render() before any node runs.
+    struct BlockContext
+    {
+        const float* const* hardwareInputs = nullptr;
+        int numHardwareInputs = 0, hardwareOffset = 0, numSamples = 0;
+    };
+    BlockContext block;
+
+    // The graph as tasks for the pool: a node is ready when its sources are done.
+    std::vector<int> taskIndegree, taskSuccessorOffsets, taskSuccessors;
+    std::unique_ptr<std::atomic<int>[]> taskPending;
+    std::unique_ptr<std::atomic<std::uint8_t>[]> taskState;
+    bool parallelCandidate = false;
 
     std::vector<std::unique_ptr<RenderNode>> renderNodes;
     std::vector<int> executionOrder;

@@ -31,6 +31,7 @@ Threads talk through:
 | callback to message thread: the old plan | retired list, deleted on the engine timer |
 | knobs, bypass, transport commands | atomics the node reads |
 | MIDI notes | fixed-size lock-free FIFO; if it overflows, all notes are released |
+| callback to helper threads: a block's nodes | atomics per node (sources left, state) and a futex wake; helpers have realtime priority one below the callback, or are not used |
 | meters and scopes | atomics the UI samples; losing a frame of them is fine |
 
 Atomics handle visibility, not lifetime. Anything the callback can see has

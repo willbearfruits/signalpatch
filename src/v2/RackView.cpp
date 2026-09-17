@@ -4472,7 +4472,9 @@ void RackView::drawHud (int width, int height, double now)
                     + "   " + juce::String (status.sampleRate / 1000.0, 1) + " kHz  "
                     + juce::String (status.bufferSize) + " smp ("
                     + juce::String (status.bufferSize * 1000.0 / juce::jmax (1.0, status.sampleRate), 2) + " ms)   "
-                    + "DSP " + juce::String (status.cpuLoad * 100.0f, 1) + "%   xruns " + juce::String (status.xruns)
+                    + "DSP " + juce::String (status.cpuLoad * 100.0f, 1) + "%"
+                    + (status.renderThreads > 1 ? " on " + juce::String (status.renderThreads) + " cores" : juce::String())
+                    + "   xruns " + juce::String (status.xruns)
                     + (status.realtimeThread ? juce::String() : juce::String ("   NO RT PRIORITY (realtime-privileges + realtime group, see README)"))
                     + "   |   " + juce::String (fps, 0) + " fps  " + juce::String (lastFrameMs, 2) + " ms/frame  "
                     + juce::String (plateRenders) + " plates rasterised";
