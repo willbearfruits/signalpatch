@@ -4,6 +4,8 @@ Newest first. "Unreleased" is what `main` has beyond the last tag.
 
 ## Unreleased
 
+## v0.3.3 — 2026-09-17
+
 - Five example patches under FILE > Examples, each one pedal on the Board:
   Clouds, Whammy, Fuzz Factory, Rainbow Machine, Slicer (`examples/`).
 - Neural captures cost about a third of what they did. The build now targets

@@ -36,6 +36,11 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.3" date="2026-09-17">
+      <description>
+        <p>Neural captures cost about a third of what they did, and patches with amps side by side are rendered on several cores. An inspector for knob ranges and curves, modulated knobs that move, the last session restored, hardware inputs that match the interface, and five example patches.</p>
+      </description>
+    </release>
     <release version="0.3.2" date="2026-09-16">
       <description>
         <p>Touch mode for handhelds: larger targets, tap an output and then an input to connect, hold for context menus, double tap to fit.</p>
