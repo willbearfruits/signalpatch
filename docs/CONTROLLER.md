@@ -1,20 +1,13 @@
-# The SignalPatch foot controller — protocol
+# Foot controller protocol
 
-A purpose-built controller for the Board. The firmware lives in its own
-repository; this document is the contract between it and SignalPatch, so any
-class-compliant MIDI device that follows it works, and the controller also
-works with anything else that speaks MIDI.
+How a foot controller talks to SignalPatch. The firmware lives in its own
+repository. Input is ordinary MIDI, so any controller works through MIDI
+learn. What this adds is feedback: SignalPatch tells the controller what
+each switch means right now, so its LEDs and display match the Board. A
+controller that ignores the SysEx still works.
 
-## Principles
-
-- **Plain MIDI in.** Footswitches, expression pedals and encoders arrive as
-  ordinary CC / note / program-change messages. SignalPatch binds them with
-  MIDI learn like any controller; nothing on the input side is proprietary.
-- **Feedback out over SysEx.** SignalPatch tells the controller what each
-  switch currently means (LED state, a short label), so the pedal's display
-  matches the Board. A controller that ignores SysEx still works blind.
-- **USB MIDI, class compliant.** ESP32-S3 with TinyUSB. No drivers on Linux,
-  Windows or the Ally.
+The reference hardware is an ESP32-S3 with TinyUSB, class compliant, so no
+drivers are needed.
 
 ## Input (controller → SignalPatch)
 
@@ -57,27 +50,14 @@ answering itself.
 Try it without hardware: `aseqdump -p "Midi Through"` in one terminal,
 `aseqsend -p "Midi Through" F0 7D 53 7F 00 F7` in another.
 
-## What SignalPatch already does
+## Notes
 
-- Opens every MIDI input, hot-plug included.
-- MIDI learn on knobs, stomps, module buttons (on the rack plate and on the
-  Board pedal - right-click the button), group pedals and rig slots;
-  bindings saved in the patch.
-- Note On toggles a stomp, CC >= 64 sets it, commands fire on the rising
-  edge, program changes select slots.
-- Relative encoders (CC 64 ± n) per mapping; the flag is saved with the patch.
-- SysEx feedback as above (`src/audio/ControllerFeedback.*`, diffed on the
-  engine timer, tested headless).
-- A MIDI Note node: notes reach the synth and pluck through the audio
-  callback's queue (Gate / Pitch / Velocity outputs).
+- A response curve for an expression pedal belongs to the knob it drives:
+  set it in the inspector.
+- Not done yet: a view in the app that shows the eight switches the way the
+  pedal does.
 
-## Follow-ups on the SignalPatch side
-
-- An expression curve (log/exp) on top of the calibrated span.
-- A "controller layout" view in the app that shows the eight switches the
-  way the pedal does.
-
-## Hardware sketch (for the firmware repo)
+## Hardware sketch
 
 - ESP32-S3 (the SuperMini kit already in use), TinyUSB MIDI.
 - 8 momentary footswitches with a WS2812 LED each; 2 × 1/4" TRS expression

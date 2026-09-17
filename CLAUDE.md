@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 SignalPatch is a C++20 real-time guitar rig / modular rack for Linux and Windows (AGPL-3.0, github.com/willbearfruits/signalpatch, site at willbearfruits.github.io/signalpatch). A headless JUCE 8 audio engine (`src/audio/`) runs under a GLFW + OpenGL 3.3 + NanoVG app (`src/v2/`) with two views of one patch: the **rack** (modules and cables) and the **Board** (the same patch as pedals, groups and five rig slots). The graph derives its ports from the audio device's enabled channels — no hard-coded input count anywhere.
 
-Doc map: `docs/CHANGELOG.md` (keep "Unreleased" current; add a `<release>` to `packaging/linux/*.metainfo.xml` per version) · `docs/ROADMAP.md` (the ordered plan — update as phases land) · `docs/ARCHITECTURE.md` · `docs/REALTIME_SAFETY.md` (callback contract, a release gate) · `docs/PRODUCTION_READINESS.md` (verification gates and audit passes — update when one moves) · `docs/CONTROLLER.md` (foot-controller MIDI/SysEx protocol) · `docs/NAM_ROADMAP.md` · `docs/APPLIANCE.md`.
+Doc map: `docs/CHANGELOG.md` (keep "Unreleased" current; add a `<release>` to `packaging/linux/*.metainfo.xml` per version) · `docs/ROADMAP.md` · `docs/ARCHITECTURE.md` · `docs/REALTIME_SAFETY.md` (rules for callback code) · `docs/TESTING.md` (what is verified and what is not; update when that changes) · `docs/BUILDING.md` · `docs/CONTROLLER.md` (foot-controller MIDI/SysEx protocol) · `docs/HANDHELD.md`. **Writing style for every public text (README, docs, site, release notes): short, plain, factual. No slogans, no bold-phrase bullet openers stacked with em dashes, no "for real" / "honest" / "proven" claims; say what it does and what is untested.**
 
 ## Build, run, test
 

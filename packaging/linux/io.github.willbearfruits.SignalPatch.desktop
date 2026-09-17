@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=SignalPatch
-GenericName=Modular Audio Rack
-Comment=Real-time modular guitar, voice and synth patching studio
+GenericName=Guitar Rig
+Comment=A guitar rig you patch with cables
 Exec=SignalPatch %f
 Icon=io.github.willbearfruits.SignalPatch
 Terminal=false

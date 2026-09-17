@@ -1,216 +1,43 @@
-# SignalPatch roadmap
+# Roadmap
 
-The single ordered plan for the project. Detail lives in the referenced docs:
-`PRODUCT.md` (product spec), `ARCHITECTURE.md` (engine design),
-`NAM_ROADMAP.md` (neural amp stages), `PRODUCTION_READINESS.md` (verification
-gates). This file says what comes next and why.
+Where this is going: one rig that runs on the desktop where it is built, and
+on a handheld for playing out, driven by a foot controller. The same app on
+both, scaled to the screen.
 
-## Where we are (0.2, shipped 2026-09-14/15)
+## Done
 
-Everything in 0.1 plus: undo/redo over every edit; a Cabinet node (two IRs,
-blend, cuts, zero-latency convolution); File menu, recent files, portable
-project bundles (patch + models + IRs as a zip); context menus everywhere; a
-much lighter JUCE rack. And **SignalPatch 2** (`signalpatch2`): the same
-engine under a GLFW + OpenGL + NanoVG UI that renders only what changed and
-idles at nothing — rack view with cached face plates, in-canvas menus, file
-browser and text prompts, an AUDIO device menu, and the **Board**: the patch
-arranged by signal flow as pedals, movable, with pedal **groups** (one
-footswitch and up to four knobs over several modules) and five **rig slots**
-whose knob values glide when the modules and cables match.
+- **0.2** Undo, the Cabinet, portable project zips, context menus.
+- **0.3** The GLFW app replaces the JUCE rack. The Board with groups and rig
+  slots. Looper, tuner, clock. Recordings saved with the patch. MIDI learn,
+  MIDI notes, controller feedback, gamepad. Stereo as left/right port pairs.
+  TONE3000 browser. Touch mode. Windows builds.
+- **Since 0.3.2** The inspector (range, curve and mod depth per knob),
+  modulated knobs that move, session restore, hardware inputs that match the
+  interface.
 
-Load-bearing gaps that most requests run into: the engine is **mono**, has
-**no external control** (MIDI/gamepad), and **does not persist recordings**
-(sampler/4-track audio). Two UIs exist; only one should.
+## Next
 
-## The destination
+- Go through every module while playing it and fix what the notes say:
+  default ranges, curves, units. The inspector exists to find out what those
+  should be.
+- The foot controller. The protocol is in `CONTROLLER.md`; the firmware is an
+  ESP32-S3 patch made with Daisypatcher, kept as a template in both repos.
+- MIDI clock in.
+- Touch and gamepad fixes from real use on the Ally.
 
-One instrument that runs wherever it is plugged in: the desktop (primary —
-where rigs are built and most playing happens), and a handheld such as the
-ROG Ally X for the stage, driven by a purpose-built foot controller and a
-gamepad. The rule that follows is **scale, don't specialise**: one UI whose
-layout, hit targets and density follow the window size and pixel density,
-so a 27-inch desktop, a laptop and a 7-inch handheld all get the same app,
-not three. Every phase below is ordered by how much closer it gets that.
+## Later
 
-Cross-cutting from 0.3 on:
-- **UI scale** (done 2026-09-15): Ctrl+/-/0, saved in settings, seeded from
-  the display, `--scale=`; everything in logical units. Still open: larger
-  finger targets at scale 1.25+.
-- **Input parity**: everything reachable by pointer, touch, gamepad and MIDI.
-- **Engine budget**: every node meets a 128-sample deadline on a laptop-class
-  CPU (the Ally X's Z1 Extreme is the reference floor).
+- Sub-patches: a group becomes a module with its own ports that can be saved
+  and reused.
+- One cable carrying two channels, if left/right pairs turn out to be clumsy.
+- Exporting a rig as a Daisypatcher `.dpatch` so a board built here can run
+  on a Daisy Seed pedal. The neural amp, the cabinet, the vocoder and the
+  granular module would be marked as desktop-only. Importing the other way.
+- A named screen profile for 7-inch handhelds.
+- OSC, a plug-in build, a node SDK. None of these are planned in detail.
 
----
+## Constraints that apply to everything
 
-## 0.3 — One app, and a rig that keeps what you play
-
-- **Retire the JUCE UI** (done 2026-09-15). `signalpatch2` is now the
-  `signalpatch` target and the `SignalPatch` executable; the JUCE rack builds
-  only with `-DSIGNALPATCH_BUILD_JUCE_UI=ON` (target `signalpatch_juce`) and
-  `src/ui` is deleted at the 0.3 release. Ways back, in order of how much
-  they undo: `cmake -B build -DSIGNALPATCH_BUILD_JUCE_UI=ON` (both apps on
-  the current engine); `git checkout juce-ui` (the last both-UIs tree, tagged
-  `v0.2.1`, builds forever); `git revert` of the retirement commit.
-- **Looper node** (done 2026-09-15): record / overdub / undo-last-pass /
-  half-speed / reverse; length from the first take or a bar count at a tempo.
-- **Recording persistence** (done 2026-09-15): sampler, 4-track and looper
-  audio saved as WAV under the project's `assets/audio/`, loaded back with
-  the patch, carried by bundles and autosave.
-- **Tuner** (done 2026-09-15): YIN on the message thread, note / cents /
-  needle on the module face.
-
-Exit: record a loop, save, reopen tomorrow, and it plays.
-
-## 0.4 — Play it without a mouse (control)
-
-The engine's event-queue design becomes real: every external input is a
-timestamped event on a bounded queue into the callback.
-
-- **MIDI input** (done 2026-09-15): every input opened, hot-plug scanned;
-  control messages applied on the message thread; notes go through a
-  lock-free FIFO into the audio callback and the **MIDI Note** node turns
-  them into Gate / Pitch / Velocity control for the synth and pluck.
-- **MIDI learn** (done 2026-09-15) on knobs, stomps, module buttons, group
-  pedals and rig slots; bindings saved in the patch, shown on the Board and
-  in the rack, adopted by slot glides.
-- **Gamepad map** (done 2026-09-15): d-pad walks pedals, A stomps, B picks
-  the knob, the left stick turns it, LB/RB change slot, X undoes, Y fits,
-  Start toggles views, Back mutes; the stick clicks open the board and pedal
-  menus (the board menu adds modules); inside a menu, browser or prompt the
-  d-pad, A and B are arrows, Enter and Escape; RT/LT press the focused
-  pedal's first two buttons (REC/TAP, PLAY). Menus also walk by keyboard,
-  and the Menu key opens the context menu at the pointer. Untested on a
-  real pad so far (none on the dev desk).
-- **Relative encoders** (done 2026-09-15): a mapping flag, "MIDI learn as
-  relative encoder" on any knob.
-- **Clock** (done 2026-09-15): one tempo for the drum machine, the
-  sequencer and the looper's transport (loops start/close on the bar); tap
-  tempo on the Clock and on the drum machine. MIDI clock in (0xF8) is a
-  natural follow-up.
-- **The controller**: a purpose-built foot controller (ESP32-S3, class-
-  compliant USB MIDI so any DAW also understands it): footswitches with LED
-  feedback, expression inputs, encoders, bank buttons. SignalPatch side done
-  2026-09-15: hello handshake, LED/label/slot/rig-name feedback over SysEx,
-  diffed on the engine timer, verified through Midi Through. Firmware lives
-  in its own repo; this repo defines the protocol (`docs/CONTROLLER.md`).
-
-Exit: a whole song with hands on the guitar only.
-
-## 0.5 — Stereo
-
-- **Stage 1 (done 2026-09-15): stereo as L/R port pairs.** Pan, Stereo
-  Merge, Stereo Delay (ping-pong, R offset), Stereo Chorus (phase spread),
-  Stereo Reverb (width), and a right output on the Cabinet (IR B); one drag
-  cables an L/R pair. The graph's buffers stay mono, so nothing in the
-  real-time path changed.
-- Stage 2: per-port channel policy in the compiler (mono / stereo /
-  match-upstream) so one cable can carry two channels and mono nodes stay
-  valid forever; dual-mono NAM with explicit CPU accounting; channel count
-  shown on ports and cables. Worth doing only if the pair-based rigs feel
-  clumsy in practice.
-
-Exit: the rig into the interface's two outputs sounds like a record, not a
-demo.
-
-## 0.6 — Handheld deployment
-
-- **Ally X bring-up**: OS decision (Linux recommended: native Wayland, the
-  PipeWire/JACK path we already qualify on; Windows kept building), USB
-  interface latency qualification at 64/128, battery vs performance presets.
-- **Boot to Board**: `--board --kiosk --unmute` (flags done 2026-09-15:
-  fullscreen on the primary monitor without decorations, no auto-iconify,
-  fade in without a key press; `--help` lists them); the same UI at handheld
-  scale, touch as a first-class pointer.
-- **7-inch preset**: a named scale/density profile for the Ally X screen
-  (larger hit targets, fewer knobs per pedal by default, tighter Board
-  spacing) built on the global scale factor, selectable from the AUDIO/
-  settings menu and by `--profile handheld`. Deliberately later than the
-  scale factor itself.
-- **Gamepad-only recovery** from every state: menus, browser and prompts
-  are covered (prompts grow an on-screen keyboard while a pad drives; Guide
-  opens FILE, which now also reaches the audio device menu; the left stick
-  click opens the rack's canvas menu, which covers the palette's job).
-- **Realtime scheduling check** on the target OS image: the HUD flags a
-  callback thread that is not SCHED_FIFO/RR (rtkit or realtime-privileges).
-- Packaging (AppImage/Flatpak, Windows zip), CI for the app on Linux and
-  Windows. Linux CI builds the app and uploads the binary as an artifact
-  (2026-09-15); the Flatpak manifest carries a GLFW module but has not been
-  rebuilt since the switch. Windows CI builds the app too (GL through the
-  vendored glad loader, GLFW fetched) and uploads `SignalPatch.exe`; it has
-  not been run on a Windows machine yet, and it is a console-subsystem
-  build (a console window opens alongside) until a GUI-subsystem target
-  lands.
-
-Exit: the rig built on the desktop runs unchanged on the handheld, and a gig
-happens without touching a keyboard.
-
-## 0.7 — Pedals you can reuse (sub-patches)
-
-A group becomes a real module: its own ports, saved to a library, dropped
-into other rigs, shared with other people. Waits for stereo so ports are
-defined once. (Daisypatcher has subpatches already; the same shape will
-make the `.dpatch` export in 0.8 line up.)
-
-## 0.7b — The inspector (first cut landed; the node-by-node review follows)
-
-**Landed:** the inspector panel (`I`): per knob, per instance, saved with
-the patch - the travel (min / max in real units, reversible), a curve, the
-mod depth and the exact value, so a "Speed 25-400 %" can become "80-120 %"
-on the pedal that needs finesse; MIDI and modulation stay inside the travel;
-modulated knobs are drawn where they are. **Still to do:** every node gets a
-pass with notes from playing it, and what the notes ask for (better default
-ranges and curves in the engine, units, per-knob defaults, renaming a knob
-on a pedal's face) goes in afterwards. The Pitch control inputs on the synth
-and pluck (48 st per unit, matching MIDI Note) are the first result of
-that review.
-
-## 0.8 — Hardware: the controller and the rig that leaves the computer
-
-Two boards, two jobs, one bridge: **Daisypatcher** (the visual patcher for
-the Daisy Seed and ESP32-S3/C3 that compiles a patch into firmware) is the
-tool that turns anything designed here into something you can flash. The
-codebases stay separate — a JUCE rig with a neural amp inside is a
-different runtime from a worklet-plus-emitter firmware patch — and the
-`.dpatch` file is where they meet.
-
-- **The foot controller is a Daisypatcher patch.** The ESP32-S3 SuperMini
-  kit (the open handheld: buttons, encoder, OLED, USB) already runs
-  Daisypatcher patches with MIDI nodes, a menu system and an OLED designer.
-  Ship a template patch that implements `docs/CONTROLLER.md` exactly:
-  footswitches → Note On/Off 60+n on channel 10, expression → CC 11/4,
-  encoders → CC 20-23 relative, program change for slots, and the SysEx
-  feedback (0x01-0x04) driving the LEDs and the OLED labels. Flash it from
-  Daisypatcher, plug it in, and SignalPatch's MIDI learn and controller
-  feedback just work. Keep the template in this repo
-  (`packaging/controller/`) and in Daisypatcher's examples.
-- **Export a rig as a `.dpatch`.** A kind-mapping table (delay → delay,
-  SVF filter → svf, reverb → reverb, chorus/phaser/tremolo, bitcrusher,
-  compressor/limiter/gate, LFO/envelope/sequencer, looper → sample-based
-  loop, drum machine → drums + step sequencer...) so a pedalboard built and
-  played on the desktop can be compiled for a Daisy Seed pedal (the
-  DP guitar box is the natural host). Neural Amp, Cabinet convolution, the
-  vocoder and the granular cloud are flagged as desktop-only in the export
-  dialog rather than silently dropped; a NAM "nano" model on the Seed is
-  a research item, not a promise.
-- **Import the other way** so a Daisypatcher patch opens as a rack here
-  (same table, reversed) — useful for auditioning with the real interface
-  and the NAM before flashing.
-- **One vocabulary.** Where both projects name the same thing, use the same
-  key; where they differ, the mapping table is the single source of truth
-  and both READMEs point at it.
-
-## Beyond
-
-OSC; plug-in target (VST3/CLAP); scene morphing beyond slot glides; a
-third-party node SDK.
-
-## Ordering rationale
-
-Retiring the JUCE UI first halves every later step. The looper and
-persistence come before control because a foot controller with nothing to
-loop is a light show. Stereo waits for control because a mono rig you can
-play beats a stereo rig you cannot; it comes before sub-patches so the port
-model changes once. The handheld is last as a phase but a constraint
-throughout: from 0.3 on, nothing lands in the UI that does not scale with
-the window and cannot be reached with a gamepad, and nothing lands in the
-engine that cannot meet a 128-sample deadline on a laptop-class CPU.
+- Nothing goes into the UI that does not scale with the window or cannot be
+  reached with a gamepad.
+- Every module has to meet a 128-sample deadline on a laptop CPU.

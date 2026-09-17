@@ -1084,7 +1084,7 @@ void testRecompileChurnKeepsRendering()
     renderPlanBlocks (*finalCompiled.plan, 20, true);
 }
 
-// Stage-3 qualification tool (docs/NAM_ROADMAP.md): benchmark every .nam in
+// Model benchmark (docs/HANDHELD.md): benchmark every .nam in
 // SIGNALPATCH_BENCH_NAM_DIR against the 64-sample/48 kHz deadline and print a
 // table. Informational unless a model fails to load.
 void testNamModelBenchmark()

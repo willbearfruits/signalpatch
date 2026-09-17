@@ -1,143 +1,98 @@
 # Changelog
 
-Newest first. Versions are git tags; "Unreleased" is what `main` carries
-beyond the last tag.
+Newest first. "Unreleased" is what `main` has beyond the last tag.
 
 ## Unreleased
 
-- **Inspector** (`I`, or "Inspector..." in a module's menu, or "Range, curve
-  and mod depth..." on a knob): a panel docked on the right that lists the
-  selected module's knobs with the exact value, the **minimum and maximum
-  the knob travels between** (real units; minimum above maximum reverses
-  it), a **curve** for that travel (finer at the bottom or at the top) and
-  the mod socket's depth. Drag a field, click it to type, right-click (hold,
-  on a touch screen) to reset. Saved with the patch and the rig slots,
-  undoable, and everything that turns the knob respects it: the mouse, a
-  mapped MIDI CC or expression pedal, and modulation, which now stays
-  inside the travel.
-- **Modulated knobs move.** A knob with a cable in its mod socket is drawn
-  where it really is, with a ring for the sweep the modulation can reach and
-  a notch where the knob is set (rack and Board).
-- **Hardware Inputs mirrors the interface.** PipeWire files an interface's
-  output monitors among its capture ports, so a 6-in box showed ten inputs,
-  four of them the rig's own output; those loopbacks are left off and never
-  shown. Picking a device in AUDIO switches on every channel it has (it used
-  to enable two), channels read "In 1  AUX0" rather than "capture_AUX0", and
-  a saved channel the device lacks is kept as a placeholder only while a
-  cable uses it.
-- **The session comes back as it was**: rack or Board, the camera, the
-  active slot, the open patch's name and its unsaved mark, the palette, the
-  window size (where the desktop lets a window choose). An edit made in the
-  last second before quitting is no longer lost. FILE > "Start muted" can be
-  switched off so a rig that was sounding comes back sounding (muted stays
-  the default). On Linux the UI settings moved from `~/SignalPatch/` to
-  `~/.config/SignalPatch/` (migrated on first launch).
+- Inspector (`I`, or from a module's or knob's menu): a panel on the right
+  listing the selected module's knobs with the exact value, the minimum and
+  maximum the knob travels between, a curve, and the mod depth. Drag a
+  field, click to type, right-click to reset. Minimum above maximum reverses
+  the knob. Saved with the patch and the rig slots. MIDI, expression pedals
+  and modulation stay inside the range.
+- A knob with a cable in its mod input moves on screen, with a ring for how
+  far the modulation can push it and a notch where it is set.
+- Hardware Inputs matches the interface. PipeWire lists an interface's
+  output monitors among its capture ports, so a 6-input Zoom showed ten
+  inputs; those are now left out. Picking a device enables all of its
+  channels instead of two. A saved channel the device lacks is kept only
+  while a cable uses it.
+- The session comes back as it was: rack or Board, camera, slot, file name,
+  unsaved mark, window size. An edit made in the last second before quitting
+  is no longer lost. FILE > Start muted can be turned off.
+- On Linux the UI settings moved from `~/SignalPatch/` to
+  `~/.config/SignalPatch/`.
 
 ## v0.3.2 — 2026-09-16
 
-- **Touch mode** for handhelds (auto on a small high-DPI screen, `--touch` /
-  `--no-touch`, or the FILE menu): finger-sized hit targets for ports,
-  knobs, stomps and buttons; **tap an output then an input to connect**
-  (the armed output draws a cable to your finger); **long press** opens the
-  context menu that a right click would; double tap on empty canvas fits;
-  on-screen zoom / fit buttons; taller menu and file-browser rows; the
-  on-screen keyboard is tappable; the FILE menu carries UI scale and fit so
-  a tablet never needs Ctrl.
+- Touch mode for handhelds. On automatically for a small high-DPI screen,
+  or `--touch` / `--no-touch`, or the FILE menu. Larger targets, tap an
+  output and then an input to connect, hold for the context menu, double
+  tap to fit, zoom and fit buttons on screen, a tappable keyboard in
+  prompts. UI scale and fit are in the FILE menu.
 
 ## v0.3.1 — 2026-09-15
 
-The hardening release: a seven-dimension audit of everything added since
-v0.2.0 (details in `docs/PRODUCTION_READINESS.md`, pass 3), all findings
-fixed.
+Bug fixes after reading through everything added since v0.2.0.
 
-- Recordings always reach the saved file (overdubs stopped with PLAY,
-  4-track takes, autosave after recording); crash on quit fixed; New/Open
-  ask about unsaved changes; undoing a delete restores MIDI bindings and
-  groups; slot glides are one undo step.
-- MIDI: velocity-0 note-ons release notes; commands fire on every press;
-  learned bindings keep their channel; replugged controllers reconnect.
-- Looper undo no longer stalls the audio; overdub is exact at half speed,
-  200 % and reverse; 4-track no longer doubles the input while recording
-  or stutters with SYNC.
-- Stereo pedals keep both sides when bypassed; recordings survive a sample
-  rate change; Clock start/reset realigns drums and sequencer; pluck in
-  tune; tuner handles 96 kHz.
-- Neural Amp tone stack (Gain, Bass, Mid, Treble, Presence, Master) and
-  Neural Pedal Tone; 4-track overhaul with reels; TONE3000 filters,
-  photos, audition and cabinet impulses; synth/pluck Pitch input.
-
-ASan/UBSan and TSan clean over 46 tests.
+- Recordings always reach the saved file: overdubs stopped with PLAY,
+  4-track takes, autosave after recording. WAVs are written to a temporary
+  file first.
+- Crash on quit fixed. New and Open ask about unsaved changes. Undoing a
+  delete restores MIDI bindings and groups. A slot change is one undo step.
+- MIDI: a note-on with velocity 0 is a release; commands fire on every
+  press; bindings keep their channel; replugged controllers reconnect.
+- Looper undo no longer stalls the audio. Overdub is exact at half speed,
+  double speed and in reverse.
+- 4-track: no doubled input while recording, no stutter with SYNC.
+- Stereo modules keep both sides when bypassed. Recordings survive a sample
+  rate change. Clock start and reset realign the drum machine and
+  sequencer. The pluck is in tune. The tuner works at 96 kHz.
+- New: a tone stack on the Neural Amp (gain, bass, mid, treble, presence,
+  master) and a tone knob on the Neural Pedal; the 4-track rebuilt with
+  per-track record, play, speed and sync, and reels that turn; TONE3000
+  filters, photos, auditioning and cabinet impulses; a pitch input on the
+  synth and pluck.
 
 ## v0.3.0 — 2026-09-15
 
-The revert point before the neural-module dials and the 4-track overhaul.
-Everything below landed between v0.2.1 and this tag, plus: TONE3000
-inside the app (log in once, search, download into a Neural module —
-Ctrl+T), a Clock node, node colours by family, `run-from-build.sh` for a
-desktop entry, and libcurl for https on Linux.
-
-**The app is the GLFW/OpenGL/NanoVG one now.** `signalpatch` builds the
-executable `SignalPatch`; the JUCE rack is kept behind
-`-DSIGNALPATCH_BUILD_JUCE_UI=ON` (tag `v0.2.1`, branch `juce-ui`) as the
-place to go back to.
+The app is now the GLFW / OpenGL / NanoVG one. The JUCE rack is kept behind
+`-DSIGNALPATCH_BUILD_JUCE_UI=ON` (tag `v0.2.1`, branch `juce-ui`).
 
 Engine
-- Looper node: record, close, overdub, undo a pass, half speed, reverse;
-  undo stays real-time safe.
-- Recordings (looper, 4-track, sampler) are saved with the patch as
-  `assets/audio/*.wav` and ride along in portable project zips and autosave.
-- MIDI: every input opened (hot-plug), mappings saved in the patch (CC /
-  note / program change to knob, stomp, button, slot, group), MIDI learn,
-  relative encoders (CC 64±n), expression pedal calibration (heel/toe span,
-  inverted when swapped), MIDI Note node (keyboard notes reach the synth and
-  pluck on the audio thread: Gate / Pitch / Velocity outputs).
-- Foot controller feedback over SysEx (`docs/CONTROLLER.md`): hello
-  handshake, switch LEDs and labels, live slot, rig name; diffed, verified
-  through ALSA's Midi Through.
-- Stereo stage 1: Pan, Stereo Merge, Stereo Delay (ping-pong), Stereo
-  Chorus, Stereo Reverb, a right output on the Cabinet (IR B); one drag
-  cables an L/R pair.
-- Tuner node (YIN on the message thread); drum machine tap tempo.
-- Clock node (tempo, tap, run/reset; Beat / Eighth / Bar pulses). The drum
-  machine and the step sequencer step on a Clock cabled into their new
-  Clock input; the looper's REC/PLAY wait for the next pulse while a clock
-  runs, so loops start and close on the bar. Four seconds of silence hand
-  control back to each node's own tempo.
-- Undo: compound gestures (a multi-module drag or delete is one step).
-- HUD warns **NO RT PRIORITY** when the callback thread is not
-  SCHED_FIFO/RR (install rtkit or realtime-privileges).
+- Looper: record, overdub, undo a pass, half speed, reverse.
+- Recordings (looper, 4-track, sampler) are saved with the patch as WAV
+  files and included in project zips and the autosave.
+- MIDI: every input opened, hot-plug included. Learn on knobs,
+  footswitches, buttons, slots and groups. Relative encoders, expression
+  pedal calibration. A MIDI Note module for the synth and pluck.
+- Foot controller feedback over SysEx (`CONTROLLER.md`).
+- Stereo as left/right pairs: pan, merge, ping-pong delay, chorus, reverb,
+  and a right output on the Cabinet.
+- Tuner. Clock module with tap tempo; the drum machine, sequencer and looper
+  follow it.
+- TONE3000 inside the app (`Ctrl+T`).
+- The header warns when the audio thread has no realtime priority.
 
-UI
-- Board: flow layout, movable pedals, pedal groups (one stomp, up to four
-  exposed knobs), five rig slots with knob glides, transport buttons on the
-  pedals, MIDI labels everywhere a binding exists.
-- Rack: cached face plates, in-canvas menus / prompts / file browser, module
-  palette (P), multi-selection (Shift+click, rubber band, Ctrl+A), group
-  drag and delete, Menu key / Shift+F10 context menus.
-- Menus walk by keyboard; a gamepad drives the Board (d-pad, A/B, stick,
-  LB/RB slots, RT/LT pedal buttons, stick clicks for menus, Guide for FILE)
-  and gets an on-screen keyboard in prompts.
-- Global UI scale (Ctrl +/-/0, `--scale=`, `SIGNALPATCH_SCALE`).
-- `--board`, `--kiosk`, `--unmute`, `--help`.
-- OpenGL through a vendored glad loader, GLFW fetched when the system has
-  none: the app builds on Windows too (CI uploads SignalPatch.exe and the
-  Linux binary as artifacts).
-
-Tests: 34 headless engine tests including the allocation trap over the
-worst-case graph with MIDI notes dispatched; ASan/UBSan and TSan clean;
-30-minute soak re-run.
+App
+- The Board: pedals laid out by signal flow, movable, groupable into one
+  pedal with up to four knobs, five rig slots with gliding knobs.
+- Rack: cached face plates, menus and file browser drawn in the canvas,
+  module palette, multi-selection, module colours by family.
+- Keyboard and gamepad reach every menu and prompt.
+- UI scale (`Ctrl +/-`, `--scale=`), `--board`, `--kiosk`, `--unmute`.
+- Builds on Windows; CI uploads both binaries.
 
 ## v0.2.1 — 2026-09-15
 
-Last tree with both UIs built by default; tagged before the JUCE rack was
-retired behind an option.
+The last tree that built both UIs by default.
 
 ## v0.2.0 — 2026-09-14
 
-Undo/redo, Cabinet impulse-response node, File menu with recent files and
-portable project bundles, context menus everywhere, a much lighter rack UI.
+Undo and redo, the Cabinet module, a File menu with recent files and
+portable project zips, context menus, a much lighter rack UI.
 
 ## v0.1.0 — 2026-07-11
 
-First public release: 35 modules, Neural Amp Modeler support, rack UI with
-stomp bypass and live cables, guarded feedback, real-time safety gates.
+First public release: 35 modules, Neural Amp Modeler support, a rack with
+bypass footswitches and live cables, guarded feedback.
