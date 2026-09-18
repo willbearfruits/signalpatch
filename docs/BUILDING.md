@@ -100,8 +100,10 @@ SignalPatch [options] [patch.signalpatch | bundle.zip]
 ```
 
 Touch mode turns itself on for a small high-DPI screen: larger targets, tap
-an output and then an input to connect, hold for the menu a right click
-opens, double tap to fit.
+an output (anywhere on the right edge of the plate at socket height) and
+then tap the module it should go into, hold for the menu a right click
+opens, double tap to fit. A module's menu can also send its output to any
+other module.
 
 ## Tests
 

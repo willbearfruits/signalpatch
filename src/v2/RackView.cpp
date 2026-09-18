@@ -228,6 +228,92 @@ juce::Rectangle<float> RackView::touchButtonBounds (int index) const noexcept
     return { static_cast<float> (windowW) - inspector.dockedWidth() - (3.0f - static_cast<float> (index)) * (size + 10.0f), bottom - size, size, size };
 }
 
+SignalType RackView::pendingType() const
+{
+    if (pendingSource.has_value())
+        if (const auto* source = engine.getDocument().findNode (pendingSource->first))
+            if (juce::isPositiveAndBelow (pendingSource->second, source->processor->getNumOutputPorts()))
+                return source->processor->getOutputPort (pendingSource->second).type;
+    return SignalType::audio;
+}
+
+std::optional<int> RackView::nearestInputOfType (const Layout& layout, juce::Point<float> origin, juce::Point<float> world, SignalType type) const
+{
+    const auto* model = engine.getDocument().findNode (layout.id);
+    if (model == nullptr)
+        return std::nullopt;
+    std::optional<int> best;
+    float bestDistance = 0.0f;
+    for (int port = 0; port < layout.inputs; ++port)
+    {
+        if (model->processor->getInputPort (port).type != type)
+            continue;
+        const auto distance = inputPortCentre (layout, origin, port).getDistanceFrom (world);
+        if (! best.has_value() || distance < bestDistance)
+        {
+            best = port;
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
+
+std::optional<int> RackView::outputInTouchStrip (const Layout& layout, juce::Point<float> origin, juce::Point<float> world) const
+{
+    if (layout.outputs == 0 || world.x < origin.x + layout.w - 70.0f || world.x > origin.x + layout.w + 24.0f)
+        return std::nullopt;
+    const auto top = origin.y + firstPortY - portSpacing, bottom = origin.y + firstPortY + static_cast<float> (layout.outputs) * portSpacing;
+    if (world.y < top || world.y > bottom)
+        return std::nullopt;
+    int best = 0;
+    for (int port = 1; port < layout.outputs; ++port)
+        if (std::abs (outputPortCentre (layout, origin, port).y - world.y) < std::abs (outputPortCentre (layout, origin, best).y - world.y))
+            best = port;
+    return best;
+}
+
+std::optional<int> RackView::inputInTouchStrip (const Layout& layout, juce::Point<float> origin, juce::Point<float> world) const
+{
+    if (layout.inputs == 0 || world.x < origin.x - 24.0f || world.x > origin.x + 70.0f)
+        return std::nullopt;
+    const auto top = origin.y + firstPortY - portSpacing, bottom = origin.y + firstPortY + static_cast<float> (layout.inputs) * portSpacing;
+    if (world.y < top || world.y > bottom)
+        return std::nullopt;
+    int best = 0;
+    for (int port = 1; port < layout.inputs; ++port)
+        if (std::abs (inputPortCentre (layout, origin, port).y - world.y) < std::abs (inputPortCentre (layout, origin, best).y - world.y))
+            best = port;
+    return best;
+}
+
+void RackView::connectFirstFree (NodeId source, int sourcePort, NodeId destination)
+{
+    const auto* from = engine.getDocument().findNode (source);
+    const auto* to = engine.getDocument().findNode (destination);
+    if (from == nullptr || to == nullptr || ! juce::isPositiveAndBelow (sourcePort, from->processor->getNumOutputPorts()))
+        return;
+    const auto type = from->processor->getOutputPort (sourcePort).type;
+    int chosen = -1, firstOfType = -1;
+    for (int port = 0; port < to->processor->getNumInputPorts() && chosen < 0; ++port)
+    {
+        if (to->processor->getInputPort (port).type != type)
+            continue;
+        if (firstOfType < 0)
+            firstOfType = port;
+        bool taken = false;
+        for (const auto& cable : engine.getDocument().getConnections())
+            taken = taken || (cable.destinationNode == destination && cable.destinationPort == port);
+        if (! taken)
+            chosen = port;
+    }
+    if (chosen < 0)
+        chosen = firstOfType; // every input is busy: share the first one (inputs sum)
+    if (chosen < 0)
+        return;
+    pendingSource = std::make_pair (source, sourcePort);
+    connectPending (destination, chosen);
+}
+
 void RackView::connectPending (NodeId destination, int port)
 {
     if (! pendingSource.has_value())
@@ -1262,7 +1348,7 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
         if (connection.sourceNode == layout.id || connection.destinationNode == layout.id)
             ++cableCount;
     enum { bypass = 1, rename, duplicate, resetKnobs, disconnectAll, remove, prevModel, nextModel, prevIr, nextIr, clearIrB, browseTone3000, browseImpulsesA, browseImpulsesB,
-           midiLearnStomp, midiRemoveStomp, inspect, midiLearnButtonBase = 3000, midiRemoveButtonBase = 3500 };
+           midiLearnStomp, midiRemoveStomp, inspect, midiLearnButtonBase = 3000, midiRemoveButtonBase = 3500, sendBase = 100000 };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (model->processor->getName().toUpperCase()));
     if (layout.stomp)
@@ -1305,6 +1391,41 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
         items.push_back (MenuItem::item (resetKnobs, "Reset knobs to defaults", {}, ! layout.knobParameters.empty()));
         items.push_back (MenuItem::item (inspect, "Inspector: knob ranges, curves, mod depths...", "I", model->processor->getNumParameters() > 0));
     }
+    // No aiming needed: pick the module this one should feed. Audio goes to its first
+    // free audio input; a control output offers each knob of the target.
+    {
+        const auto& document = engine.getDocument();
+        const auto outputPort = firstAudioOutputPort (*model->processor) >= 0 ? firstAudioOutputPort (*model->processor)
+                              : model->processor->getNumOutputPorts() > 0 ? 0 : -1;
+        if (outputPort >= 0)
+        {
+            const auto type = model->processor->getOutputPort (outputPort).type;
+            std::vector<MenuItem> targets;
+            int targetIndex = 0;
+            for (const auto& other : document.getNodes())
+            {
+                const auto index = targetIndex++;
+                if (other.id == layout.id || other.processor->getKind() == NodeKind::hardwareInput)
+                    continue;
+                if (type == SignalType::audio)
+                {
+                    if (firstAudioInputPort (*other.processor) >= 0)
+                        targets.push_back (MenuItem::item (sendBase + index * 64, other.processor->getName()));
+                }
+                else
+                {
+                    std::vector<MenuItem> knobs;
+                    for (int port = 0; port < juce::jmin (63, other.processor->getNumInputPorts()); ++port)
+                        if (other.processor->getInputPort (port).type == SignalType::control)
+                            knobs.push_back (MenuItem::item (sendBase + index * 64 + port, other.processor->getInputPort (port).name));
+                    if (! knobs.empty())
+                        targets.push_back (MenuItem::sub (other.processor->getName(), std::move (knobs)));
+                }
+            }
+            if (! targets.empty())
+                items.push_back (MenuItem::sub (type == SignalType::audio ? "Send audio to" : "Modulate", std::move (targets)));
+        }
+    }
     items.push_back (MenuItem::item (disconnectAll, "Disconnect all cables (" + juce::String (cableCount) + ")", {}, cableCount > 0));
     if (layout.kind == NodeKind::neuralAmpPlaceholder || layout.kind == NodeKind::neuralPedal)
     {
@@ -1333,6 +1454,25 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
         const auto* current = engine.getDocument().findNode (id);
         if (current == nullptr)
             return;
+        if (picked >= sendBase)
+        {
+            const auto targetIndex = (picked - sendBase) / 64, targetPort = (picked - sendBase) % 64;
+            const auto& nodes = engine.getDocument().getNodes();
+            if (juce::isPositiveAndBelow (targetIndex, static_cast<int> (nodes.size())))
+            {
+                const auto targetId = nodes[static_cast<std::size_t> (targetIndex)].id;
+                const auto outputPort = firstAudioOutputPort (*current->processor) >= 0 ? firstAudioOutputPort (*current->processor) : 0;
+                if (current->processor->getOutputPort (outputPort).type == SignalType::audio)
+                    connectFirstFree (id, outputPort, targetId);
+                else
+                {
+                    pendingSource = std::make_pair (id, outputPort);
+                    connectPending (targetId, targetPort);
+                }
+            }
+            dirty = true;
+            return;
+        }
         switch (picked)
         {
             case bypass: engine.setNodeBypassed (id, ! current->processor->isBypassed()); break;
@@ -3858,7 +3998,7 @@ void RackView::tick (double now)
     if (touchMode && pressActive && ! longPressFired && ! menu.isOpen() && ! prompt.isOpen() && ! browser.isOpen() && ! toneBrowser.isOpen())
     {
         animating = true; // keep frames coming so the press can ripen
-        if (now - pressTime > 0.5 && ! draggingNode.has_value() && ! knobDrag.has_value() && ! cableDrag.has_value()
+        if (now - pressTime > 0.7 && ! draggingNode.has_value() && ! knobDrag.has_value() && ! cableDrag.has_value()
             && ! boardDrag.has_value() && ! marquee.has_value() && ! paletteDrag.has_value()
             && juce::Point<double> (mouseX, mouseY).getDistanceFrom ({ pressX, pressY }) < 8.0)
         {
@@ -4377,6 +4517,24 @@ void RackView::drawNode (const Layout& layout, double now)
     }
 
     drawPreviewContent (layout, *model, origin);
+
+    // A cable is armed: every socket it fits lights up, so the finger knows where to go.
+    if (pendingSource.has_value() && pendingSource->first != layout.id)
+    {
+        const auto type = pendingType();
+        const auto pulse = 0.55f + 0.45f * static_cast<float> (std::sin (now * 6.0));
+        for (int port = 0; port < layout.inputs; ++port)
+        {
+            if (model->processor->getInputPort (port).type != type)
+                continue;
+            const auto centre = inputPortCentre (layout, origin, port);
+            nvgBeginPath (vg);
+            nvgCircle (vg, centre.x, centre.y, 9.0f + 3.0f * pulse);
+            nvgStrokeColor (vg, alpha (type == SignalType::audio ? palette::audio : palette::control, 0.9f));
+            nvgStrokeWidth (vg, 2.0f);
+            nvgStroke (vg);
+        }
+    }
 
     // Knobs with a cable in their mod socket move with the modulation.
     for (std::size_t knob = 0; knob < layout.knobParameters.size(); ++knob)
@@ -5137,12 +5295,30 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
                     break;
             }
         }
+        if (! connected && cableDrag.has_value() && touchMode
+            && juce::Point<double> (x, y).getDistanceFrom ({ pressX, pressY }) >= 8.0 * touchHit())
+        {
+            // A drag that ends on another module, not exactly on a socket: the nearest input the cable fits.
+            for (auto it = layouts.rbegin(); it != layouts.rend() && ! connected; ++it)
+            {
+                const auto origin = nodePosition (it->id);
+                if (it->id == cableDrag->sourceNode || ! juce::Rectangle<float> (origin.x, origin.y, it->w, it->h).expanded (24.0f).contains (world))
+                    continue;
+                if (const auto port = nearestInputOfType (*it, origin, world, cableDrag->type))
+                {
+                    pendingSource = std::make_pair (cableDrag->sourceNode, cableDrag->sourcePort);
+                    connectPending (it->id, *port);
+                    connected = true;
+                }
+            }
+        }
         if (! connected && cableDrag.has_value()
-            && juce::Point<double> (x, y).getDistanceFrom ({ pressX, pressY }) < 8.0)
+            && juce::Point<double> (x, y).getDistanceFrom ({ pressX, pressY }) < 8.0 * touchHit())
         {
             // A tap, not a drag: arm the output and wait for a tap on an input.
             pendingSource = std::make_pair (cableDrag->sourceNode, cableDrag->sourcePort);
-            say ("Now tap an input to connect (tap the output again to cancel)");
+            say (touchMode ? "Now tap the module (or the input) this should go into. Tap the output again to cancel."
+                           : "Now tap an input to connect (tap the output again to cancel)");
         }
         draggingNode.reset();
         dragStartPositions.clear();
@@ -5173,6 +5349,47 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
         const auto* model = engine.getDocument().findNode (layout.id);
         if (model == nullptr)
             continue;
+
+        if (touchMode)
+        {
+            // A finger on a plate: its socket strips first, then, with a cable armed, the
+            // nearest input the cable fits, wherever on the plate the finger landed.
+            if (const auto port = outputInTouchStrip (layout, origin, world))
+            {
+                if (pendingSource.has_value() && *pendingSource == std::make_pair (layout.id, *port))
+                {
+                    pendingSource.reset();
+                    say ("Connection cancelled");
+                    return;
+                }
+                cableDrag = CableDrag { layout.id, *port, model->processor->getOutputPort (*port).type, world.x, world.y };
+                dirty = true;
+                return;
+            }
+            if (pendingSource.has_value())
+            {
+                if (const auto port = nearestInputOfType (layout, origin, world, pendingType()))
+                    connectPending (layout.id, *port);
+                else
+                    say ("That module has no input for this cable");
+                dirty = true;
+                return;
+            }
+            if (const auto port = inputInTouchStrip (layout, origin, world))
+            {
+                for (const auto& connection : engine.getDocument().getConnections())
+                    if (connection.destinationNode == layout.id && connection.destinationPort == *port)
+                        if (const auto* source = engine.getDocument().findNode (connection.sourceNode))
+                        {
+                            // Lift the plug out of the socket and carry the cable.
+                            cableDrag = CableDrag { connection.sourceNode, connection.sourcePort,
+                                                    source->processor->getOutputPort (connection.sourcePort).type, world.x, world.y };
+                            engine.disconnect (connection);
+                            dirty = true;
+                            return;
+                        }
+            }
+        }
 
         for (std::size_t index = 0; index < layout.buttons.size(); ++index)
             if (buttonBounds (layout, origin, static_cast<int> (index)).contains (world))

@@ -198,6 +198,17 @@ private:
     [[nodiscard]] juce::Rectangle<float> touchButtonBounds (int index) const noexcept;
     void drawTouchButtons();
     void connectPending (NodeId destination, int port);
+    /** The signal type of the armed output (audio unless the source is a control output). */
+    [[nodiscard]] SignalType pendingType() const;
+    /** Touch: the nearest input of that type anywhere on the plate. A finger cannot pick one of
+        seven sockets 19 px apart, but it can hit the module and land near the right side of it. */
+    [[nodiscard]] std::optional<int> nearestInputOfType (const Layout& layout, juce::Point<float> origin, juce::Point<float> world, SignalType type) const;
+    /** Touch: the nearest output when the tap is in the plate's right-hand socket strip. */
+    [[nodiscard]] std::optional<int> outputInTouchStrip (const Layout& layout, juce::Point<float> origin, juce::Point<float> world) const;
+    /** Touch: the nearest input when the tap is in the plate's left-hand socket strip. */
+    [[nodiscard]] std::optional<int> inputInTouchStrip (const Layout& layout, juce::Point<float> origin, juce::Point<float> world) const;
+    /** Connects an output to the first free input of the same type on another module (the menu path). */
+    void connectFirstFree (NodeId source, int sourcePort, NodeId destination);
     /** Handles a tap on the zoom / fit buttons. */
     bool touchButtonPressed (double x, double y);
     /** Runs proceed now, or after asking what to do with unsaved changes. */

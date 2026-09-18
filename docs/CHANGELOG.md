@@ -4,6 +4,18 @@ Newest first. "Unreleased" is what `main` has beyond the last tag.
 
 ## Unreleased
 
+## v0.3.4 — 2026-09-18
+
+- Patching with a finger. In touch mode the whole right edge of a plate at
+  socket height picks up the nearest output, and with a cable armed a tap
+  anywhere on a module goes into the nearest input the cable fits (audio to
+  audio, control to control); the sockets that fit light up. A drag that
+  lands on a module rather than exactly on a socket connects the same way.
+  The long press takes 0.7 s instead of 0.5 so aiming does not open a menu.
+- A module's menu has "Send audio to" (or "Modulate", for LFOs and the
+  like) listing every module it can feed, for connecting without aiming at
+  all.
+
 ## v0.3.3 — 2026-09-17
 
 - Five example patches under FILE > Examples, each one pedal on the Board:
