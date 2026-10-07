@@ -35,8 +35,9 @@ void preparePlatformWindow (GLFWwindow* window)
     }
     // No contact rings or press-and-hold animation drawn by Windows over the rack.
     BOOL off = FALSE;
-    for (const auto feedback : { FEEDBACK_TOUCH_CONTACTVISUALIZATION, FEEDBACK_TOUCH_TAP, FEEDBACK_TOUCH_DOUBLETAP,
-                                 FEEDBACK_TOUCH_PRESSANDHOLD, FEEDBACK_TOUCH_RIGHTTAP, FEEDBACK_GESTURE_PRESSANDTAP })
+    const FEEDBACK_TYPE feedbacks[] { FEEDBACK_TOUCH_CONTACTVISUALIZATION, FEEDBACK_TOUCH_TAP, FEEDBACK_TOUCH_DOUBLETAP,
+                                      FEEDBACK_TOUCH_PRESSANDHOLD, FEEDBACK_TOUCH_RIGHTTAP, FEEDBACK_GESTURE_PRESSANDTAP };
+    for (const auto feedback : feedbacks)
         SetWindowFeedbackSetting (hwnd, feedback, 0, sizeof (off), &off);
    #else
     (void) window;
