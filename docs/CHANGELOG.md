@@ -4,6 +4,53 @@ Newest first. "Unreleased" is what `main` has beyond the last tag.
 
 ## Unreleased
 
+Building a patch on a small touch screen (the ROG Ally under Windows), and a
+handheld controller to go with it.
+
+- Add a module without aiming a cable. + ADD (touch), A, or "Add a module..."
+  in the menus opens a picker with every module as a large tile and a line
+  on what it does, grouped by family, filtered by typing, walked with the
+  d-pad (the bumpers jump family). The module goes after the selected one,
+  or at the end of the chain, with the cables moved over. On the Board a +
+  sits between each pair of pedals and puts the new pedal there.
+- Module and pedal menus: add a module after or before this one, move it
+  earlier or later in the chain, remove it and keep the chain connected.
+  Stereo pairs stay paired (a stereo module after a mono one gets the mono
+  signal on both inputs and plays into outputs 1 and 2). Each of these is
+  one undo step. Inserting into a cable from the cable menu does the same.
+- Touch: a tap on a knob opens a large slider with the exact value, - and +
+  steps, reset, typed entry and FINE. A knob turns only after the finger has
+  moved a few pixels, so a tap does not nudge it. A held finger on a module
+  or a pedal now opens its menu (it started a drag before and never did),
+  and a slightly shaky tap no longer pins a pedal in place. The header is
+  taller with finger-sized buttons, MUTED is a button, UNDO and REDO are on
+  screen, the module list starts hidden, and the slot bar says "hold to
+  store" instead of Shift+click.
+- Windows: Bluetooth LE MIDI devices are seen (JUCE's WinRT MIDI backend,
+  `SIGNALPATCH_WINDOWS_BLE_MIDI`). On a touch screen Windows' own
+  press-and-hold is turned off for the window so a press arrives at once.
+  The first start on a screen smaller than the default window is maximised.
+- The C3 handheld controller: firmware for an ESP32-C3 SuperMini with a
+  0.42" OLED, an encoder, three pots, three buttons, an expression jack and
+  an MPU-6050, over Bluetooth LE MIDI (`controller/c3-oled/`). Built and
+  host-tested, not yet run on a board.
+- The controller protocol (`CONTROLLER.md`) gains labels and values for
+  continuous controls, a mute flag, a hello that names the model and
+  firmware, and settings read and written over SysEx.
+- A CONTROLLER page (header button, or FILE): each control of the C3, what it
+  drives, its last value, and ASSIGN (a knob or footswitch in this patch,
+  tapped or picked from a list, or an app action in every patch). The
+  default layout: the encoder turns the last knob touched and its push picks
+  the next knob, the pots play the selected module's first three knobs and
+  take over only once they pass the knob's value, buttons 1 and 2 change rig
+  slot, button 3 mutes. SETTINGS edits the controller's own settings; when
+  it changes its channel or numbers, the mappings move along.
+- `SIGNALPATCH_UI_SCRIPT` plays taps, holds, drags and keys from a file and
+  saves screenshots, for checking touch flows without a touch screen.
+- A 3D-printable case for the C3 controller (`controller/c3-oled/enclosure/`):
+  shell and lid, 116 x 74 x 31 mm, checked for fit, wall thickness and
+  overhangs by the build but not yet printed.
+
 ## v0.3.4 — 2026-09-18
 
 - Patching with a finger. In touch mode the whole right edge of a plate at

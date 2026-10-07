@@ -79,6 +79,9 @@ as a share of the block.
 ## Windows
 
 Pick "Windows Audio (Exclusive Mode)" and 64 or 128 samples under AUDIO.
+The Ally's single USB-C port usually holds the interface, so the C3
+controller (`controller/c3-oled/`) pairs over Bluetooth instead: add it in
+Settings > Bluetooth & devices before starting SignalPatch.
 An ASIO build (`-DSIGNALPATCH_ENABLE_ASIO=ON`, with the interface's ASIO
 driver) is usually tighter. Use the High Performance power plan and turn
 off Game Bar and the vendor's overlay and updater. A Task Scheduler entry

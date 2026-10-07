@@ -3,6 +3,7 @@
 #include "../src/audio/PatchBundle.h"
 #include "../src/audio/MidiMap.h"
 #include "../src/audio/ControllerFeedback.h"
+#include "../src/audio/ChainEdit.h"
 #include "../src/audio/Tone3000.h"
 #include "../src/audio/Processors.h"
 
@@ -17,6 +18,7 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -1358,6 +1360,178 @@ struct TestCase
 };
 } // namespace
 
+// The chain edits against a bare document, under the engine's rules: a cable
+// that would not compile is taken back, every step is one undo entry.
+class TestChainEditor final : public chain::Editor
+{
+public:
+    TestChainEditor (PatchDocument& documentToEdit, PatchHistory& historyToUse) : doc (documentToEdit), history (historyToUse) {}
+    [[nodiscard]] const PatchDocument& document() const override { return doc; }
+    NodeId add (NodeKind kind, juce::Point<float> position) override
+    {
+        const auto id = doc.addNode (kind, position);
+        if (id != 0)
+            history.recordNodeAdded (id);
+        return id;
+    }
+    bool remove (NodeId id) override { return history.removeNode (id); }
+    juce::Result connect (Connection connection) override
+    {
+        const auto result = doc.addConnection (connection);
+        if (result.failed())
+            return result;
+        if (const auto compiled = GraphCompiler::compile (doc, blockSize, true); ! compiled.succeeded())
+        {
+            doc.removeConnection (connection);
+            return juce::Result::fail (compiled.error);
+        }
+        history.recordConnected (connection);
+        return result;
+    }
+    bool disconnect (const Connection& connection) override
+    {
+        if (! doc.removeConnection (connection))
+            return false;
+        history.recordDisconnected (connection);
+        return true;
+    }
+    void move (NodeId id, juce::Point<float> position) override
+    {
+        if (auto* node = doc.findNode (id))
+        {
+            history.recordMove (id, node->position, position);
+            node->position = position;
+        }
+    }
+    void beginStep (const juce::String& description) override { history.beginCompoundGesture (description); }
+    void endStep() override { history.closeGesture(); }
+    void undoStep() override { history.undo(); }
+
+private:
+    PatchDocument& doc;
+    PatchHistory& history;
+};
+
+std::vector<Connection> sortedCables (const PatchDocument& document)
+{
+    auto cables = document.getConnections();
+    std::sort (cables.begin(), cables.end(), [] (const Connection& a, const Connection& b)
+    {
+        return std::tie (a.sourceNode, a.sourcePort, a.destinationNode, a.destinationPort)
+             < std::tie (b.sourceNode, b.sourcePort, b.destinationNode, b.destinationPort);
+    });
+    return cables;
+}
+
+void testChainInsertRemoveAndUndo()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 2), channelNames ("Output", 2));
+    PatchHistory history (document);
+    TestChainEditor editor (document, history);
+    constexpr auto in = PatchDocument::hardwareInputId;
+    constexpr auto out = PatchDocument::hardwareOutputId;
+
+    // Nothing cabled yet: the end of the chain runs from input 1 to outputs 1 and 2.
+    juce::String note;
+    const auto drive = chain::insert (editor, NodeKind::distortion, { 300.0f, 100.0f }, chain::endOfChain (document), note);
+    expect (drive != 0, "insert into an empty patch failed: " + note.toStdString());
+    expect (hasConnection (document, { in, 0, drive, 0 }) && hasConnection (document, { drive, 0, out, 0 }) && hasConnection (document, { drive, 0, out, 1 }),
+            "an empty patch should become input -> distortion -> both outputs");
+    expect (document.getConnections().size() == 3, "three cables expected, got " + std::to_string (document.getConnections().size()));
+    const auto before = sortedCables (document);
+
+    // After the distortion: its cables to both outputs move behind the delay.
+    const auto delay = chain::insert (editor, NodeKind::delay, { 600.0f, 100.0f }, chain::after (document, drive), note);
+    expect (delay != 0, "insert after failed: " + note.toStdString());
+    expect (hasConnection (document, { drive, 0, delay, 0 }), "distortion should feed the delay");
+    expect (hasConnection (document, { delay, 0, out, 0 }) && hasConnection (document, { delay, 0, out, 1 }), "the delay should take over both outputs");
+    expect (! hasConnection (document, { drive, 0, out, 0 }) && ! hasConnection (document, { drive, 0, out, 1 }), "the old cables to the outputs should be gone");
+    expect (history.getUndoDescription().contains ("Delay"), "one undo step named after the module: " + history.getUndoDescription().toStdString());
+
+    // A stereo module after a mono one: both of its inputs, and its two outputs to the two outputs.
+    const auto reverb = chain::insert (editor, NodeKind::stereoReverb, { 900.0f, 100.0f }, chain::after (document, delay), note);
+    expect (reverb != 0, "stereo insert failed: " + note.toStdString());
+    const auto reverbIns = chain::audioInputs (*document.findNode (reverb)->processor);
+    const auto reverbOuts = chain::audioOutputs (*document.findNode (reverb)->processor);
+    expect (reverbIns.right >= 0 && reverbOuts.right >= 0, "the stereo reverb should have L/R pairs");
+    expect (hasConnection (document, { delay, 0, reverb, reverbIns.left }) && hasConnection (document, { delay, 0, reverb, reverbIns.right }),
+            "a mono module should feed both inputs of a stereo one");
+    expect (hasConnection (document, { reverb, reverbOuts.left, out, 0 }) && hasConnection (document, { reverb, reverbOuts.right, out, 1 }),
+            "the stereo module should play left into output 1 and right into output 2");
+    expect (GraphCompiler::compile (document, blockSize, true).succeeded(), "the chain should compile");
+
+    // Taking the delay out closes the gap into both reverb inputs.
+    expectOk (chain::removeAndBridge (editor, delay), "remove and bridge");
+    expect (document.findNode (delay) == nullptr, "the delay should be gone");
+    expect (hasConnection (document, { drive, 0, reverb, reverbIns.left }) && hasConnection (document, { drive, 0, reverb, reverbIns.right }),
+            "the distortion should now feed the reverb's two inputs");
+
+    // Each edit is one undo step: three undos take it back to the first chain.
+    for (int step = 0; step < 3; ++step)
+        expect (history.undo() == PatchHistory::Applied::structure, "undo step " + std::to_string (step));
+    expect (sortedCables (document) == before, "three undos should give back the distortion-only chain");
+    expect (document.findNode (delay) == nullptr && document.findNode (reverb) == nullptr, "the inserted modules should be gone after undo");
+    expect (! chain::removeAndBridge (editor, in).wasOk(), "the hardware input must not be removable");
+}
+
+void testChainMoveSourcesAndRefusals()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 2));
+    PatchHistory history (document);
+    TestChainEditor editor (document, history);
+    constexpr auto in = PatchDocument::hardwareInputId;
+    constexpr auto out = PatchDocument::hardwareOutputId;
+    juce::String note;
+    const auto a = chain::insert (editor, NodeKind::distortion, { 100.0f, 0.0f }, chain::endOfChain (document), note);
+    const auto b = chain::insert (editor, NodeKind::filter, { 400.0f, 0.0f }, chain::endOfChain (document), note);
+    const auto c = chain::insert (editor, NodeKind::delay, { 700.0f, 0.0f }, chain::endOfChain (document), note);
+    expect (a != 0 && b != 0 && c != 0, "building the chain failed: " + note.toStdString());
+    expect (chain::neighbour (document, b, -1) == a && chain::neighbour (document, b, 1) == c, "neighbours along the chain");
+
+    // in -> a -> b -> c -> out  becomes  in -> a -> c -> b -> out
+    expectOk (chain::move (editor, c, -1), "move the delay earlier");
+    expect (hasConnection (document, { a, 0, c, 0 }) && hasConnection (document, { c, 0, b, 0 }), "the delay should sit between distortion and filter");
+    expect (hasConnection (document, { b, 0, out, 0 }) && hasConnection (document, { b, 0, out, 1 }), "the filter should now feed both outputs");
+    expect (! hasConnection (document, { c, 0, out, 0 }), "the delay should no longer reach the outputs");
+    expect (document.findNode (c)->position.x == 400.0f && document.findNode (b)->position.x == 700.0f, "rack positions should swap with the chain order");
+    expect (history.undo() == PatchHistory::Applied::structure, "a move is one undo step");
+    expect (hasConnection (document, { b, 0, c, 0 }) && hasConnection (document, { c, 0, out, 0 }), "undo should restore the order");
+    expect (document.findNode (c)->position.x == 700.0f, "undo should restore the positions");
+
+    expect (! chain::move (editor, a, -1).wasOk(), "the first module cannot move earlier");
+    expect (! chain::move (editor, c, 1).wasOk(), "the last module cannot move later");
+
+    // A source (no audio input) joins the end of the chain without replacing anything.
+    const auto cablesBefore = document.getConnections().size();
+    const auto drums = chain::insert (editor, NodeKind::drumMachine, { 0.0f, 400.0f }, chain::endOfChain (document), note);
+    expect (drums != 0 && note.contains ("mixed"), "a source should be mixed in: " + note.toStdString());
+    const auto drumOut = chain::audioOutputs (*document.findNode (drums)->processor).left;
+    expect (hasConnection (document, { drums, drumOut, out, 0 }) && hasConnection (document, { c, 0, out, 0 }),
+            "the drum machine should sum into the outputs beside the chain");
+    expect (document.getConnections().size() > cablesBefore, "no cable should be taken away by a source");
+
+    // A loop that only works through its Feedback Guard: taking the guard out is refused and changes nothing.
+    PatchDocument loopDocument;
+    loopDocument.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    PatchHistory loopHistory (loopDocument);
+    TestChainEditor loopEditor (loopDocument, loopHistory);
+    const auto mixer = loopDocument.addNode (NodeKind::mixer, { 0.0f, 0.0f });
+    const auto echo = loopDocument.addNode (NodeKind::delay, { 300.0f, 0.0f });
+    const auto guard = loopDocument.addNode (NodeKind::feedbackGuard, { 600.0f, 0.0f });
+    const auto mixerIns = chain::audioInputs (*loopDocument.findNode (mixer)->processor);
+    expectOk (loopDocument.addConnection ({ in, 0, mixer, mixerIns.left }), "in -> mixer");
+    expectOk (loopDocument.addConnection ({ mixer, 0, echo, 0 }), "mixer -> delay");
+    expectOk (loopDocument.addConnection ({ echo, 0, guard, 0 }), "delay -> guard");
+    expectOk (loopDocument.addConnection ({ guard, 0, mixer, mixerIns.left + 1 }), "guard -> mixer");
+    expectOk (loopDocument.addConnection ({ mixer, 0, out, 0 }), "mixer -> out");
+    expect (GraphCompiler::compile (loopDocument, blockSize, true).succeeded(), "the guarded loop should compile");
+    const auto loopCables = sortedCables (loopDocument);
+    expect (! chain::removeAndBridge (loopEditor, guard).wasOk(), "removing the guard would close an unguarded loop");
+    expect (loopDocument.findNode (guard) != nullptr && sortedCables (loopDocument) == loopCables, "a refused edit must leave the patch as it was");
+}
+
 void testUndoRedoStructure()
 {
     PatchDocument document;
@@ -2278,7 +2452,7 @@ void testControllerFeedback()
     slot.target = MidiMapping::Target::slot; slot.slot = 2;
     document.setMidiMappings ({ stomp, rec, slot });
 
-    auto state = controller::computeState (document, 2, "Wednesday rig, the long name");
+    auto state = controller::computeState (document, {}, 2, "Wednesday rig, the long name", {}, {});
     expect (state.switches[0].led == 1 && state.switches[0].label == "Fuzz Fac", "switch 1 should show the enabled pedal, label cut to 8: " + state.switches[0].label.toStdString());
     expect (state.switches[1].led == 0 && state.switches[1].label.startsWith ("REC "), "switch 2 should be the looper's REC: " + state.switches[1].label.toStdString());
     expect (state.switches[7].led == 1 && state.switches[7].label == "RIG 3", "switch 8 should light for the live slot");
@@ -2286,14 +2460,16 @@ void testControllerFeedback()
     expect (state.rig == "Wednesday rig, t", "rig name should be cut to 16");
 
     const auto full = controller::encode ({}, state, true);
-    expect (full.size() == static_cast<std::size_t> (controller::switchCount * 2 + controller::slotCount + 1), "full dump message count: " + std::to_string (full.size()));
+    expect (full.size() == static_cast<std::size_t> (controller::switchCount * 2 + controller::slotCount + 2), "full dump message count: " + std::to_string (full.size()));
+    const auto* flagBytes = full.back().getSysExData();
+    expect (full.back().getSysExDataSize() == 4 && flagBytes[2] == 0x08 && flagBytes[3] == 0, "a full dump should end with the flags (not muted)");
     const auto* led = full[0].getSysExData();
     expect (full[0].isSysEx() && led[0] == 0x7D && led[1] == 0x53 && led[2] == 0x01 && led[3] == 0 && led[4] == 1, "switch 1 LED message bytes");
     const auto* label = full[1].getSysExData();
     expect (full[1].getSysExDataSize() == 4 + 8 && label[2] == 0x02 && label[3] == 0 && label[4] == 'F', "switch 1 label message bytes");
 
     document.findNode (drive)->processor->setBypassed (true);
-    auto next = controller::computeState (document, 1, "Wednesday rig, the long name");
+    auto next = controller::computeState (document, {}, 1, "Wednesday rig, the long name", {}, {});
     const auto diff = controller::encode (state, next, false);
     // One LED (switch 1 off), one LED (switch 8 off), slot 3 off + slot 2 on.
     expect (diff.size() == 4, "diff should carry only what changed: " + std::to_string (diff.size()));
@@ -2301,6 +2477,292 @@ void testControllerFeedback()
 
     expect (controller::isHello (controller::helloMessage (controller::fromController), controller::fromController), "hello should be recognised");
     expect (! controller::isHello (controller::helloMessage (controller::fromSignalPatch), controller::fromController), "our own hello must not count as a controller's");
+}
+
+juce::MidiMessage controllerSysEx (std::initializer_list<juce::uint8> bytes)
+{
+    const std::vector<juce::uint8> data (bytes);
+    return juce::MidiMessage::createSysExMessage (data.data(), static_cast<int> (data.size()));
+}
+
+std::vector<int> sysExBytes (const juce::MidiMessage& message)
+{
+    std::vector<int> bytes;
+    if (! message.isSysEx())
+        return bytes;
+    for (int i = 0; i < message.getSysExDataSize(); ++i)
+        bytes.push_back (message.getSysExData()[i]);
+    return bytes;
+}
+
+std::vector<int> sysExBytes (std::initializer_list<int> header, const std::string& text = {})
+{
+    std::vector<int> bytes (header);
+    for (const auto c : text)
+        bytes.push_back (static_cast<int> (c));
+    return bytes;
+}
+
+void testControllerHelloAndSettingsMessages()
+{
+    // The short hello is model 0; the extended one carries model and firmware.
+    const auto shortHello = controller::parseHello (controller::helloMessage (controller::fromController));
+    expect (shortHello.has_value() && shortHello->side == 0 && shortHello->model == 0 && shortHello->firmwareMajor == 0, "the 6-byte hello should parse as model 0");
+    const auto c3 = controllerSysEx ({ 0x7D, 0x53, 0x7F, 0x00, 0x02, 0x01, 0x03 });
+    const auto extended = controller::parseHello (c3);
+    expect (extended.has_value() && extended->side == 0 && extended->model == controller::handheldC3
+            && extended->firmwareMajor == 1 && extended->firmwareMinor == 3, "the extended hello should carry model 2, firmware 1.3");
+    expect (controller::isHello (c3, controller::fromController), "an extended hello is still a controller's hello");
+    const auto ours = controller::parseHello (controller::helloMessage (controller::fromSignalPatch));
+    expect (ours.has_value() && ours->side == 1, "our own hello should parse as side 1");
+    expect (sysExBytes (controller::helloMessage (controller::fromSignalPatch)) == sysExBytes ({ 0x7D, 0x53, 0x7F, 0x01 }), "our hello bytes");
+    expect (! controller::parseHello (controllerSysEx ({ 0x7E, 0x53, 0x7F, 0x00 })).has_value(), "another manufacturer's SysEx is not a hello");
+    expect (! controller::parseHello (controllerSysEx ({ 0x7D, 0x53, 0x7F })).has_value(), "a hello without its side byte is refused");
+    expect (! controller::parseHello (juce::MidiMessage::noteOn (10, 60, 1.0f)).has_value(), "a note is not a hello");
+
+    // App -> controller settings messages.
+    expect (sysExBytes (controller::settingsRequestMessage()) == sysExBytes ({ 0x7D, 0x53, 0x10 }), "settings request bytes");
+    expect (sysExBytes (controller::settingsSetMessage ({ { 0x01, 21 }, { 0x0E, 2 } })) == sysExBytes ({ 0x7D, 0x53, 0x12, 0x01, 21, 0x0E, 2 }), "settings set bytes");
+    expect (sysExBytes (controller::settingsSetMessage ({ { 0x14, 300 } })) == sysExBytes ({ 0x7D, 0x53, 0x12, 0x14, 127 }), "a value above 127 should be clamped to 7 bits");
+    expect (sysExBytes (controller::settingsResetMessage()) == sysExBytes ({ 0x7D, 0x53, 0x13 }), "settings reset bytes");
+    expect (sysExBytes (controller::gyroZeroMessage()) == sysExBytes ({ 0x7D, 0x53, 0x14 }), "gyro zero bytes");
+    const auto rawRequest = controller::settingsRequestMessage();
+    expect (rawRequest.getRawDataSize() == 5 && rawRequest.getRawData()[0] == 0xF0 && rawRequest.getRawData()[4] == 0xF7, "settings request should be F0 7D 53 10 F7");
+
+    // Controller -> app settings dump.
+    const auto dump = controller::parseSettingsDump (controllerSysEx ({ 0x7D, 0x53, 0x11, 0x00, 3, 0x01, 30, 0x07, 22, 0x08, 70 }));
+    expect (dump.has_value() && dump->size() == 4 && dump->at (0x00) == 3 && dump->at (0x01) == 30 && dump->at (0x07) == 22 && dump->at (0x08) == 70,
+            "a settings dump should parse into key -> value");
+    const auto empty = controller::parseSettingsDump (controllerSysEx ({ 0x7D, 0x53, 0x11 }));
+    expect (empty.has_value() && empty->empty(), "a dump with no settings is an empty map");
+    expect (! controller::parseSettingsDump (controllerSysEx ({ 0x7D, 0x53 })).has_value(), "a truncated dump is refused");
+    expect (! controller::parseSettingsDump (controllerSysEx ({ 0x7D, 0x53, 0x11, 0x00, 3, 0x01 })).has_value(), "a dump with an odd byte count is refused");
+    expect (! controller::parseSettingsDump (controllerSysEx ({ 0x7D, 0x54, 0x11, 0x00, 3 })).has_value(), "a dump with the wrong device id is refused");
+    expect (! controller::parseSettingsDump (controllerSysEx ({ 0x7D, 0x53, 0x12, 0x00, 3 })).has_value(), "a settings set is not a dump");
+    expect (! controller::parseSettingsDump (juce::MidiMessage::controllerEvent (10, 16, 3)).has_value(), "a CC is not a dump");
+
+    // What the dump means for feedback: its CCs and its layout.
+    std::map<int, int> settings { { 0x00, 3 }, { 0x01, 30 }, { 0x02, 31 }, { 0x03, 32 }, { 0x04, 11 }, { 0x05, 12 }, { 0x06, 12 }, { 0x07, 22 }, { 0x08, 70 }, { 0x0C, 1 } };
+    expect (controller::controlNumbersFromSettings (settings) == std::vector<int> ({ 30, 31, 32, 11, 12, 22 }), "the CCs of keys 1-7, without repeats");
+    expect (controller::controlNumbersFromSettings ({}).empty(), "no settings, no CCs (the engine falls back to the defaults)");
+    expect (controller::defaultControlNumbers() == std::vector<int> ({ 4, 11, 12, 13, 16, 17, 18, 20, 21, 22, 23 }), "default CCs per CONTROLLER.md");
+    const auto layout = controller::layoutFromSettings (settings);
+    expect (layout.channel == 3 && layout.switchNotes[0] == 70 && layout.switchNotes[1] == 61 && layout.switchNotes[4] == 64, "layout from the reported channel and button notes");
+    expect (controller::layoutFromSettings ({ { 0x00, 0 } }).channel == controller::switchChannel, "an impossible channel keeps the default");
+
+    const auto& table = controller::handheldSettings();
+    expect (table.size() == 24, "every row of the settings table: " + std::to_string (table.size()));
+    for (std::size_t i = 0; i < table.size(); ++i)
+    {
+        const auto& row = table[i];
+        expect (row.key == static_cast<int> (i), "settings should be in key order");
+        expect (row.minimum <= row.defaultValue && row.defaultValue <= row.maximum && row.maximum <= 127, std::string ("default inside the range: ") + row.name);
+        expect (row.choices.empty() || static_cast<int> (row.choices.size()) == row.maximum - row.minimum + 1, std::string ("a name per value: ") + row.name);
+    }
+    expect (table[0x00].defaultValue == 10 && table[0x07].defaultValue == 20 && table[0x0E].choices.size() == 4 && table[0x14].defaultValue == 100,
+            "spot-check defaults against CONTROLLER.md");
+}
+
+void testControllerControlLabelsAndPrecedence()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    const auto drive = document.addNode (NodeKind::distortion, { 0.0f, 0.0f }, 820);
+    auto& processor = *document.findNode (drive)->processor;
+    processor.setName ("Big Muff Pi");
+    processor.getParameter (0).setNormalisedValue (0.25f); // Drive: 0-42 dB -> 10.5 dB
+
+    MidiMapping knob;
+    knob.source = MidiMapping::Source::controlChange; knob.number = 16; knob.channel = controller::switchChannel;
+    knob.target = MidiMapping::Target::parameter; knob.node = drive; knob.parameter = 0;
+    MidiMapping stomp;
+    stomp.source = MidiMapping::Source::note; stomp.number = controller::firstSwitchNote + 2; stomp.channel = controller::switchChannel;
+    stomp.target = MidiMapping::Target::bypass; stomp.node = drive;
+    document.setMidiMappings ({ knob, stomp });
+
+    const auto view = [] (MidiMapping::Source source, int number, const char* action)
+    {
+        MidiMapping mapping;
+        mapping.source = source; mapping.number = number; mapping.channel = 0;
+        mapping.target = MidiMapping::Target::view; mapping.command = action;
+        return mapping;
+    };
+    using Source = MidiMapping::Source;
+    const std::vector<MidiMapping> global {
+        view (Source::controlChange, 16, "next-slot"),     // loses to the patch's knob on CC 16
+        view (Source::controlChange, 17, "module-knob-3"),
+        view (Source::controlChange, 18, "next-slot"),
+        view (Source::controlChange, 20, "knob"),
+        view (Source::controlChange, 21, "mute"),
+        view (Source::note, controller::firstSwitchNote, "prev-slot"),
+        view (Source::note, controller::firstSwitchNote + 1, "mute"),
+        view (Source::note, controller::firstSwitchNote + 2, "next-slot"), // loses to the patch's stomp
+    };
+
+    controller::ViewContext context;
+    context.touchedNode = drive; context.touchedParameter = 1; // Tone
+    context.selectedNode = drive;
+    context.muted = true;
+    const std::vector<int> numbers { 11, 16, 17, 18, 20, 21 };
+    const auto state = controller::computeState (document, global, 0, "Rig", context, numbers);
+
+    expect (state.controls.size() == numbers.size(), "one control state per CC asked for");
+    const auto& drv = state.controls.at (16);
+    expect (drv.label == "Drive" && drv.valueText == "10.5 dB" && drv.position == 32,
+            "a knob mapping shows the knob's name, value and travel: " + drv.label.toStdString() + " / " + drv.valueText.toStdString() + " / " + std::to_string (drv.position));
+    const auto& tone = state.controls.at (20);
+    const auto toneTravel = juce::roundToInt (processor.getParameter (1).getNormalisedValue() * 127.0f);
+    expect (tone.label == "Tone" && tone.valueText == "6.50 kHz" && tone.position == toneTravel,
+            "the encoder's \"knob\" follows the touched knob: " + tone.label.toStdString() + " / " + tone.valueText.toStdString());
+    const auto& mix = state.controls.at (17);
+    expect (mix.label == "Mix" && mix.valueText == "100.0%" && mix.position == 127, "module knob 3 of the selected module: " + mix.label.toStdString() + " / " + mix.valueText.toStdString());
+    expect (state.controls.at (18).label == "Next slot" && state.controls.at (18).position == -1, "an app action on a CC is named, without a value");
+    expect (state.controls.at (21).label == "Mute" && state.controls.at (21).valueText == "On" && state.controls.at (21).position == 127, "mute on a CC shows the mute state");
+    expect (state.controls.at (11).label.isEmpty() && state.controls.at (11).position == -1, "an unmapped CC is blank");
+    expect (state.muted, "the mute flag follows the view");
+
+    expect (state.switches[0].label == "SLOT -" && state.switches[0].led == 0, "previous slot: labelled, unlit");
+    expect (state.switches[1].label == "MUTE" && state.switches[1].led == 1, "mute lights while muted");
+    expect (state.switches[2].label == "Big Muff" && state.switches[2].led == 1, "a patch mapping wins over an app action on the same switch: " + state.switches[2].label.toStdString());
+
+    // Nothing touched, nothing selected, not muted.
+    const auto idle = controller::computeState (document, global, 0, "Rig", {}, numbers);
+    expect (idle.controls.at (20).label == "Knob" && idle.controls.at (20).position == -1 && idle.controls.at (20).valueText.isEmpty(), "\"knob\" with nothing touched");
+    expect (idle.controls.at (17).label == "Knob 3" && idle.controls.at (17).position == -1, "\"module-knob-3\" with nothing selected");
+    expect (idle.switches[1].led == 0 && ! idle.muted, "mute dark when not muted");
+
+    // Without app-wide mappings the patch alone counts.
+    const auto patchOnly = controller::computeState (document, {}, 0, "Rig", context, numbers);
+    expect (patchOnly.controls.at (16).label == "Drive" && patchOnly.controls.at (18).label.isEmpty() && patchOnly.switches[0].label.isEmpty(), "no globals, no app actions");
+
+    // A controller on another channel with its own notes: the layout decides what matches.
+    controller::Layout layout;
+    layout.channel = 3;
+    layout.switchNotes[0] = 70;
+    MidiMapping moved = stomp;
+    moved.number = 70; moved.channel = 3;
+    document.setMidiMappings ({ knob, moved });
+    const auto relaid = controller::computeState (document, {}, 0, "Rig", context, numbers, layout);
+    expect (relaid.switches[0].label == "Big Muff" && relaid.switches[2].label.isEmpty(), "switch 1 follows the reported note and channel");
+    expect (relaid.controls.at (16).label.isEmpty(), "a CC mapping on channel 10 is not the channel-3 controller's");
+}
+
+void testControllerEncodeSendsOnlyChanges()
+{
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    const auto drive = document.addNode (NodeKind::distortion, { 0.0f, 0.0f }, 830);
+    auto& processor = *document.findNode (drive)->processor;
+    processor.getParameter (0).setNormalisedValue (0.25f);
+    MidiMapping knob;
+    knob.source = MidiMapping::Source::controlChange; knob.number = 16; knob.channel = 0;
+    knob.target = MidiMapping::Target::parameter; knob.node = drive; knob.parameter = 0;
+    document.setMidiMappings ({ knob });
+    MidiMapping encoder;
+    encoder.source = MidiMapping::Source::controlChange; encoder.number = 20; encoder.channel = 0;
+    encoder.target = MidiMapping::Target::view; encoder.command = "knob";
+    const std::vector<MidiMapping> global { encoder };
+
+    controller::ViewContext context;
+    context.touchedNode = drive; context.touchedParameter = 1;
+    const std::vector<int> numbers { 11, 16, 20 };
+    const auto first = controller::computeState (document, global, 0, "Rig", context, numbers);
+
+    // Full: switches, slots, rig, a label per control, a value per known position, flags.
+    const auto full = controller::encode ({}, first, true);
+    const auto expectedFull = static_cast<std::size_t> (controller::switchCount * 2 + controller::slotCount + 1 + 3 + 2 + 1);
+    expect (full.size() == expectedFull, "full dump with controls: " + std::to_string (full.size()));
+    const auto fullHas = [&] (const std::vector<int>& bytes)
+    {
+        return std::any_of (full.begin(), full.end(), [&] (const juce::MidiMessage& m) { return sysExBytes (m) == bytes; });
+    };
+    expect (fullHas (sysExBytes ({ 0x7D, 0x53, 0x05, 16 }, "Drive")), "CC 16 label message");
+    expect (fullHas (sysExBytes ({ 0x7D, 0x53, 0x06, 16, 32 }, "10.5 dB")), "CC 16 value message");
+    expect (fullHas (sysExBytes ({ 0x7D, 0x53, 0x05, 11 })), "an unmapped CC gets an empty label");
+    expect (std::none_of (full.begin(), full.end(), [] (const juce::MidiMessage& m) { const auto b = sysExBytes (m); return b.size() > 3 && b[2] == 0x06 && b[3] == 11; }),
+            "no value for a control without a position");
+    expect (sysExBytes (full.back()) == sysExBytes ({ 0x7D, 0x53, 0x08, 0 }), "flags last");
+
+    expect (controller::encode (first, first, false).empty(), "nothing changed, nothing sent");
+
+    // A knob moves: one value message.
+    processor.getParameter (0).setNormalisedValue (1.0f);
+    const auto moved = controller::computeState (document, global, 0, "Rig", context, numbers);
+    const auto knobDiff = controller::encode (first, moved, false);
+    expect (knobDiff.size() == 1 && sysExBytes (knobDiff[0]) == sysExBytes ({ 0x7D, 0x53, 0x06, 16, 127 }, "42.0 dB"),
+            "a moved knob sends only its value: " + std::to_string (knobDiff.size()));
+
+    // Mute: only the flags.
+    auto mutedContext = context;
+    mutedContext.muted = true;
+    const auto muted = controller::encode (moved, controller::computeState (document, global, 0, "Rig", mutedContext, numbers), false);
+    expect (muted.size() == 1 && sysExBytes (muted[0]) == sysExBytes ({ 0x7D, 0x53, 0x08, 1 }), "mute sends only the flags");
+
+    // The touched knob goes away: the encoder's label changes, no value follows.
+    const auto untouched = controller::encode (moved, controller::computeState (document, global, 0, "Rig", {}, numbers), false);
+    expect (untouched.size() == 1 && sysExBytes (untouched[0]) == sysExBytes ({ 0x7D, 0x53, 0x05, 20 }, "Knob"), "a lost knob sends its new label only");
+
+    // The touched knob changes to another: label and value.
+    auto otherKnob = context;
+    otherKnob.touchedParameter = 2; // Mix
+    const auto switched = controller::encode (moved, controller::computeState (document, global, 0, "Rig", otherKnob, numbers), false);
+    expect (switched.size() == 2 && sysExBytes (switched[0]) == sysExBytes ({ 0x7D, 0x53, 0x05, 20 }, "Mix")
+            && sysExBytes (switched[1]) == sysExBytes ({ 0x7D, 0x53, 0x06, 20, 127 }, "100.0%"), "a different knob sends label then value");
+
+    // The controller reports fewer CCs: the ones it dropped are cleared.
+    const auto fewer = controller::encode (moved, controller::computeState (document, global, 0, "Rig", context, { 16 }), false);
+    expect (fewer.size() == 1 && sysExBytes (fewer[0]) == sysExBytes ({ 0x7D, 0x53, 0x05, 20 }), "a CC no longer reported gets an empty label: " + std::to_string (fewer.size()));
+
+    // Text is cut: label 12, value 10.
+    processor.getParameter (1).setValue (12000.0f);
+    controller::State longer;
+    longer.controls[30] = { "A very long knob name", "123456789012", 5 };
+    const auto cut = controller::encode ({}, longer, false);
+    expect (cut.size() == 2 && sysExBytes (cut[0]) == sysExBytes ({ 0x7D, 0x53, 0x05, 30 }, "A very long ")
+            && sysExBytes (cut[1]) == sysExBytes ({ 0x7D, 0x53, 0x06, 30, 5 }, "1234567890"), "labels are cut to 12 characters, values to 10");
+    const auto computedTone = controller::computeState (document, global, 0, "Rig", context, numbers).controls.at (20);
+    expect (computedTone.valueText == "12.00 kHz" && computedTone.label.length() <= 12 && computedTone.valueText.length() <= 10, "value text as the app prints it");
+}
+
+void testViewMappingsRoundTrip()
+{
+    MidiMapping pot;
+    pot.source = MidiMapping::Source::controlChange; pot.number = 17; pot.channel = 0;
+    pot.target = MidiMapping::Target::view; pot.command = "module-knob-2";
+    MidiMapping encoder = pot;
+    encoder.number = 20; encoder.command = "knob"; encoder.relative = true;
+    MidiMapping button;
+    button.source = MidiMapping::Source::note; button.number = 61; button.channel = 10;
+    button.target = MidiMapping::Target::view; button.command = "next-slot";
+
+    const auto back = midiMappingsFromJson (juce::JSON::parse (juce::JSON::toString (midiMappingsToJson ({ pot, encoder, button }))));
+    expect (back.size() == 3, "three view mappings back");
+    expect (back[0].target == MidiMapping::Target::view && back[0].command == "module-knob-2" && back[0].matches (MidiMapping::Source::controlChange, 4, 17),
+            "pot view mapping round trip");
+    expect (back[1].relative && back[1].command == "knob", "relative encoder view mapping round trip");
+    expect (back[2].target == MidiMapping::Target::view && back[2].command == "next-slot" && back[2].matches (MidiMapping::Source::note, 10, 61)
+            && ! back[2].matches (MidiMapping::Source::note, 1, 61), "button view mapping round trip");
+    expect (back[2].sourceLabel() == "N61/10", "source label unchanged for view mappings");
+
+    // In a patch: kept (no node to check), survive a reload and a node removal; an empty action is dropped.
+    PatchDocument document;
+    document.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    const auto drive = document.addNode (NodeKind::distortion, { 0.0f, 0.0f }, 840);
+    MidiMapping blank = button;
+    blank.command = {};
+    document.setMidiMappings ({ pot, button, blank });
+    expect (document.getMidiMappings().size() == 2, "a view mapping without an action should be dropped");
+    PatchDocument reloaded;
+    reloaded.configureHardware (channelNames ("Input", 1), channelNames ("Output", 1));
+    expectOk (reloaded.loadJson (document.toJson()), "reload with view mappings");
+    expect (reloaded.getMidiMappings().size() == 2 && reloaded.getMidiMappings()[1].command == "next-slot", "view mappings survive a patch round trip");
+    reloaded.removeNode (drive);
+    expect (reloaded.getMidiMappings().size() == 2, "removing a module leaves view mappings alone");
+
+    // Older files never had "view"; an unknown target still reads as a knob (and is dropped without its node).
+    auto json = midiMappingsToJson ({ button });
+    json[0].getDynamicObject()->setProperty ("target", "something-new");
+    expect (midiMappingsFromJson (json)[0].target == MidiMapping::Target::parameter, "unknown targets keep the old fallback");
 }
 
 void testMidiMappingsRoundTripAndScrub()
@@ -3013,7 +3475,13 @@ int main()
         { "neural amp tone stack shapes the spectrum", testNeuralAmpToneStackShapesTheSpectrum },
         { "synth Pitch input is exact octaves", testSynthPitchInputIsExactOctaves },
         { "TONE3000 pieces: PKCE, URLs, callback, JSON", testTone3000PiecesAreRight },
-        { "MIDI Note node drives gate and pitch", testMidiNoteNodeDrivesGateAndPitch }
+        { "MIDI Note node drives gate and pitch", testMidiNoteNodeDrivesGateAndPitch },
+        { "chain edits: insert, stereo, remove and bridge, undo", testChainInsertRemoveAndUndo },
+        { "chain edits: move, sources, refused loop", testChainMoveSourcesAndRefusals },
+        { "controller hello and settings SysEx", testControllerHelloAndSettingsMessages },
+        { "controller labels, values and patch-over-app precedence", testControllerControlLabelsAndPrecedence },
+        { "controller feedback diff sends only what changed", testControllerEncodeSendsOnlyChanges },
+        { "view mappings round trip", testViewMappingsRoundTrip }
     };
 
     int failures = 0;

@@ -788,6 +788,8 @@ void PatchDocument::setMidiMappings (std::vector<MidiMapping> mappings)
                 return std::none_of (groups.begin(), groups.end(), [&] (const PedalGroup& group) { return group.id == mapping.groupId; });
             case MidiMapping::Target::slot:
                 return mapping.slot < 0;
+            case MidiMapping::Target::view:
+                return mapping.command.isEmpty();
         }
         return false;
     }), mappings.end());

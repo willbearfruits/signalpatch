@@ -1,0 +1,3 @@
+build/
+gen/__pycache__/
+gen/.text-metrics.json

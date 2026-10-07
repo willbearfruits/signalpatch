@@ -6,6 +6,8 @@
 
 #include "../audio/PatchEngine.h"
 #include "RackView.h"
+#include "UiScript.h"
+#include "PlatformWindow.h"
 
 #include <glad/gl.h>
 #define GLFW_INCLUDE_NONE
@@ -122,6 +124,7 @@ int main (int argc, char** argv)
         glfwTerminate();
         return 1;
     }
+    signalpatch::v2::preparePlatformWindow (window);
     glfwMakeContextCurrent (window);
     if (! gladLoadGL (glfwGetProcAddress))
     {
@@ -147,8 +150,20 @@ int main (int argc, char** argv)
     // its destructor frees cached plates and thumbnails through them.
     auto rackOwner = std::make_unique<signalpatch::v2::RackView> (engine, vg, font);
     auto& rack = *rackOwner;
-    if (const auto size = rack.savedWindowSize(); ! kiosk && size.x >= 640 && size.y >= 400)
-        glfwSetWindowSize (window, size.x, size.y); // a tiling desktop ignores this, a floating one comes back the same size
+    if (! kiosk)
+    {
+        // The last size when it still fits the screen; otherwise (first run on a
+        // 7-inch handheld, where 1600 x 1000 is bigger than the screen) maximised.
+        int areaX = 0, areaY = 0, areaW = 0, areaH = 0;
+        if (auto* primary = glfwGetPrimaryMonitor())
+            glfwGetMonitorWorkarea (primary, &areaX, &areaY, &areaW, &areaH);
+        const auto size = rack.savedWindowSize();
+        const bool knownArea = areaW > 0 && areaH > 0;
+        if (size.x >= 640 && size.y >= 400 && (! knownArea || (size.x <= areaW && size.y <= areaH)))
+            glfwSetWindowSize (window, size.x, size.y); // a tiling desktop ignores this, a floating one comes back the same size
+        else if (knownArea && (areaW < windowW + 40 || areaH < windowH + 80))
+            glfwMaximizeWindow (window);
+    }
     bool startOnBoard = false;
     {
         float contentX = 1.0f, contentY = 1.0f;
@@ -244,6 +259,9 @@ int main (int argc, char** argv)
         // the rig should sound without a key press) win over what was remembered.
         rack.restoreSession (patchGiven, startOnBoard, unmute);
     }
+    std::unique_ptr<signalpatch::v2::UiScript> script; // developer hook, see UiScript.h
+    if (const auto* scriptPath = std::getenv ("SIGNALPATCH_UI_SCRIPT"))
+        script = std::make_unique<signalpatch::v2::UiScript> (window, rack, juce::File (juce::String (scriptPath)));
 
     while (! glfwWindowShouldClose (window))
     {
@@ -257,7 +275,8 @@ int main (int argc, char** argv)
 
         const auto now = glfwGetTime();
         rack.tick (now);
-        if (! rack.needsRender())
+        const bool wantShot = script != nullptr && script->step (now);
+        if (! rack.needsRender() && ! wantShot)
             continue;
 
         int width = 0, height = 0, fbWidth = 0, fbHeight = 0;
@@ -267,9 +286,12 @@ int main (int argc, char** argv)
         glClearColor (0.05f, 0.067f, 0.078f, 1.0f);
         glClear (GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
         rack.render (width, height, width > 0 ? static_cast<float> (fbWidth) / static_cast<float> (width) : 1.0f, now);
+        if (wantShot)
+            script->writeShot (fbWidth, fbHeight);
         glfwSwapBuffers (window);
     }
 
+    script.reset();
     rack.saveSession();
     glfwSetWindowUserPointer (window, nullptr);
     rackOwner.reset();        // plates and thumbnails go while their context is alive
