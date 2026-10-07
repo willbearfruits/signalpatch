@@ -103,3 +103,19 @@ browser and the inspector are drawn in the same canvas.
 
 Opening a patch or loading a different slot replaces every node. Anything
 that captured a node id checks a patch epoch before using it.
+
+`ChainEdit` (in `src/audio`, tested headless) treats the audio path as a
+chain of pedals: put a module after or before another, into a cable, or at
+the end of the chain, with the cables moved over and stereo pairs kept; take
+one out and connect what fed it to what it fed; swap one with its
+neighbour. Each is one undo step, and an edit that would leave a loop
+without a Feedback Guard is undone and reported. The module picker, the +
+between pedals on the Board and the chain entries of the module menus use
+it.
+
+The CONTROLLER page shows a hardware controller (`CONTROLLER.md`). Controls
+can drive something in the patch (saved with it) or an app action in every
+patch: the last knob touched, the selected module's knobs (pots take over
+only once they pass the knob's value), slots, mute. The app actions are
+kept in the app settings and given to the engine, which applies them when
+no patch mapping matches the message.

@@ -4,10 +4,14 @@
 #include "Menu.h"
 #include "ToneBrowser.h"
 #include "Inspector.h"
+#include "ModulePicker.h"
+#include "ValueSheet.h"
+#include "ControllerPage.h"
 
 #include <nanovg.h>
 
 #include <array>
+#include <map>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -90,7 +94,10 @@ private:
         int parameter = -1;
         double startY = 0.0;
         float startNormalised = 0.0f;
+        bool moved = false; // touch: a finger rests a few pixels before it counts as turning
     };
+    /** Touch: a knob pressed and let go without turning opens the value sheet. */
+    void openValueSheetIfTapped (double x, double y);
 
     struct CableDrag
     {
@@ -175,7 +182,76 @@ private:
     FileBrowser browser;
     ToneBrowser toneBrowser;
     Inspector inspector;
+    ModulePicker picker;
+    ValueSheet valueSheet;
+    ControllerPage controllerPage;
     void toggleInspector();
+    void toggleControllerPage();
+    /** Width taken from the right edge by a docked panel (the inspector or the controller page). */
+    [[nodiscard]] float rightDock() const noexcept { return juce::jmax (inspector.dockedWidth(), controllerPage.dockedWidth()); }
+
+    // The hardware controller (ControllerPage, docs/CONTROLLER.md).
+    /** One line for what a control drives now. */
+    [[nodiscard]] juce::String describeControl (const ControllerPage::Control& control) const;
+    void showControlAssignMenu (const ControllerPage::Control& control, double x, double y);
+    /** target's source fields are filled from the control; a view or slot target becomes an app-wide mapping. */
+    void assignControl (const ControllerPage::Control& control, MidiMapping target);
+    void clearControl (const ControllerPage::Control& control);
+    void applyDefaultControllerLayout();
+    /** The controller now sends other numbers or another channel: mappings on the old ones move along. */
+    void remapControls (const std::vector<ControllerPage::Control>& before, const std::vector<ControllerPage::Control>& after);
+    std::map<int, int> knownControllerSettings; // the C3's settings the mappings were made for (also kept in the app settings)
+    void setGlobalMappings (std::vector<MidiMapping> mappings);
+    /** The knob, stomp, transport button or slot under the pointer, as a mapping target (no source yet). */
+    [[nodiscard]] std::optional<MidiMapping> mappingTargetAt (double x, double y) const;
+    /** An app action from a controller (Target::view). */
+    void runViewAction (const MidiMapping& mapping, const juce::MidiMessage& message);
+    /** A pot that drives a knob that may sit elsewhere: it takes over once it passes the knob (no jump). */
+    bool pickUp (int number, NodeId node, int parameter, float wanted);
+    void setKnobFromController (NodeId node, int parameter, float normalised);
+    std::optional<ControllerPage::Control> assignArmed;        // "tap what it should drive"
+    std::pair<NodeId, int> touchedKnob { 0, -1 };              // the knob the encoder turns
+    struct Pickup
+    {
+        NodeId node = 0;
+        int parameter = -1;
+        bool engaged = false;
+        float last = -1.0f;
+    };
+    std::map<int, Pickup> pickups;                             // by CC number
+    std::map<int, bool> viewSwitchState;                       // CC switches on view actions: rising edge
+    controller::ViewContext controllerViewSent;
+    bool controllerViewKnown = false;
+
+    // Building a chain without aiming cables (ModulePicker + ChainEdit.h).
+    /** Opens the picker; the module is spliced into `where`, or with no splice placed at rackPosition unconnected. */
+    void openPicker (const juce::String& title, std::optional<chain::Splice> where, juce::Point<float> rackPosition, float makeRoom);
+    /** "Add": after the selected module when there is one, else at the end of the chain. */
+    void addModuleHere();
+    void addAfter (NodeId id);
+    void addBefore (NodeId id);
+    void insertIntoCable (const Connection& cable);
+    void moveAlongChain (NodeId id, int direction);
+    void removeKeepingChain (NodeId id);
+    /** After an add or a move: the Board refits, the rack pans to the module if it is off screen. */
+    void revealAfterChainEdit (NodeId id);
+    /** Where a module goes in the rack when it follows `id`: to its right. */
+    [[nodiscard]] juce::Point<float> rackSpotAfter (NodeId id) const;
+    /** The chain entries of a module's menu (ids idBase .. idBase + 4); runChainMenuItem handles them. */
+    void addChainMenuItems (std::vector<MenuItem>& items, NodeId id, int idBase) const;
+    bool runChainMenuItem (NodeId id, int picked, int idBase);
+    [[nodiscard]] bool anyModalOpen() const noexcept
+    {
+        return menu.isOpen() || prompt.isOpen() || browser.isOpen() || toneBrowser.isOpen() || picker.isOpen();
+    }
+    // The + on each cable between two pedals on the Board (board coordinates, from the last draw).
+    struct BoardInsertPoint
+    {
+        juce::Point<float> at;
+        Connection cable;
+    };
+    std::vector<BoardInsertPoint> boardInsertPoints;
+    [[nodiscard]] float boardInsertRadius() const noexcept { return touchMode ? 15.0f : 10.0f; }
     void openToneBrowser (NodeId id, bool impulses, bool slotB);
     // A whole patch was replaced (open, new, a slot with other modules): ids now
     // name different modules, so every drag, overlay, pending learn and glide
@@ -187,6 +263,7 @@ private:
     bool redoNow();
     int patchEpoch = 0;
     bool swallowSpaceCharacter = false;
+    bool swallowNextCharacter = false; // the letter of a shortcut that opened something with a text filter
     bool touchMode = false;
     /** Hit radii multiplier: a finger is about 9 mm wide, a mouse pointer is one pixel. */
     [[nodiscard]] float touchHit() const noexcept { return touchMode ? 2.4f : 1.0f; }
@@ -209,8 +286,9 @@ private:
     [[nodiscard]] std::optional<int> inputInTouchStrip (const Layout& layout, juce::Point<float> origin, juce::Point<float> world) const;
     /** Connects an output to the first free input of the same type on another module (the menu path). */
     void connectFirstFree (NodeId source, int sourcePort, NodeId destination);
-    /** Handles a tap on the zoom / fit buttons. */
+    /** Handles a tap on the on-screen buttons (zoom, fit, undo, redo, add). */
     bool touchButtonPressed (double x, double y);
+    static constexpr int touchButtonCount = 6;
     /** Runs proceed now, or after asking what to do with unsaved changes. */
     void whenChangesAreSettled (const juce::String& action, std::function<void()> proceed);
     /** Merges one key into a node's extra state if the node is still the kind the caller meant. */
@@ -258,6 +336,9 @@ private:
     bool panning = false;
     double panStartX = 0.0, panStartY = 0.0, panOriginX = 0.0, panOriginY = 0.0;
     std::optional<NodeId> draggingNode;
+    bool nodeDragMoved = false; // past the slop: a resting finger is a tap or a hold, not a drag
+    /** How far a press may wander before it becomes a drag (a finger rests unevenly). */
+    [[nodiscard]] double dragSlop() const noexcept { return touchMode ? 9.0 : 3.0; }
     juce::Point<float> dragOffset;
     std::optional<KnobDrag> knobDrag;
     std::optional<CableDrag> cableDrag;
@@ -381,7 +462,16 @@ private:
     int paletteHover = -1;
     std::optional<PaletteDrag> paletteDrag;
     static constexpr float paletteWidth = 192.0f;
-    static constexpr float hudHeight = 34.0f;
+    /** The header strip; taller in touch mode so its buttons take a finger. */
+    [[nodiscard]] float hudHeight() const noexcept { return touchMode ? 52.0f : 34.0f; }
+    struct HudLayout
+    {
+        juce::Rectangle<float> controller, view, audio, file, mute;
+        float nameRight = 0.0f;
+    };
+    [[nodiscard]] HudLayout hudLayout (int width) const noexcept;
+    /** The header's buttons: true when the press landed on one. */
+    bool hudButtonPressed (double x, double y);
     void drawPalette (int height);
     [[nodiscard]] int paletteRowAt (double x, double y) const noexcept; // index into moduleCatalogue(), -1 none
     [[nodiscard]] float paletteRowTop (int row) const noexcept;

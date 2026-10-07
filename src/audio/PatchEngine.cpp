@@ -7,6 +7,7 @@
 #endif
 #include "PatchBundle.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <thread>
@@ -24,11 +25,16 @@ namespace
     }
 } // namespace
 
-PatchEngine::PatchEngine() = default;
+PatchEngine::PatchEngine()
+{
+    lastControlValues.fill (-1);
+    lastNoteValues.fill (-1);
+}
 
 PatchEngine::~PatchEngine()
 {
     shutdown();
+    alive->store (false); // MIDI messages still queued for the message thread must not reach a dead engine
 }
 
 juce::Result PatchEngine::initialise()
@@ -781,10 +787,11 @@ void PatchEngine::refreshMidiInputs()
     // Open everything that is plugged in; a hot-plugged controller shows up
     // on the next refresh (timer, every few seconds).
     int open = 0;
-    juce::StringArray present;
+    juce::StringArray present, presentNames;
     for (const auto& device : juce::MidiInput::getAvailableDevices())
     {
         present.add (device.identifier);
+        presentNames.add (device.name);
         // A device that disappeared and came back keeps its "enabled" flag while
         // its port was closed underneath: close and reopen it so it plays again.
         if (! knownMidiInputs.contains (device.identifier) && deviceManager.isMidiInputDeviceEnabled (device.identifier))
@@ -797,26 +804,52 @@ void PatchEngine::refreshMidiInputs()
     knownMidiInputs = present;
     midiInputsOpen = open;
 
-    // Controller feedback outputs whose device is gone are dropped; the
-    // controller's hello on reconnect opens a fresh one.
+    // A controller whose input is gone is forgotten; one whose output is gone
+    // loses it. Its hello on reconnect opens a fresh one.
     const auto outputs = juce::MidiOutput::getAvailableDevices();
-    controllerOutputs.erase (std::remove_if (controllerOutputs.begin(), controllerOutputs.end(), [&] (const std::unique_ptr<juce::MidiOutput>& output)
+    const auto before = controllers.size();
+    controllers.erase (std::remove_if (controllers.begin(), controllers.end(), [&] (const ControllerLink& link)
     {
-        for (const auto& device : outputs)
-            if (device.identifier == output->getIdentifier())
-                return false;
-        return true;
-    }), controllerOutputs.end());
+        return ! presentNames.contains (link.info.name);
+    }), controllers.end());
+    bool changed = controllers.size() != before;
+    for (auto& link : controllers)
+    {
+        if (link.output == nullptr)
+            continue;
+        const bool outputPresent = std::any_of (outputs.begin(), outputs.end(), [&] (const juce::MidiDeviceInfo& device)
+        {
+            return device.identifier == link.output->getIdentifier();
+        });
+        if (! outputPresent)
+        {
+            link.output.reset();
+            link.info.hasOutput = false;
+            changed = true;
+        }
+    }
+    if (changed)
+        sendChangeMessage();
 }
 
 void PatchEngine::handleIncomingMidiMessage (juce::MidiInput* source, const juce::MidiMessage& message)
 {
     if (message.isSysEx())
     {
-        if (controller::isHello (message, controller::fromController) && source != nullptr)
+        // A controller's hello and its settings dump hop to the message thread;
+        // other SysEx (our own feedback coming back through a looped port
+        // included) is ignored.
+        const auto* data = message.getSysExData();
+        if (source != nullptr && message.getSysExDataSize() >= 3
+            && data[0] == controller::manufacturerId && data[1] == controller::deviceId
+            && (controller::isHello (message, controller::fromController) || data[2] == controller::settingsDump))
         {
             const auto name = source->getName();
-            juce::MessageManager::callAsync ([this, name] { openControllerOutput (name); });
+            juce::MessageManager::callAsync ([this, guard = alive, name, message]
+            {
+                if (guard->load())
+                    handleControllerSysEx (name, message);
+            });
         }
         return;
     }
@@ -835,29 +868,139 @@ void PatchEngine::handleIncomingMidiMessage (juce::MidiInput* source, const juce
                                                                              message.isNoteOn() ? message.getVelocity() : 0,
                                                                              message.isNoteOn() }; // a velocity-0 note-on is a release
     }
-    juce::MessageManager::callAsync ([this, message] { handleMidiOnMessageThread (message); });
+    juce::MessageManager::callAsync ([this, guard = alive, message]
+    {
+        if (guard->load())
+            handleMidiOnMessageThread (message);
+    });
 }
 
-void PatchEngine::openControllerOutput (const juce::String& inputName)
+PatchEngine::ControllerLink* PatchEngine::findControllerLink (const juce::String& inputName) noexcept
+{
+    for (auto& link : controllers)
+        if (link.info.name == inputName)
+            return &link;
+    return nullptr;
+}
+
+PatchEngine::ControllerLink& PatchEngine::controllerLink (const juce::String& inputName)
+{
+    if (auto* link = findControllerLink (inputName))
+        return *link;
+    controllers.emplace_back();
+    controllers.back().info.name = inputName;
+    return controllers.back();
+}
+
+void PatchEngine::handleControllerSysEx (const juce::String& inputName, const juce::MidiMessage& message)
+{
+    if (const auto helloInfo = controller::parseHello (message))
+    {
+        // Only a controller's hello: our own (side 1) coming back through a
+        // looped port (ALSA's Midi Through) must not answer itself.
+        if (helloInfo->side != controller::fromController)
+            return;
+        auto& link = controllerLink (inputName);
+        link.info.model = helloInfo->model;
+        link.info.firmwareMajor = helloInfo->firmwareMajor;
+        link.info.firmwareMinor = helloInfo->firmwareMinor;
+        openControllerOutput (link);
+        if (link.output != nullptr && link.info.model == controller::handheldC3)
+            link.output->sendMessageNow (controller::settingsRequestMessage());
+        sendChangeMessage();
+        return;
+    }
+    if (const auto settings = controller::parseSettingsDump (message))
+    {
+        auto& link = controllerLink (inputName);
+        link.info.settings = *settings;
+        link.info.settingsKnown = true;
+        sendControllerFeedback (link, false); // its CC numbers may have moved
+        sendChangeMessage();
+    }
+}
+
+void PatchEngine::openControllerOutput (ControllerLink& link)
 {
     // A hello always gets a freshly opened port: after a replug the old one is dead.
-    controllerOutputs.erase (std::remove_if (controllerOutputs.begin(), controllerOutputs.end(),
-                                             [&] (const std::unique_ptr<juce::MidiOutput>& output) { return output->getName() == inputName; }),
-                             controllerOutputs.end());
-    for (const auto& device : juce::MidiOutput::getAvailableDevices())
+    link.output.reset();
+    link.info.hasOutput = false;
+    link.sent = {};
+    const auto& inputName = link.info.name;
+    if (inputName.isEmpty())
+        return;
+    const auto devices = juce::MidiOutput::getAvailableDevices();
+    const auto takenByAnother = [&] (const juce::MidiDeviceInfo& device)
     {
-        if (device.name != inputName)
-            continue;
+        return std::any_of (controllers.begin(), controllers.end(), [&] (const ControllerLink& other)
+        {
+            return &other != &link && other.output != nullptr && other.output->getIdentifier() == device.identifier;
+        });
+    };
+    // The output with the input's name; failing that (Windows names a BLE
+    // MIDI device's ports differently), one whose name contains the other.
+    std::vector<juce::MidiDeviceInfo> candidates;
+    for (const auto& device : devices)
+        if (device.name == inputName && ! takenByAnother (device))
+            candidates.push_back (device);
+    for (const auto& device : devices)
+        if (device.name != inputName && device.name.isNotEmpty() && ! takenByAnother (device)
+            && (device.name.containsIgnoreCase (inputName) || inputName.containsIgnoreCase (device.name)))
+            candidates.push_back (device);
+    for (const auto& device : candidates)
+    {
         if (auto output = juce::MidiOutput::openDevice (device.identifier))
         {
             output->sendMessageNow (controller::helloMessage (controller::fromSignalPatch));
-            controllerOutputs.push_back (std::move (output));
+            link.output = std::move (output);
+            link.info.hasOutput = true;
             lastMidiDescription = "controller: " + inputName;
-            sendControllerFeedback (true);
-            sendChangeMessage();
+            sendControllerFeedback (link, true);
             return;
         }
     }
+}
+
+void PatchEngine::sendControllerMessage (const juce::String& inputName, const juce::MidiMessage& message)
+{
+    if (auto* link = findControllerLink (inputName); link != nullptr && link->output != nullptr)
+        link->output->sendMessageNow (message);
+}
+
+void PatchEngine::requestControllerSettings (const juce::String& name)
+{
+    sendControllerMessage (name, controller::settingsRequestMessage());
+}
+
+void PatchEngine::setControllerSettings (const juce::String& name, const std::vector<std::pair<int, int>>& changes)
+{
+    if (! changes.empty())
+        sendControllerMessage (name, controller::settingsSetMessage (changes));
+}
+
+void PatchEngine::resetControllerSettings (const juce::String& name)
+{
+    sendControllerMessage (name, controller::settingsResetMessage());
+}
+
+void PatchEngine::zeroControllerGyro (const juce::String& name)
+{
+    sendControllerMessage (name, controller::gyroZeroMessage());
+}
+
+std::vector<PatchEngine::ConnectedController> PatchEngine::getControllers() const
+{
+    std::vector<ConnectedController> out;
+    out.reserve (controllers.size());
+    for (const auto& link : controllers)
+        out.push_back (link.info);
+    return out;
+}
+
+int PatchEngine::getControllerCount() const noexcept
+{
+    return static_cast<int> (std::count_if (controllers.begin(), controllers.end(),
+                                            [] (const ControllerLink& link) { return link.output != nullptr; }));
 }
 
 void PatchEngine::setControllerContext (int activeSlot, const juce::String& rigName)
@@ -867,16 +1010,49 @@ void PatchEngine::setControllerContext (int activeSlot, const juce::String& rigN
     sendControllerFeedback (false);
 }
 
+void PatchEngine::setControllerView (const controller::ViewContext& view)
+{
+    controllerView = view;
+}
+
+void PatchEngine::setGlobalMappings (std::vector<MidiMapping> mappings)
+{
+    globalMappings = std::move (mappings);
+}
+
+std::optional<int> PatchEngine::getLastControlValue (MidiMapping::Source source, int number) const
+{
+    if (! juce::isPositiveAndBelow (number, 128))
+        return std::nullopt;
+    const auto index = static_cast<std::size_t> (number);
+    const auto value = source == MidiMapping::Source::controlChange ? lastControlValues[index]
+                     : source == MidiMapping::Source::note          ? lastNoteValues[index]
+                                                                    : -1;
+    return value < 0 ? std::nullopt : std::optional<int> (value);
+}
+
 void PatchEngine::sendControllerFeedback (bool full)
 {
-    if (controllerOutputs.empty())
+    for (auto& link : controllers)
+        sendControllerFeedback (link, full);
+}
+
+void PatchEngine::sendControllerFeedback (ControllerLink& link, bool full)
+{
+    if (link.output == nullptr)
         return;
-    auto next = controller::computeState (document, controllerSlot, controllerRig);
-    const auto messages = controller::encode (controllerState, next, full);
-    controllerState = std::move (next);
+    // The CCs it reported in its settings, or the protocol's defaults.
+    auto controlNumbers = link.info.settingsKnown ? controller::controlNumbersFromSettings (link.info.settings) : std::vector<int>();
+    if (controlNumbers.empty())
+        controlNumbers = controller::defaultControlNumbers();
+    const auto layout = link.info.settingsKnown ? controller::layoutFromSettings (link.info.settings) : controller::Layout {};
+    auto view = controllerView;
+    view.muted = view.muted || isPanicMuted();
+    auto next = controller::computeState (document, globalMappings, controllerSlot, controllerRig, view, controlNumbers, layout);
+    const auto messages = controller::encode (link.sent, next, full);
+    link.sent = std::move (next);
     for (const auto& message : messages)
-        for (const auto& output : controllerOutputs)
-            output->sendMessageNow (message);
+        link.output->sendMessageNow (message);
 }
 
 void PatchEngine::handleMidiOnMessageThread (const juce::MidiMessage& message)
@@ -893,21 +1069,41 @@ void PatchEngine::handleMidiOnMessageThread (const juce::MidiMessage& message)
                          : source == MidiMapping::Source::note ? "Note " + juce::String (number) + (message.isNoteOn() ? " on" : " off")
                                                                 : "Program " + juce::String (number))
                         + "  ch " + juce::String (message.getChannel());
+    // Live values for the controller page, before learn can consume the message.
+    if (juce::isPositiveAndBelow (number, 128))
+    {
+        const auto index = static_cast<std::size_t> (number);
+        if (source == MidiMapping::Source::controlChange)
+            lastControlValues[index] = message.getControllerValue();
+        else if (source == MidiMapping::Source::note)
+            lastNoteValues[index] = message.isNoteOn() ? 127 : 0;
+    }
+    ++controlActivityVersion;
     if (midiLearnHook && (message.isController() || message.isNoteOn() || message.isProgramChange()))
         if (midiLearnHook (message))
             return;
-    // A copy: a slot mapping replaces the whole list, and the same message must
-    // not go on to run the new rig's bindings.
-    const auto mappings = document.getMidiMappings();
-    for (const auto& mapping : mappings)
-        if (mapping.matches (source, message.getChannel(), number))
-        {
-            applyMidiMapping (mapping, message);
-            const bool slotFired = mapping.target == MidiMapping::Target::slot
-                                && (message.isNoteOn() || message.isProgramChange() || (message.isController() && message.getControllerValue() >= 64));
-            if (slotFired)
-                break; // the rig just changed under this message
-        }
+    // Copies: a slot mapping replaces the whole list, and the same message must
+    // not go on to run the new rig's bindings. The app-wide list is only
+    // consulted when no patch mapping took the message.
+    const auto runMappings = [&] (const std::vector<MidiMapping> mappings)
+    {
+        bool matched = false;
+        for (const auto& mapping : mappings)
+            if (mapping.matches (source, message.getChannel(), number))
+            {
+                matched = true;
+                applyMidiMapping (mapping, message);
+                const bool isOn = message.isNoteOn() || message.isProgramChange() || (message.isController() && message.getControllerValue() >= 64);
+                const bool slotFired = isOn && (mapping.target == MidiMapping::Target::slot
+                                                || (mapping.target == MidiMapping::Target::view
+                                                    && (mapping.command == "next-slot" || mapping.command == "prev-slot")));
+                if (slotFired)
+                    break; // the rig just changed under this message
+            }
+        return matched;
+    };
+    if (! runMappings (document.getMidiMappings()))
+        runMappings (globalMappings);
 }
 
 void PatchEngine::applyMidiMapping (const MidiMapping& mapping, const juce::MidiMessage& message)
@@ -973,6 +1169,13 @@ void PatchEngine::applyMidiMapping (const MidiMapping& mapping, const juce::Midi
         case MidiMapping::Target::slot:
         case MidiMapping::Target::groupBypass:
             if (isOn && onMidiUiTarget)
+                onMidiUiTarget (mapping, message);
+            return;
+        case MidiMapping::Target::view:
+            // App actions (knob last touched, a knob of the selected module, next
+            // slot, mute): the UI does the work. Every message goes through, CC
+            // values and releases included; the knob actions need each value.
+            if (onMidiUiTarget)
                 onMidiUiTarget (mapping, message);
             return;
     }

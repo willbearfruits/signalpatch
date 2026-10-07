@@ -14,20 +14,34 @@ them.
 | Callback timing | Measured in the app: average and worst block in the header. |
 | Linux and Windows | CI builds the app and runs the suite on both, from a bare clone. |
 
-The suite has 53 cases. Every example patch is loaded, compiled and
+The suite has 59 cases. Every example patch is loaded, compiled and
 rendered. Rendering on several cores is checked to be
 bit-identical to one core, allocation-free on the helpers, and clean under
 TSan. Beyond the above they cover save and load, device
 changes with missing channels, undo, the looper and 4-track at odd speeds,
 recordings across sample rates, the clock, MIDI, tuning of the pluck and
-synth, the TONE3000 client, and the inspector's ranges and curves.
+synth, the TONE3000 client, the inspector's ranges and curves, the chain
+edits (insert, stereo, remove and bridge, move, a refused loop, undo) and the
+controller protocol (hello, settings SysEx, labels and values, patch mappings
+over app actions).
+
+The touch flows (module picker, + between pedals, value sheet, hold for a
+menu, the CONTROLLER page) were checked with `SIGNALPATCH_UI_SCRIPT` on a
+1920 x 1080 output at 150%, the Ally's size, and the controller page against
+`controller/tools/fakec3.c`, which plays the C3's side of the protocol on an
+ALSA port. The C3 firmware's own logic has 72 host tests
+(`pio test -e native`).
 
 ## Not verified
 
 - Windows with real audio hardware. It has run on one ROG Ally; nothing was
   measured there.
 - The gamepad code on a real pad.
-- Touch mode on a real touch screen.
+- Touch mode on a real touch screen. On Windows, how touch arrives once
+  press-and-hold is turned off (`PlatformWindow.cpp`) has not been seen.
+- Bluetooth LE MIDI: the WinRT backend on Windows, BlueZ on Linux, and
+  SysEx split over BLE packets in either.
+- The C3 controller firmware on a board, and its printed case (never printed).
 - The Flatpak manifest since the app moved to GLFW.
 - Heavy WaveNet captures at 64 samples on anything slower than a desktop
   Zen 3 core. `SIGNALPATCH_BENCH_NAM_DIR` measures a folder of models.

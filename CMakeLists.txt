@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(SIGNALPATCH_ENABLE_ASIO "Enable JUCE's ASIO backend on Windows" OFF)
+option(SIGNALPATCH_WINDOWS_BLE_MIDI "Windows: use the WinRT MIDI API, which also sees Bluetooth LE MIDI devices (the C3 controller)" ON)
 option(SIGNALPATCH_ALLOW_JUCE_FETCH
        "Fetch the pinned JUCE release when no matching package is installed"
        ON)
@@ -194,6 +195,7 @@ target_sources(signalpatch_tests PRIVATE
     src/audio/PatchBundle.cpp
     src/audio/MidiMap.cpp
     src/audio/ControllerFeedback.cpp
+    src/audio/ChainEdit.cpp
     src/audio/Tone3000.cpp
     src/audio/Graph.h
     src/audio/Processors.cpp
@@ -284,7 +286,8 @@ if(SIGNALPATCH_BUILD_V2 AND TARGET glfw AND TARGET OpenGL::GL)
         target_compile_definitions(signalpatch PRIVATE JUCE_ALSA=1 JUCE_JACK=1)
     elseif(WIN32)
         target_compile_definitions(signalpatch PRIVATE JUCE_WASAPI=1 JUCE_DIRECTSOUND=1
-            JUCE_ASIO=$<BOOL:${SIGNALPATCH_ENABLE_ASIO}>)
+            JUCE_ASIO=$<BOOL:${SIGNALPATCH_ENABLE_ASIO}>
+            JUCE_USE_WINRT_MIDI=$<BOOL:${SIGNALPATCH_WINDOWS_BLE_MIDI}>)
         # A windowed app: no console window behind the rack, main() kept as the entry point.
         if(MSVC)
             target_link_options(signalpatch PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)

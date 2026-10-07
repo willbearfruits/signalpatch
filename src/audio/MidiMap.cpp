@@ -24,6 +24,7 @@ namespace
             case MidiMapping::Target::command:     return "command";
             case MidiMapping::Target::slot:        return "slot";
             case MidiMapping::Target::groupBypass: return "group";
+            case MidiMapping::Target::view:        return "view";
         }
         return "parameter";
     }
@@ -77,6 +78,7 @@ std::vector<MidiMapping> midiMappingsFromJson (const juce::var& value)
                        : target == "command" ? MidiMapping::Target::command
                        : target == "slot" ? MidiMapping::Target::slot
                        : target == "group" ? MidiMapping::Target::groupBypass
+                       : target == "view" ? MidiMapping::Target::view
                                            : MidiMapping::Target::parameter;
         mapping.channel = static_cast<int> (object->getProperty ("channel"));
         mapping.number = static_cast<int> (object->getProperty ("number"));

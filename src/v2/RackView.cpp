@@ -58,7 +58,8 @@ namespace
 } // namespace
 
 RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
-    : engine (engineToUse), vg (context), font (fontId), menu (context, fontId), prompt (context, fontId), browser (context, fontId), toneBrowser (context, fontId), inspector (context, fontId, engineToUse)
+    : engine (engineToUse), vg (context), font (fontId), menu (context, fontId), prompt (context, fontId), browser (context, fontId), toneBrowser (context, fontId), inspector (context, fontId, engineToUse),
+      picker (context, fontId), valueSheet (context, fontId, engineToUse), controllerPage (context, fontId, engineToUse)
 {
     engine.addChangeListener (this);
     inspector.askText = [this] (const juce::String& title, const juce::String& initial, std::function<void (const juce::String&)> done)
@@ -67,6 +68,48 @@ RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
         dirty = true;
     };
     inspector.changed = [this] (NodeId id) { invalidatePlate (id); dirty = true; };
+    valueSheet.askText = inspector.askText;
+    valueSheet.changed = inspector.changed;
+    valueSheet.showMenu = [this] (NodeId id, int parameterIndex, float x, float y)
+    {
+        if (const auto* layout = layoutFor (id))
+            showKnobMenu (*layout, parameterIndex, x, y);
+    };
+    controllerPage.askText = inspector.askText;
+    controllerPage.describe = [this] (const ControllerPage::Control& control) { return describeControl (control); };
+    controllerPage.showAssignMenu = [this] (const ControllerPage::Control& control, float x, float y) { showControlAssignMenu (control, x, y); };
+    controllerPage.applyDefaultLayout = [this] { applyDefaultControllerLayout(); };
+    controllerPage.showSettingChoices = [this] (int key, float x, float y)
+    {
+        for (const auto& info : controller::handheldSettings())
+        {
+            if (info.key != key)
+                continue;
+            if (! info.choices.empty())
+            {
+                std::vector<MenuItem> items;
+                items.push_back (MenuItem::sectionHeader (juce::String (info.name).toUpperCase()));
+                for (std::size_t index = 0; index < info.choices.size(); ++index)
+                    items.push_back (MenuItem::item (1 + static_cast<int> (index), info.choices[index]));
+                menu.open (std::move (items), x, y, [this, key] (int picked)
+                {
+                    if (picked > 0)
+                        controllerPage.setSetting (key, picked - 1);
+                    dirty = true;
+                });
+            }
+            else
+                prompt.open (juce::String (info.name) + " (" + juce::String (info.minimum) + " to " + juce::String (info.maximum) + ")", "",
+                             [this, key] (const juce::String& text)
+                {
+                    if (text.trim().containsOnly ("0123456789") && text.trim().isNotEmpty())
+                        controllerPage.setSetting (key, text.trim().getIntValue());
+                    dirty = true;
+                });
+            dirty = true;
+            return;
+        }
+    };
     {
         juce::PropertiesFile::Options options;
         options.applicationName = "SignalPatch";
@@ -95,11 +138,17 @@ RackView::RackView (PatchEngine& engineToUse, NVGcontext* context, int fontId)
         browser.setTouchMode (touchMode);
         prompt.setTouchMode (touchMode);
         inspector.setTouchMode (touchMode);
+        picker.setTouchMode (touchMode);
+        controllerPage.setTouchMode (touchMode);
+        // App-wide controller actions (the encoder turns the last knob touched, and so on).
+        engine.setGlobalMappings (midiMappingsFromJson (juce::JSON::parse (settings->getValue ("controller.global"))));
     }
     engine.onParameterChangedByMidi = [this] (NodeId id) { invalidatePlate (id); dirty = true; };
-    engine.onMidiUiTarget = [this] (const MidiMapping& mapping, const juce::MidiMessage&)
+    engine.onMidiUiTarget = [this] (const MidiMapping& mapping, const juce::MidiMessage& incoming)
     {
-        if (mapping.target == MidiMapping::Target::slot)
+        if (mapping.target == MidiMapping::Target::view)
+            runViewAction (mapping, incoming);
+        else if (mapping.target == MidiMapping::Target::slot)
             loadSlot (mapping.slot);
         else if (mapping.target == MidiMapping::Target::groupBypass)
             for (const auto& group : engine.getDocument().getGroups()) // the Board's pedal cache may be empty or stale
@@ -212,6 +261,10 @@ void RackView::setTouchMode (bool touch)
     browser.setTouchMode (touch);
     prompt.setTouchMode (touch);
     inspector.setTouchMode (touch);
+    picker.setTouchMode (touch);
+    controllerPage.setTouchMode (touch);
+    if (touch)
+        paletteVisible = false; // + ADD opens the picker; P still shows the list
     if (settings != nullptr)
     {
         settings->setValue ("touchMode", touch);
@@ -222,10 +275,18 @@ void RackView::setTouchMode (bool touch)
 
 juce::Rectangle<float> RackView::touchButtonBounds (int index) const noexcept
 {
-    // Zoom out / zoom in / fit, bottom right, clear of the slot bar on the Board.
+    // Bottom right: undo, redo, then zoom out / zoom in / fit. Bottom left: + ADD.
+    // All clear of the slot bar on the Board and of the docked inspector.
     const auto size = 52.0f;
     const auto bottom = static_cast<float> (windowH) - (mode == Mode::board ? slotBarHeight + 14.0f : 18.0f);
-    return { static_cast<float> (windowW) - inspector.dockedWidth() - (3.0f - static_cast<float> (index)) * (size + 10.0f), bottom - size, size, size };
+    if (index == 5)
+        return { (mode == Mode::rack && paletteVisible ? paletteWidth : 0.0f) + 14.0f, bottom - size, 132.0f, size };
+    const auto right = static_cast<float> (windowW) - rightDock();
+    if (index <= 2)
+        return { right - (3.0f - static_cast<float> (index)) * (size + 10.0f), bottom - size, size, size };
+    const auto wide = 70.0f;
+    const auto left = right - 3.0f * (size + 10.0f) - 12.0f - 2.0f * (wide + 10.0f);
+    return { left + static_cast<float> (index - 3) * (wide + 10.0f), bottom - size, wide, size };
 }
 
 SignalType RackView::pendingType() const
@@ -356,22 +417,26 @@ void RackView::drawTouchButtons()
 {
     if (! touchMode)
         return;
-    static const char* labels[] { "-", "+", "FIT" };
-    for (int index = 0; index < 3; ++index)
+    static const char* labels[] { "-", "+", "FIT", "UNDO", "REDO", "+  ADD" };
+    for (int index = 0; index < touchButtonCount; ++index)
     {
         const auto bounds = touchButtonBounds (index);
+        const bool enabled = index == 3 ? engine.canUndo() : index == 4 ? engine.canRedo() : true;
+        const bool isAdd = index == 5;
         nvgBeginPath (vg);
         nvgRoundedRect (vg, bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), 10.0f);
-        nvgFillColor (vg, alpha (palette::panelRaised, 0.92f));
+        nvgFillColor (vg, isAdd ? alpha (mix (palette::panelRaised, palette::audio, 0.3f), 0.95f) : alpha (palette::panelRaised, 0.92f));
         nvgFill (vg);
-        nvgStrokeColor (vg, nvgRGBAf (1, 1, 1, 0.14f));
+        nvgStrokeColor (vg, isAdd ? alpha (palette::audio, 0.6f) : nvgRGBAf (1, 1, 1, 0.14f));
         nvgStrokeWidth (vg, 1.0f);
         nvgStroke (vg);
         nvgFontFaceId (vg, font);
-        nvgFontSize (vg, index == 2 ? 13.0f : 22.0f);
+        nvgFontSize (vg, index == 0 || index == 1 ? 22.0f : 13.0f);
+        nvgTextLetterSpacing (vg, index >= 2 ? 0.8f : 0.0f);
         nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-        nvgFillColor (vg, palette::text);
-        nvgText (vg, bounds.getCentreX(), bounds.getCentreY() - (index == 2 ? 0.0f : 2.0f), labels[index], nullptr);
+        nvgFillColor (vg, enabled ? palette::text : alpha (palette::mutedText, 0.5f));
+        nvgText (vg, bounds.getCentreX(), bounds.getCentreY() - (index <= 1 ? 2.0f : 0.0f), labels[index], nullptr);
+        nvgTextLetterSpacing (vg, 0.0f);
     }
 }
 
@@ -379,11 +444,17 @@ bool RackView::touchButtonPressed (double x, double y)
 {
     if (! touchMode)
         return false;
-    for (int index = 0; index < 3; ++index)
+    for (int index = 0; index < touchButtonCount; ++index)
     {
         if (! touchButtonBounds (index).contains (static_cast<float> (x), static_cast<float> (y)))
             continue;
-        if (index == 2)
+        if (index == 3)
+            say (undoNow() ? "Undo" : "Nothing to undo");
+        else if (index == 4)
+            say (redoNow() ? "Redo" : "Nothing to redo");
+        else if (index == 5)
+            addModuleHere();
+        else if (index == 2)
         {
             if (mode == Mode::board) fitBoard(); else fitToPatch (windowW, windowH);
         }
@@ -435,6 +506,11 @@ void RackView::patchReplaced()
     browser.close();
     toneBrowser.close();
     inspector.close();
+    picker.close();
+    valueSheet.close();
+    assignArmed.reset();
+    pickups.clear();
+    touchedKnob = { 0, -1 };
     learnTarget.reset();
     calibration.reset();
     rackSelection.clear();
@@ -740,8 +816,21 @@ std::optional<Connection> RackView::cableNear (juce::Point<float> world, float r
     return best;
 }
 
+void RackView::toggleControllerPage()
+{
+    if (controllerPage.isOpen())
+        controllerPage.close();
+    else
+    {
+        inspector.close(); // both dock on the right
+        controllerPage.open();
+    }
+    dirty = true;
+}
+
 void RackView::toggleInspector()
 {
+    controllerPage.close();
     if (inspector.isOpen())
         inspector.close();
     else if (selectedNode != 0)
@@ -766,8 +855,8 @@ void RackView::saveSession()
         return;
     // The camera as the patch point in the middle of the view: it survives a window of another size.
     const auto rackLeft = paletteVisible ? static_cast<double> (paletteWidth) : 0.0;
-    const auto rackCentre = toWorld (rackLeft + (windowW - rackLeft) * 0.5, hudHeight + (windowH - hudHeight) * 0.5);
-    const auto boardCentre = toBoard (windowW * 0.5, hudHeight + (windowH - hudHeight - slotBarHeight) * 0.5);
+    const auto rackCentre = toWorld (rackLeft + (windowW - rackLeft) * 0.5, hudHeight() + (windowH - hudHeight()) * 0.5);
+    const auto boardCentre = toBoard (windowW * 0.5, hudHeight() + (windowH - hudHeight() - slotBarHeight) * 0.5);
     settings->setValue ("session.mode", mode == Mode::board ? "board" : "rack");
     settings->setValue ("session.rackX", static_cast<double> (rackCentre.x));
     settings->setValue ("session.rackY", static_cast<double> (rackCentre.y));
@@ -807,7 +896,7 @@ void RackView::restoreSession (bool patchGiven, bool forceBoard, bool forceUnmut
         else
             engine.markUnsavedChanges();     // a rig that was never saved is still unsaved
         activeSlot = juce::jlimit (-1, slotCount - 1, settings->getIntValue ("session.slot", -1));
-        paletteVisible = settings->getBoolValue ("session.palette", true);
+        paletteVisible = ! touchMode && settings->getBoolValue ("session.palette", true); // touch: + ADD instead of the list
         SessionCamera camera;
         camera.rackX = settings->getDoubleValue ("session.rackX");
         camera.rackY = settings->getDoubleValue ("session.rackY");
@@ -854,14 +943,14 @@ void RackView::applyPendingCamera (double now)
         const auto left = paletteVisible ? static_cast<double> (paletteWidth) : 0.0;
         targetZoom = zoom = juce::jlimit (0.25, 3.0, camera.rackZoom);
         panX = left + (windowW - left) * 0.5 - camera.rackX * zoom;
-        panY = hudHeight + (windowH - hudHeight) * 0.5 - camera.rackY * zoom;
+        panY = hudHeight() + (windowH - hudHeight()) * 0.5 - camera.rackY * zoom;
         // A view with no module in it helps nobody (the patch changed under the saved camera).
         bool anyVisible = false;
         for (const auto& layout : layouts)
         {
             const auto origin = nodePosition (layout.id);
             const juce::Rectangle<double> onScreen (origin.x * zoom + panX, origin.y * zoom + panY, layout.w * zoom, layout.h * zoom);
-            anyVisible = anyVisible || onScreen.intersects (juce::Rectangle<double> (left, hudHeight, windowW - left, windowH - hudHeight));
+            anyVisible = anyVisible || onScreen.intersects (juce::Rectangle<double> (left, hudHeight(), windowW - left, windowH - hudHeight()));
         }
         if (! anyVisible)
             fitToPatch (windowW, windowH);
@@ -877,12 +966,12 @@ void RackView::applyPendingCamera (double now)
         {
             boardScale = juce::jlimit (0.35f, 1.35f, static_cast<float> (camera.boardZoom));
             boardPanX = windowW * 0.5 - camera.boardX * boardScale;
-            boardPanY = hudHeight + (windowH - hudHeight - slotBarHeight) * 0.5 - camera.boardY * boardScale;
+            boardPanY = hudHeight() + (windowH - hudHeight() - slotBarHeight) * 0.5 - camera.boardY * boardScale;
             bool anyVisible = false;
             for (const auto& pedal : pedals)
                 anyVisible = anyVisible || juce::Rectangle<float> (pedal.x * boardScale + static_cast<float> (boardPanX), pedal.y * boardScale + static_cast<float> (boardPanY),
                                                                    pedal.w * boardScale, pedal.h * boardScale)
-                                               .intersects (juce::Rectangle<float> (0.0f, hudHeight, static_cast<float> (windowW), static_cast<float> (windowH) - hudHeight - slotBarHeight));
+                                               .intersects (juce::Rectangle<float> (0.0f, hudHeight(), static_cast<float> (windowW), static_cast<float> (windowH) - hudHeight() - slotBarHeight));
             if (! anyVisible)
                 fitBoard();
         }
@@ -1115,7 +1204,7 @@ void RackView::requestQuit()
 void RackView::showFileMenu (double x, double y)
 {
     enum { newPatch = 1, openPatch, save, saveAs, exportBundle, unmute, quit, audioSettings, tone3000Browse,
-           touchToggle, scaleUp, scaleDown, fitView, startMutedToggle, exampleBase = 5000 };
+           touchToggle, scaleUp, scaleDown, fitView, startMutedToggle, controllerPageItem, exampleBase = 5000 };
     // Example patches travel next to the executable (or under share/ when installed).
     juce::Array<juce::File> examples;
     {
@@ -1145,6 +1234,7 @@ void RackView::showFileMenu (double x, double y)
     items.push_back (MenuItem::item (startMutedToggle, startMuted ? juce::String (juce::CharPointer_UTF8 ("\xe2\x97\x8f  Start muted (safe: press MUTED to fade in)"))
                                                                   : juce::String ("Start muted (now: comes back as you left it)")));
     items.push_back (MenuItem::item (audioSettings, "Audio device and buffer...")); // so a pad (Guide) reaches it too
+    items.push_back (MenuItem::item (controllerPageItem, "Controller (C3 handheld, buttons, pots, settings)..."));
     items.push_back (MenuItem::item (tone3000Browse, "Browse TONE3000 captures...", "Ctrl+T"));
     items.push_back (MenuItem::line());
     // Everything a touch screen needs without a keyboard.
@@ -1169,6 +1259,7 @@ void RackView::showFileMenu (double x, double y)
         switch (picked)
         {
             case audioSettings: showAudioMenu (x, y); break;
+            case controllerPageItem: if (! controllerPage.isOpen()) toggleControllerPage(); break;
             case startMutedToggle:
                 startMuted = ! startMuted;
                 if (settings != nullptr)
@@ -1306,7 +1397,9 @@ std::vector<MenuItem> RackView::moduleCatalogueMenu() const
 
 void RackView::showCanvasMenu (double x, double y)
 {
-    auto items = moduleCatalogueMenu();
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::item (6, selectedNode != 0 ? juce::String ("Add a module after the selected one...") : juce::String ("Add a module to the end of the chain..."), "A"));
+    items.push_back (MenuItem::sub ("Place a module here, unconnected", moduleCatalogueMenu()));
     items.push_back (MenuItem::line());
     items.push_back (MenuItem::item (1, engine.canUndo() ? "Undo " + engine.getUndoDescription() : juce::String ("Undo"), "Ctrl+Z", engine.canUndo()));
     items.push_back (MenuItem::item (2, engine.canRedo() ? "Redo " + engine.getRedoDescription() : juce::String ("Redo"), "Ctrl+Shift+Z", engine.canRedo()));
@@ -1333,6 +1426,7 @@ void RackView::showCanvasMenu (double x, double y)
         else if (id == 3) { engine.togglePanic(); say (engine.isPanicMuted() ? "Muted" : "Fading in"); }
         else if (id == 4) fitToPatch (windowW, windowH);
         else if (id == 5) key (GLFW_KEY_T, true, GLFW_MOD_CONTROL);
+        else if (id == 6) addModuleHere();
         dirty = true;
     });
     dirty = true;
@@ -1348,9 +1442,10 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
         if (connection.sourceNode == layout.id || connection.destinationNode == layout.id)
             ++cableCount;
     enum { bypass = 1, rename, duplicate, resetKnobs, disconnectAll, remove, prevModel, nextModel, prevIr, nextIr, clearIrB, browseTone3000, browseImpulsesA, browseImpulsesB,
-           midiLearnStomp, midiRemoveStomp, inspect, midiLearnButtonBase = 3000, midiRemoveButtonBase = 3500, sendBase = 100000 };
+           midiLearnStomp, midiRemoveStomp, inspect, midiLearnButtonBase = 3000, midiRemoveButtonBase = 3500, chainBase = 9000, sendBase = 100000 };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (model->processor->getName().toUpperCase()));
+    addChainMenuItems (items, layout.id, chainBase);
     if (layout.stomp)
         items.push_back (MenuItem::item (bypass, model->processor->isBypassed() ? "Enable (unbypass)" : "Bypass", "stomp"));
     {
@@ -1454,6 +1549,8 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
         const auto* current = engine.getDocument().findNode (id);
         if (current == nullptr)
             return;
+        if (runChainMenuItem (id, picked, chainBase))
+            return;
         if (picked >= sendBase)
         {
             const auto targetIndex = (picked - sendBase) / 64, targetPort = (picked - sendBase) % 64;
@@ -1478,6 +1575,7 @@ void RackView::showModuleMenu (const Layout& layout, double x, double y)
             case bypass: engine.setNodeBypassed (id, ! current->processor->isBypassed()); break;
             case inspect:
                 selectedNode = id;
+                controllerPage.close();
                 inspector.show (id);
                 break;
             case rename:
@@ -1639,6 +1737,7 @@ void RackView::showKnobMenu (const Layout& layout, int parameterIndex, double x,
                 return;
             case inspect:
                 selectedNode = id;
+                controllerPage.close();
                 inspector.show (id, parameterIndex);
                 return;
             case zeroDepth: engine.setModulationDepth (id, parameterIndex, 0.0f); break;
@@ -1731,21 +1830,697 @@ void RackView::showPortMenu (const Layout& layout, bool output, int port, double
 
 void RackView::insertNodeOnCable (const Connection& cable, NodeKind kind, juce::Point<float> world)
 {
-    const auto id = engine.addNode (kind, world - juce::Point<float> (118.0f, 40.0f));
-    if (id == 0)
-        return;
-    const auto* node = engine.getDocument().findNode (id);
-    if (node == nullptr || node->processor->getNumInputPorts() == 0 || node->processor->getNumOutputPorts() == 0)
+    juce::String note;
+    const auto id = chain::insert (engine.chainEditor(), kind, world - juce::Point<float> (118.0f, 40.0f),
+                                   chain::onCable (engine.getDocument(), cable), note);
+    if (id != 0)
+        selectedNode = id;
+    say (note.isNotEmpty() ? note : id != 0 ? nodeKindName (kind) + " inserted into the cable" : "Could not insert " + nodeKindName (kind));
+}
+
+void RackView::openValueSheetIfTapped (double x, double y)
+{
+    if (touchMode && knobDrag.has_value() && ! knobDrag->moved && juce::Point<double> (x, y).getDistanceFrom ({ pressX, pressY }) < 10.0)
+        valueSheet.open (knobDrag->node, knobDrag->parameter);
+}
+
+// ---------------------------------------------------------------- hardware controller
+
+namespace
+{
+    bool sameControl (const MidiMapping& mapping, const ControllerPage::Control& control)
     {
-        say (nodeKindName (kind) + " added (could not splice it into the cable)");
+        return mapping.source == control.source && mapping.number == control.number && (mapping.channel == 0 || mapping.channel == control.channel);
+    }
+
+    juce::String viewActionName (const juce::String& command)
+    {
+        if (command == "knob")         return "The last knob touched";
+        if (command == "next-knob")    return "Next knob of the selection";
+        if (command.startsWith ("module-knob-"))
+            return "Knob " + command.fromLastOccurrenceOf ("-", false, false) + " of the selection";
+        if (command == "next-slot")    return "Next rig slot";
+        if (command == "prev-slot")    return "Previous rig slot";
+        if (command == "mute")         return "Mute / unmute";
+        return command;
+    }
+} // namespace
+
+juce::String RackView::describeControl (const ControllerPage::Control& control) const
+{
+    const auto& document = engine.getDocument();
+    auto describe = [&] (const MidiMapping& mapping) -> juce::String
+    {
+        const auto* node = document.findNode (mapping.node);
+        const auto nodeName = node != nullptr ? node->processor->getName() : juce::String ("?");
+        switch (mapping.target)
+        {
+            case MidiMapping::Target::parameter:
+                if (node != nullptr && juce::isPositiveAndBelow (mapping.parameter, node->processor->getNumParameters()))
+                    return node->processor->getParameter (mapping.parameter).name + " - " + nodeName;
+                return {};
+            case MidiMapping::Target::bypass:      return "Bypass " + nodeName;
+            case MidiMapping::Target::command:     return mapping.command.toUpperCase() + " " + nodeName;
+            case MidiMapping::Target::slot:        return "Rig slot " + juce::String (mapping.slot + 1);
+            case MidiMapping::Target::groupBypass: return "Group " + controller::labelFor (document, mapping);
+            case MidiMapping::Target::view:        return viewActionName (mapping.command);
+        }
+        return {};
+    };
+    juce::StringArray inPatch;
+    for (const auto& mapping : engine.getMidiMappings())
+        if (sameControl (mapping, control))
+            inPatch.add (describe (mapping));
+    // A second line says where the mapping lives (the page prints it small).
+    if (! inPatch.isEmpty())
+        return inPatch[0] + (inPatch.size() > 1 ? "  +" + juce::String (inPatch.size() - 1) : juce::String()) + "\nthis patch";
+    for (const auto& mapping : engine.getGlobalMappings())
+        if (sameControl (mapping, control))
+            return describe (mapping) + "\nevery patch";
+    return {};
+}
+
+void RackView::setGlobalMappings (std::vector<MidiMapping> mappings)
+{
+    engine.setGlobalMappings (std::move (mappings));
+    if (settings != nullptr)
+    {
+        settings->setValue ("controller.global", juce::JSON::toString (midiMappingsToJson (engine.getGlobalMappings()), true));
+        settings->saveIfNeeded();
+    }
+    dirty = true;
+}
+
+void RackView::assignControl (const ControllerPage::Control& control, MidiMapping target)
+{
+    target.source = control.source;
+    target.channel = control.channel;
+    target.number = control.number;
+    if (target.target == MidiMapping::Target::parameter)
+    {
+        if (control.source != MidiMapping::Source::controlChange)
+        {
+            say (control.name + " is a button; a knob needs a pot, the encoder, the pedal or the gyro");
+            return;
+        }
+        target.relative = control.relative;
+    }
+    if (target.target == MidiMapping::Target::view && (target.command == "knob" || target.command.startsWith ("module-knob-")))
+        target.relative = control.relative;
+    // App actions and slots hold in every patch; a module's knob or footswitch belongs to this patch.
+    const bool appWide = target.target == MidiMapping::Target::view || target.target == MidiMapping::Target::slot;
+    auto patch = engine.getMidiMappings();
+    const auto before = patch.size();
+    patch.erase (std::remove_if (patch.begin(), patch.end(), [&] (const MidiMapping& m) { return sameControl (m, control); }), patch.end());
+    if (! appWide)
+        patch.push_back (target);
+    if (! appWide || patch.size() != before)
+        engine.setMidiMappings (std::move (patch)); // undoable, saved with the patch
+    if (appWide)
+    {
+        auto global = engine.getGlobalMappings();
+        global.erase (std::remove_if (global.begin(), global.end(), [&] (const MidiMapping& m) { return sameControl (m, control); }), global.end());
+        global.push_back (target);
+        setGlobalMappings (std::move (global));
+    }
+    pickups.erase (control.number);
+    say (control.name + ": " + describeControl (control).replace ("\n", " (") + ")");
+}
+
+void RackView::clearControl (const ControllerPage::Control& control)
+{
+    auto patch = engine.getMidiMappings();
+    const auto before = patch.size();
+    patch.erase (std::remove_if (patch.begin(), patch.end(), [&] (const MidiMapping& m) { return sameControl (m, control); }), patch.end());
+    if (patch.size() != before)
+        engine.setMidiMappings (std::move (patch));
+    auto global = engine.getGlobalMappings();
+    global.erase (std::remove_if (global.begin(), global.end(), [&] (const MidiMapping& m) { return sameControl (m, control); }), global.end());
+    setGlobalMappings (std::move (global));
+    say (control.name + " drives nothing now");
+}
+
+void RackView::remapControls (const std::vector<ControllerPage::Control>& before, const std::vector<ControllerPage::Control>& after)
+{
+    if (before.size() != after.size())
+        return;
+    auto patch = engine.getMidiMappings();
+    auto global = engine.getGlobalMappings();
+    bool patchChanged = false, globalChanged = false;
+    // Every mapping is moved at most once, even when one control takes another's old number.
+    std::vector<bool> patchMoved (patch.size(), false), globalMoved (global.size(), false);
+    for (std::size_t index = 0; index < before.size(); ++index)
+    {
+        const auto& from = before[index];
+        const auto& to = after[index];
+        if (from.channel == to.channel && from.number == to.number)
+            continue;
+        auto move = [&] (std::vector<MidiMapping>& mappings, std::vector<bool>& moved, bool& changed)
+        {
+            for (std::size_t m = 0; m < mappings.size(); ++m)
+                if (! moved[m] && mappings[m].source == from.source && mappings[m].number == from.number && mappings[m].channel == from.channel)
+                {
+                    mappings[m].number = to.number;
+                    mappings[m].channel = to.channel;
+                    moved[m] = changed = true;
+                }
+        };
+        move (patch, patchMoved, patchChanged);
+        move (global, globalMoved, globalChanged);
+    }
+    if (patchChanged)
+        engine.setMidiMappings (std::move (patch));
+    if (globalChanged)
+        setGlobalMappings (std::move (global));
+    if (patchChanged || globalChanged)
+    {
+        pickups.clear();
+        say ("The controller sends other numbers now: its mappings moved along");
+    }
+}
+
+void RackView::applyDefaultControllerLayout()
+{
+    // CONTROLLER.md "In the app": what each control of the C3 does in every patch.
+    const auto controls = controllerPage.controls();
+    const std::pair<const char*, const char*> layout[] {
+        { "Encoder", "knob" }, { "Encoder push", "next-knob" }, { "Pot 1", "module-knob-1" }, { "Pot 2", "module-knob-2" },
+        { "Pot 3", "module-knob-3" }, { "Button 1", "prev-slot" }, { "Button 2", "next-slot" }, { "Button 3", "mute" },
+    };
+    auto global = engine.getGlobalMappings();
+    for (const auto& [name, command] : layout)
+        for (const auto& control : controls)
+            if (control.name == name)
+            {
+                global.erase (std::remove_if (global.begin(), global.end(), [&] (const MidiMapping& m) { return sameControl (m, control); }), global.end());
+                MidiMapping mapping;
+                mapping.source = control.source;
+                mapping.channel = control.channel;
+                mapping.number = control.number;
+                mapping.target = MidiMapping::Target::view;
+                mapping.command = command;
+                mapping.relative = control.relative;
+                global.push_back (mapping);
+            }
+    setGlobalMappings (std::move (global));
+    pickups.clear();
+    say ("Controller: the encoder turns the knob you last touched, its push picks the next knob, the pots play the selected module's "
+         "first three knobs, buttons 1 and 2 change rig slot, button 3 mutes");
+}
+
+void RackView::showControlAssignMenu (const ControllerPage::Control& control, double x, double y)
+{
+    const auto& document = engine.getDocument();
+    const bool continuous = control.source == MidiMapping::Source::controlChange;
+    enum { tapTarget = 1, clear = 2, viewKnob = 100, viewModuleKnob = 101, viewNextKnob = 110, viewNextSlot, viewPrevSlot, viewMute,
+           slotBase = 120, knobBase = 10000, footBase = 200000 };
+    std::vector<MenuItem> items;
+    items.push_back (MenuItem::sectionHeader (control.name.toUpperCase()));
+    items.push_back (MenuItem::item (tapTarget, continuous ? "Tap the knob it should turn..." : "Tap the footswitch, button or slot it should press..."));
+    // Everything in this patch, by module.
+    std::vector<NodeId> ids;
+    std::vector<MenuItem> modules;
+    for (const auto& node : document.getNodes())
+    {
+        if (node.hardware)
+            continue;
+        const auto index = static_cast<int> (ids.size());
+        ids.push_back (node.id);
+        std::vector<MenuItem> entries;
+        if (continuous)
+        {
+            for (int parameter = 0; parameter < juce::jmin (63, node.processor->getNumParameters()); ++parameter)
+                entries.push_back (MenuItem::item (knobBase + index * 64 + parameter, node.processor->getParameter (parameter).name));
+        }
+        else
+        {
+            if (node.processor->isBypassable())
+                entries.push_back (MenuItem::item (footBase + index * 64, "Bypass"));
+            if (const auto* layout = layoutFor (node.id))
+                for (std::size_t button = 0; button < layout->buttons.size() && button < 63; ++button)
+                {
+                    const auto& command = layout->buttons[button].command;
+                    if (! command.startsWith ("load") && ! command.startsWith ("prev") && ! command.startsWith ("next"))
+                        entries.push_back (MenuItem::item (footBase + index * 64 + 1 + static_cast<int> (button), layout->buttons[button].label));
+                }
+        }
+        if (! entries.empty())
+            modules.push_back (MenuItem::sub (node.processor->getName(), std::move (entries)));
+    }
+    if (! modules.empty())
+        items.push_back (MenuItem::sub (continuous ? "A knob in this patch" : "A pedal in this patch", std::move (modules)));
+    items.push_back (MenuItem::line());
+    items.push_back (MenuItem::sectionHeader ("IN EVERY PATCH"));
+    if (continuous)
+    {
+        items.push_back (MenuItem::item (viewKnob, viewActionName ("knob")));
+        for (int knob = 1; knob <= 3; ++knob)
+            items.push_back (MenuItem::item (viewModuleKnob + knob - 1, viewActionName ("module-knob-" + juce::String (knob))));
+    }
+    else
+    {
+        items.push_back (MenuItem::item (viewNextKnob, viewActionName ("next-knob")));
+        items.push_back (MenuItem::item (viewNextSlot, viewActionName ("next-slot")));
+        items.push_back (MenuItem::item (viewPrevSlot, viewActionName ("prev-slot")));
+        items.push_back (MenuItem::item (viewMute, viewActionName ("mute")));
+        std::vector<MenuItem> slots;
+        for (int slot = 0; slot < slotCount; ++slot)
+            slots.push_back (MenuItem::item (slotBase + slot, "Slot " + juce::String (slot + 1)));
+        items.push_back (MenuItem::sub ("A rig slot", std::move (slots)));
+    }
+    items.push_back (MenuItem::line());
+    items.push_back (MenuItem::item (clear, "Clear", {}, describeControl (control).isNotEmpty()));
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, control, ids, epoch = patchEpoch] (int picked)
+    {
+        MidiMapping target;
+        auto view = [&] (const juce::String& command)
+        {
+            target.target = MidiMapping::Target::view;
+            target.command = command;
+            assignControl (control, target);
+        };
+        if (picked == tapTarget)
+        {
+            assignArmed = control;
+            say ("Tap what " + control.name + " should drive (Esc cancels)");
+        }
+        else if (picked == clear)
+            clearControl (control);
+        else if (picked == viewKnob)
+            view ("knob");
+        else if (picked >= viewModuleKnob && picked < viewModuleKnob + 3)
+            view ("module-knob-" + juce::String (picked - viewModuleKnob + 1));
+        else if (picked == viewNextKnob) view ("next-knob");
+        else if (picked == viewNextSlot) view ("next-slot");
+        else if (picked == viewPrevSlot) view ("prev-slot");
+        else if (picked == viewMute)     view ("mute");
+        else if (picked >= slotBase && picked < slotBase + slotCount)
+        {
+            target.target = MidiMapping::Target::slot;
+            target.slot = picked - slotBase;
+            assignControl (control, target);
+        }
+        else if (picked >= knobBase && epoch == patchEpoch)
+        {
+            const auto base = picked >= footBase ? footBase : knobBase;
+            const auto index = (picked - base) / 64, item = (picked - base) % 64;
+            if (! juce::isPositiveAndBelow (index, static_cast<int> (ids.size())) || engine.getDocument().findNode (ids[static_cast<std::size_t> (index)]) == nullptr)
+                return;
+            target.node = ids[static_cast<std::size_t> (index)];
+            if (base == knobBase)
+            {
+                target.target = MidiMapping::Target::parameter;
+                target.parameter = item;
+            }
+            else if (item == 0)
+                target.target = MidiMapping::Target::bypass;
+            else if (const auto* layout = layoutFor (target.node); layout != nullptr && juce::isPositiveAndBelow (item - 1, static_cast<int> (layout->buttons.size())))
+            {
+                target.target = MidiMapping::Target::command;
+                target.command = layout->buttons[static_cast<std::size_t> (item - 1)].command;
+            }
+            else
+                return;
+            assignControl (control, target);
+        }
+        dirty = true;
+    });
+    dirty = true;
+}
+
+std::optional<MidiMapping> RackView::mappingTargetAt (double x, double y) const
+{
+    MidiMapping target;
+    if (mode == Mode::board)
+    {
+        if (y >= windowH - slotBarHeight)
+        {
+            const auto slotW = (static_cast<float> (windowW) - 24.0f - static_cast<float> (slotCount - 1) * 10.0f) / static_cast<float> (slotCount);
+            const auto slot = static_cast<int> ((x - 12.0) / (slotW + 10.0f));
+            if (! juce::isPositiveAndBelow (slot, slotCount))
+                return std::nullopt;
+            target.target = MidiMapping::Target::slot;
+            target.slot = slot;
+            return target;
+        }
+        const auto board = toBoard (x, y);
+        const auto* pedal = pedalAt (board);
+        if (pedal == nullptr || pedal->tray)
+            return std::nullopt;
+        for (std::size_t knob = 0; knob < pedal->knobs.size(); ++knob)
+            if (pedalKnobCentre (*pedal, static_cast<int> (knob)).getDistanceFrom (board) <= 24.0f * touchHit())
+            {
+                target.target = MidiMapping::Target::parameter;
+                target.node = pedal->knobs[knob].first;
+                target.parameter = pedal->knobs[knob].second;
+                return target;
+            }
+        for (std::size_t index = 0; index < pedal->buttons.size(); ++index)
+            if (pedal->groupId < 0 && pedalButtonBounds (*pedal, static_cast<int> (index)).contains (board))
+            {
+                target.target = MidiMapping::Target::command;
+                target.node = pedal->id;
+                target.command = pedal->buttons[index].command;
+                return target;
+            }
+        if (pedal->stomp)
+        {
+            if (pedal->groupId >= 0)
+            {
+                target.target = MidiMapping::Target::groupBypass;
+                target.groupId = pedal->groupId;
+            }
+            else
+            {
+                target.target = MidiMapping::Target::bypass;
+                target.node = pedal->id;
+            }
+            return target; // anywhere else on a pedal: its footswitch
+        }
+        return std::nullopt;
+    }
+    const auto world = toWorld (x, y);
+    for (auto it = layouts.rbegin(); it != layouts.rend(); ++it)
+    {
+        const auto origin = nodePosition (it->id);
+        if (! juce::Rectangle<float> (origin.x, origin.y, it->w, it->h).contains (world))
+            continue;
+        for (std::size_t knob = 0; knob < it->knobParameters.size(); ++knob)
+            if (knobCentre (*it, origin, static_cast<int> (knob)).getDistanceFrom (world) <= 26.0f * touchHit())
+            {
+                target.target = MidiMapping::Target::parameter;
+                target.node = it->id;
+                target.parameter = it->knobParameters[knob];
+                return target;
+            }
+        for (std::size_t index = 0; index < it->buttons.size(); ++index)
+            if (buttonBounds (*it, origin, static_cast<int> (index)).contains (world))
+            {
+                target.target = MidiMapping::Target::command;
+                target.node = it->id;
+                target.command = it->buttons[index].command;
+                return target;
+            }
+        if (it->stomp)
+        {
+            target.target = MidiMapping::Target::bypass;
+            target.node = it->id;
+            return target;
+        }
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+bool RackView::pickUp (int number, NodeId node, int parameter, float wanted)
+{
+    const auto* model = engine.getDocument().findNode (node);
+    if (model == nullptr || ! juce::isPositiveAndBelow (parameter, model->processor->getNumParameters()))
+        return false;
+    auto& pickup = pickups[number];
+    if (pickup.node != node || pickup.parameter != parameter)
+        pickup = Pickup { node, parameter, false, -1.0f };
+    if (! pickup.engaged)
+    {
+        const auto current = model->processor->getParameter (parameter).getNormalisedValue();
+        const bool crossed = pickup.last >= 0.0f && ((pickup.last <= current && wanted >= current) || (pickup.last >= current && wanted <= current));
+        pickup.engaged = crossed || std::abs (wanted - current) < 0.02f;
+        pickup.last = wanted;
+        if (! pickup.engaged)
+        {
+            const auto& knob = model->processor->getParameter (parameter);
+            say (knob.name + " is at " + formatParameterValue (knob, knob.getValue()) + ": turn " + (wanted < current ? "up" : "down") + " to it to take over");
+            return false;
+        }
+    }
+    return true;
+}
+
+void RackView::setKnobFromController (NodeId node, int parameter, float normalised)
+{
+    const auto* model = engine.getDocument().findNode (node);
+    if (model == nullptr || ! juce::isPositiveAndBelow (parameter, model->processor->getNumParameters()))
+        return;
+    const auto& knob = model->processor->getParameter (parameter);
+    engine.setParameterNoHistory (node, parameter, knob.valueFromNormalised (juce::jlimit (0.0f, 1.0f, normalised)));
+    invalidatePlate (node);
+    message = knob.name + "  " + formatParameterValue (knob, knob.getValue());
+    messageUntil = lastTick + 1.5;
+    dirty = true;
+}
+
+void RackView::runViewAction (const MidiMapping& mapping, const juce::MidiMessage& incoming)
+{
+    const auto& command = mapping.command;
+    // Presses: a key down, a program change, or a switch CC going over 64.
+    bool press = incoming.isNoteOn() || incoming.isProgramChange();
+    if (incoming.isController())
+    {
+        const bool on = incoming.getControllerValue() >= 64;
+        auto& wasOn = viewSwitchState[incoming.getControllerNumber()];
+        press = on && ! wasOn;
+        wasOn = on;
+    }
+    const auto& document = engine.getDocument();
+    if (command == "knob" || command.startsWith ("module-knob-"))
+    {
+        if (! incoming.isController())
+            return;
+        auto target = touchedKnob;
+        if (command != "knob")
+            target = { selectedNode, command.fromLastOccurrenceOf ("-", false, false).getIntValue() - 1 };
+        const auto* model = document.findNode (target.first);
+        if (model == nullptr || ! juce::isPositiveAndBelow (target.second, model->processor->getNumParameters()))
+        {
+            say (command == "knob" ? juce::String ("Touch a knob first: the encoder turns the knob you touched last")
+                                   : juce::String ("Select a module first: the pots play its first knobs"));
+            return;
+        }
+        const auto current = model->processor->getParameter (target.second).getNormalisedValue();
+        if (mapping.relative)
+            setKnobFromController (target.first, target.second, current + static_cast<float> (incoming.getControllerValue() - 64) / 128.0f);
+        else
+        {
+            const auto wanted = mapping.normalised (incoming.getControllerValue());
+            if (pickUp (incoming.getControllerNumber(), target.first, target.second, wanted))
+                setKnobFromController (target.first, target.second, wanted);
+        }
         return;
     }
-    engine.disconnect (cable);
-    const auto in = engine.connect ({ cable.sourceNode, cable.sourcePort, id, 0 });
-    const auto out = engine.connect ({ id, 0, cable.destinationNode, cable.destinationPort });
-    selectedNode = id;
-    say (in.wasOk() && out.wasOk() ? nodeKindName (kind) + " inserted into the cable"
-                                   : (in.failed() ? in.getErrorMessage() : out.getErrorMessage()));
+    if (! press)
+        return;
+    if (command == "next-knob")
+    {
+        const auto module = selectedNode != 0 ? selectedNode : touchedKnob.first;
+        const auto* model = document.findNode (module);
+        if (model == nullptr || model->processor->getNumParameters() == 0)
+        {
+            say ("Select a module first: the push walks its knobs");
+            return;
+        }
+        const auto count = model->processor->getNumParameters();
+        const auto next = touchedKnob.first == module ? (touchedKnob.second + 1) % count : 0;
+        touchedKnob = { module, next };
+        if (valueSheet.isOpen())
+            valueSheet.open (module, next);
+        say ("Encoder: " + model->processor->getParameter (next).name + " of " + model->processor->getName());
+    }
+    else if (command == "next-slot")
+        loadSlot (activeSlot < 0 ? 0 : (activeSlot + 1) % slotCount);
+    else if (command == "prev-slot")
+        loadSlot (activeSlot <= 0 ? slotCount - 1 : activeSlot - 1);
+    else if (command == "mute")
+    {
+        engine.togglePanic();
+        say (engine.isPanicMuted() ? "Muted" : "Fading in");
+    }
+    dirty = true;
+}
+
+// ---------------------------------------------------------------- chain edits
+
+juce::Point<float> RackView::rackSpotAfter (NodeId id) const
+{
+    const auto* layout = layoutFor (id);
+    return nodePosition (id) + juce::Point<float> ((layout != nullptr ? layout->w : 236.0f) + 40.0f, 0.0f);
+}
+
+void RackView::revealAfterChainEdit (NodeId id)
+{
+    structureDirty = boardDirty = true;
+    if (mode == Mode::board)
+    {
+        // The board re-arranges by signal flow; fit it so the whole chain stays in view.
+        rebuildBoard();
+        fitBoard();
+        return;
+    }
+    if (structureDirty)
+        rebuildLayouts();
+    const auto* layout = layoutFor (id);
+    if (layout == nullptr)
+        return;
+    const auto origin = nodePosition (id);
+    const auto left = paletteVisible ? static_cast<double> (paletteWidth) : 0.0;
+    const juce::Rectangle<double> onScreen (origin.x * zoom + panX, origin.y * zoom + panY, layout->w * zoom, layout->h * zoom);
+    const juce::Rectangle<double> view (left, hudHeight(), windowW - left - rightDock(), windowH - hudHeight());
+    if (! view.contains (onScreen))
+    {
+        panX = view.getCentreX() - (origin.x + layout->w * 0.5f) * zoom;
+        panY = view.getCentreY() - (origin.y + layout->h * 0.5f) * zoom;
+    }
+}
+
+void RackView::openPicker (const juce::String& title, std::optional<chain::Splice> where, juce::Point<float> rackPosition, float makeRoom)
+{
+    menu.close();
+    picker.open (title, [this, where, rackPosition, makeRoom, epoch = patchEpoch] (NodeKind kind)
+    {
+        if (epoch != patchEpoch)
+            return; // the patch the place was measured on is gone
+        endInteractions();
+        juce::String note;
+        const auto created = where.has_value() ? chain::insert (engine.chainEditor(), kind, rackPosition, *where, note, makeRoom)
+                                               : engine.addNode (kind, rackPosition);
+        if (created != 0)
+        {
+            selectedNode = created;
+            selectedCable.reset();
+            rackSelection = { created };
+            boardSelection = { created };
+            say (note.isNotEmpty() ? note : nodeKindName (kind) + " added");
+            revealAfterChainEdit (created);
+        }
+        else
+            say (note.isNotEmpty() ? note : "Could not add " + nodeKindName (kind));
+        structureDirty = boardDirty = true;
+        dirty = true;
+    });
+    dirty = true;
+}
+
+void RackView::addModuleHere()
+{
+    const auto& document = engine.getDocument();
+    if (const auto* selected = document.findNode (selectedNode);
+        selected != nullptr && selectedNode != PatchDocument::hardwareOutputId && chain::audioOutputs (*selected->processor).left >= 0)
+    {
+        addAfter (selectedNode);
+        return;
+    }
+    const auto where = chain::endOfChain (document);
+    if (where.destinationsLeft.empty())
+    {
+        const auto centre = toWorld ((paletteVisible ? paletteWidth : 0.0f) + (windowW - (paletteVisible ? paletteWidth : 0.0f)) * 0.5, windowH * 0.5);
+        openPicker ("Add a module", std::nullopt, centre - juce::Point<float> (118.0f, 100.0f), 0.0f);
+        return;
+    }
+    const auto position = ! where.sourcesLeft.empty() ? rackSpotAfter (where.sourcesLeft.front().first)
+                                                      : nodePosition (PatchDocument::hardwareOutputId) - juce::Point<float> (276.0f, 0.0f);
+    openPicker ("Add to the end of the chain", where, position, 276.0f);
+}
+
+void RackView::addAfter (NodeId id)
+{
+    if (const auto* model = engine.getDocument().findNode (id))
+        openPicker ("Add after " + model->processor->getName(), chain::after (engine.getDocument(), id), rackSpotAfter (id), 276.0f);
+}
+
+void RackView::addBefore (NodeId id)
+{
+    if (const auto* model = engine.getDocument().findNode (id))
+        openPicker ("Add before " + model->processor->getName(), chain::before (engine.getDocument(), id), nodePosition (id), 276.0f);
+}
+
+void RackView::insertIntoCable (const Connection& cable)
+{
+    const auto& document = engine.getDocument();
+    const auto* from = document.findNode (cable.sourceNode);
+    const auto* to = document.findNode (cable.destinationNode);
+    if (from == nullptr || to == nullptr)
+        return;
+    openPicker ("Add between " + from->processor->getName() + " and " + to->processor->getName(),
+                chain::onCable (document, cable), rackSpotAfter (cable.sourceNode), 276.0f);
+}
+
+void RackView::moveAlongChain (NodeId id, int direction)
+{
+    const auto* model = engine.getDocument().findNode (id);
+    if (model == nullptr)
+        return;
+    const auto name = model->processor->getName();
+    endInteractions();
+    const auto result = chain::move (engine.chainEditor(), id, direction);
+    say (result.wasOk() ? name + (direction < 0 ? " moved earlier" : " moved later") : result.getErrorMessage());
+    if (result.wasOk())
+        revealAfterChainEdit (id);
+    structureDirty = boardDirty = true;
+    dirty = true;
+}
+
+void RackView::removeKeepingChain (NodeId id)
+{
+    const auto* model = engine.getDocument().findNode (id);
+    if (model == nullptr)
+        return;
+    const auto name = model->processor->getName();
+    endInteractions();
+    const auto result = chain::removeAndBridge (engine.chainEditor(), id);
+    if (result.wasOk())
+    {
+        selectedNode = 0;
+        rackSelection.clear();
+        boardSelection.clear();
+        say (name + " removed, the chain is closed up");
+        if (mode == Mode::board)
+            revealAfterChainEdit (0);
+    }
+    else
+        say (result.getErrorMessage());
+    structureDirty = boardDirty = true;
+    dirty = true;
+}
+
+void RackView::addChainMenuItems (std::vector<MenuItem>& items, NodeId id, int idBase) const
+{
+    const auto& document = engine.getDocument();
+    const auto* model = document.findNode (id);
+    if (model == nullptr)
+        return;
+    const auto ins = chain::audioInputs (*model->processor);
+    const auto outs = chain::audioOutputs (*model->processor);
+    const auto movable = [&] (int direction)
+    {
+        const auto other = chain::neighbour (document, id, direction);
+        return other != 0 && other != PatchDocument::hardwareInputId && other != PatchDocument::hardwareOutputId;
+    };
+    const auto before = items.size();
+    if (outs.left >= 0 && id != PatchDocument::hardwareOutputId)
+        items.push_back (MenuItem::item (idBase, "Add a module after this...", "A"));
+    if (ins.left >= 0 && id != PatchDocument::hardwareInputId)
+        items.push_back (MenuItem::item (idBase + 1, "Add a module before this..."));
+    if (! model->hardware && ins.left >= 0 && outs.left >= 0)
+    {
+        items.push_back (MenuItem::item (idBase + 2, "Move earlier in the chain", {}, movable (-1)));
+        items.push_back (MenuItem::item (idBase + 3, "Move later in the chain", {}, movable (1)));
+    }
+    if (! model->hardware)
+        items.push_back (MenuItem::item (idBase + 4, "Remove, keep the chain connected"));
+    if (items.size() > before)
+        items.push_back (MenuItem::line());
+}
+
+bool RackView::runChainMenuItem (NodeId id, int picked, int idBase)
+{
+    switch (picked - idBase)
+    {
+        case 0: addAfter (id); return true;
+        case 1: addBefore (id); return true;
+        case 2: moveAlongChain (id, -1); return true;
+        case 3: moveAlongChain (id, 1); return true;
+        case 4: removeKeepingChain (id); return true;
+        default: return false;
+    }
 }
 
 void RackView::showCableMenu (const Connection& cable, double x, double y)
@@ -1754,6 +2529,8 @@ void RackView::showCableMenu (const Connection& cable, double x, double y)
     const bool audioCable = source != nullptr && source->processor->getOutputPort (cable.sourcePort).type == SignalType::audio;
     std::vector<MenuItem> items;
     items.push_back (MenuItem::item (1, "Disconnect cable", "Del"));
+    if (audioCable)
+        items.push_back (MenuItem::item (2, "Add a module into this cable..."));
     if (audioCable)
     {
         std::vector<MenuItem> insert;
@@ -1785,6 +2562,8 @@ void RackView::showCableMenu (const Connection& cable, double x, double y)
             engine.disconnect (cable);
             say ("Cable removed");
         }
+        else if (picked == 2)
+            insertIntoCable (cable);
         else if (picked >= 1000)
             insertNodeOnCable (cable, static_cast<NodeKind> (picked - 1000), world);
         dirty = true;
@@ -2484,10 +3263,10 @@ void RackView::fitBoard()
     }
     const auto left = 0.0f; // the palette is hidden on the board
     const auto availW = static_cast<float> (windowW) - left - 60.0f;
-    const auto availH = static_cast<float> (windowH) - hudHeight - slotBarHeight - 60.0f;
+    const auto availH = static_cast<float> (windowH) - hudHeight() - slotBarHeight - 60.0f;
     boardScale = juce::jlimit (0.35f, 1.35f, juce::jmin (availW / (maxX - minX), availH / (maxY - minY)));
     boardPanX = left + 30.0f + (availW - (maxX - minX) * boardScale) * 0.5 - minX * boardScale;
-    boardPanY = hudHeight + 30.0f + (availH - (maxY - minY) * boardScale) * 0.5 - minY * boardScale;
+    boardPanY = hudHeight() + 30.0f + (availH - (maxY - minY) * boardScale) * 0.5 - minY * boardScale;
     dirty = true;
 }
 
@@ -2564,7 +3343,9 @@ void RackView::drawBoard (int width, int height, double now)
         return nullptr;
     };
 
-    // Flow lines between pedals (audio connections only).
+    // Flow lines between pedals (audio connections only), with a + in the middle
+    // of each pair of pedals to put a new one between them.
+    boardInsertPoints.clear();
     for (const auto& connection : document.getConnections())
     {
         const auto* source = document.findNode (connection.sourceNode);
@@ -2576,6 +3357,11 @@ void RackView::drawBoard (int width, int height, double now)
             continue;
         const juce::Point<float> a { from->x + from->w, from->y + from->h * 0.5f };
         const juce::Point<float> b { to->x, to->y + to->h * 0.5f };
+        if (std::none_of (boardInsertPoints.begin(), boardInsertPoints.end(), [&] (const BoardInsertPoint& point)
+            {
+                return point.cable.sourceNode == connection.sourceNode && point.cable.destinationNode == connection.destinationNode;
+            }))
+            boardInsertPoints.push_back ({ (a + b) * 0.5f, connection });
         const auto reach = juce::jmax (30.0f, std::abs (b.x - a.x) * 0.5f);
         const auto colour = accent (from->kind);
         const auto energy = juce::jlimit (0.0f, 1.0f, std::sqrt (juce::jmax (0.0f, source->processor->outputRms (connection.sourcePort))));
@@ -2814,6 +3600,25 @@ void RackView::drawBoard (int width, int height, double now)
             }
         }
     }
+    for (const auto& point : boardInsertPoints)
+    {
+        const auto radius = boardInsertRadius();
+        nvgBeginPath (vg);
+        nvgCircle (vg, point.at.x, point.at.y, radius);
+        nvgFillColor (vg, alpha (palette::panelRaised, 0.95f));
+        nvgFill (vg);
+        nvgStrokeColor (vg, alpha (palette::text, 0.35f));
+        nvgStrokeWidth (vg, 1.2f);
+        nvgStroke (vg);
+        nvgBeginPath (vg);
+        nvgMoveTo (vg, point.at.x - radius * 0.45f, point.at.y);
+        nvgLineTo (vg, point.at.x + radius * 0.45f, point.at.y);
+        nvgMoveTo (vg, point.at.x, point.at.y - radius * 0.45f);
+        nvgLineTo (vg, point.at.x, point.at.y + radius * 0.45f);
+        nvgStrokeColor (vg, alpha (palette::text, 0.85f));
+        nvgStrokeWidth (vg, 2.0f);
+        nvgStroke (vg);
+    }
     nvgRestore (vg);
 }
 
@@ -2846,7 +3651,7 @@ void RackView::drawSlotBar (int width, int height)
         nvgText (vg, box.getX() + 14.0f, box.getCentreY(), juce::String (slot + 1).toRawUTF8(), nullptr);
         nvgFontSize (vg, 11.0f);
         nvgFillColor (vg, exists ? palette::text : alpha (palette::mutedText, 0.5f));
-        nvgText (vg, box.getX() + 36.0f, box.getCentreY(), (exists ? file.getFileNameWithoutExtension() : juce::String ("empty - Shift+click to store")).toRawUTF8(), nullptr);
+        nvgText (vg, box.getX() + 36.0f, box.getCentreY(), (exists ? file.getFileNameWithoutExtension() : juce::String (touchMode ? "empty - hold to store" : "empty - Shift+click to store")).toRawUTF8(), nullptr);
         const auto midi = midiLabelFor ([slot] (const MidiMapping& m) { return m.target == MidiMapping::Target::slot && m.slot == slot; });
         if (midi.isNotEmpty())
         {
@@ -2863,7 +3668,8 @@ void RackView::loadSlot (int slot)
     const auto file = slotFile (slot);
     if (! file.existsAsFile())
     {
-        say ("Slot " + juce::String (slot + 1) + " is empty - Shift+click (or Shift+" + juce::String (slot + 1) + ") stores the current rig there");
+        say ("Slot " + juce::String (slot + 1) + (touchMode ? juce::String (" is empty - hold it and pick \"Store the current rig here\"")
+                                                          : " is empty - Shift+click (or Shift+" + juce::String (slot + 1) + ") stores the current rig there"));
         return;
     }
     auto parsed = juce::JSON::parse (file);
@@ -2985,8 +3791,8 @@ void RackView::pollGamepad (double now)
         std::copy (std::begin (state.buttons), std::begin (state.buttons) + static_cast<long> (pad.buttons.size()), pad.buttons.begin());
     };
 
-    // A menu, browser or prompt on top: the pad becomes a keyboard for it.
-    if (menu.isOpen() || browser.isOpen() || prompt.isOpen() || toneBrowser.isOpen())
+    // A menu, browser, picker or prompt on top: the pad becomes a keyboard for it.
+    if (anyModalOpen())
     {
         if (prompt.isOpen())
         {
@@ -3025,6 +3831,14 @@ void RackView::pollGamepad (double now)
             key (GLFW_KEY_ESCAPE, true, 0);
         if (pressed (GLFW_GAMEPAD_BUTTON_X) && (browser.isOpen() || toneBrowser.isOpen()))
             key (GLFW_KEY_BACKSPACE, true, 0);
+        if (picker.isOpen() && ! prompt.isOpen())
+        {
+            // The bumpers jump family.
+            if (pressed (GLFW_GAMEPAD_BUTTON_LEFT_BUMPER))
+                key (GLFW_KEY_PAGE_UP, true, 0);
+            if (pressed (GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER))
+                key (GLFW_KEY_PAGE_DOWN, true, 0);
+        }
         rememberButtons();
         return;
     }
@@ -3032,7 +3846,7 @@ void RackView::pollGamepad (double now)
 
     if (pressed (GLFW_GAMEPAD_BUTTON_GUIDE))
     {
-        showFileMenu (static_cast<double> (windowW) - 215.0, 34.0);
+        showFileMenu (hudLayout (windowW).file.getX(), hudHeight());
         rememberButtons();
         return;
     }
@@ -3219,7 +4033,7 @@ void RackView::groupSelection()
 void RackView::showBoardMenu (double x, double y)
 {
     std::vector<MenuItem> items;
-    items.push_back (MenuItem::sub ("Add module", moduleCatalogueMenu()));
+    items.push_back (MenuItem::item (7, selectedNode != 0 ? juce::String ("Add a module after the selected pedal...") : juce::String ("Add a module to the end of the chain..."), "A"));
     items.push_back (MenuItem::line());
     items.push_back (MenuItem::item (1, boardSelection.size() >= 2 ? "Group the " + juce::String (boardSelection.size()) + " selected pedals into one..." : juce::String ("Group selected pedals (Shift+click to select)"), {}, boardSelection.size() >= 2));
     items.push_back (MenuItem::item (2, "Auto-arrange every pedal"));
@@ -3229,28 +4043,9 @@ void RackView::showBoardMenu (double x, double y)
     items.push_back (MenuItem::item (6, engine.canRedo() ? "Redo " + engine.getRedoDescription() : juce::String ("Redo"), "Ctrl+Shift+Z", engine.canRedo()));
     items.push_back (MenuItem::line());
     items.push_back (MenuItem::item (4, engine.isPanicMuted() ? "Unmute (fade in)" : "Panic mute", "M"));
-    const auto where = toBoard (x, y);
-    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this, where] (int picked)
+    menu.open (std::move (items), static_cast<float> (x), static_cast<float> (y), [this] (int picked)
     {
-        if (picked >= 1000)
-        {
-            // New pedal lands where the menu opened; the rack position trails
-            // the last module so the rack stays readable too.
-            const auto kind = static_cast<NodeKind> (picked - 1000);
-            juce::Point<float> rackPosition (40.0f, 40.0f);
-            for (const auto& node : engine.getDocument().getNodes())
-                rackPosition.x = juce::jmax (rackPosition.x, node.position.x + 260.0f);
-            const auto created = engine.addNode (kind, rackPosition);
-            if (created != 0)
-            {
-                engine.setBoardPosition (created, where);
-                selectedNode = created;
-                boardSelection = { created };
-                boardDirty = true;
-                say (nodeKindName (kind) + " added to the board");
-            }
-        }
-        else if (picked == 1) groupSelection();
+        if (picked == 1) groupSelection();
         else if (picked == 2)
         {
             for (const auto& node : engine.getDocument().getNodes())
@@ -3269,6 +4064,7 @@ void RackView::showBoardMenu (double x, double y)
         else if (picked == 4) { engine.togglePanic(); say (engine.isPanicMuted() ? "Muted" : "Fading in"); }
         else if (picked == 5) say (undoNow() ? "Undo" : "Nothing to undo");
         else if (picked == 6) say (redoNow() ? "Redo" : "Nothing to redo");
+        else if (picked == 7) addModuleHere();
         dirty = true;
     });
     dirty = true;
@@ -3279,9 +4075,10 @@ void RackView::showBoardPedalMenu (const Pedal& pedal, double x, double y)
     const auto* model = engine.getDocument().findNode (pedal.id);
     if (model == nullptr)
         return;
-    enum { bypass = 1, groupSelected, autoPlace, openInRack, rename, remove, moreMenu };
+    enum { bypass = 1, groupSelected, autoPlace, openInRack, rename, remove, moreMenu, chainBase = 9000 };
     std::vector<MenuItem> items;
     items.push_back (MenuItem::sectionHeader (model->processor->getName().toUpperCase()));
+    addChainMenuItems (items, pedal.id, chainBase);
     items.push_back (MenuItem::item (moreMenu, "Module menu (MIDI, models, knobs)..."));
     if (boardSelection.size() >= 2)
         items.push_back (MenuItem::item (groupSelected, "Group the " + juce::String (boardSelection.size()) + " selected pedals into one..."));
@@ -3301,6 +4098,8 @@ void RackView::showBoardPedalMenu (const Pedal& pedal, double x, double y)
     {
         const auto* current = engine.getDocument().findNode (id);
         if (current == nullptr)
+            return;
+        if (runChainMenuItem (id, picked, chainBase))
             return;
         switch (picked)
         {
@@ -3632,6 +4431,7 @@ bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, d
     {
         if (knobDrag.has_value())
             engine.closeEditGesture();
+        openValueSheetIfTapped (x, y);
         if (boardDrag.has_value())
         {
             if (boardDrag->groupId >= 0 && boardDrag->moved)
@@ -3659,6 +4459,13 @@ bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, d
         panStartX = x; panStartY = y; panOriginX = boardPanX; panOriginY = boardPanY;
         return true;
     }
+    if (button == GLFW_MOUSE_BUTTON_LEFT)
+        for (const auto& point : boardInsertPoints)
+            if (point.at.getDistanceFrom (board) <= boardInsertRadius() * (touchMode ? 1.6f : 1.2f))
+            {
+                insertIntoCable (point.cable);
+                return true;
+            }
     const auto* pedal = pedalAt (board);
     if (pedal == nullptr)
     {
@@ -3748,7 +4555,16 @@ bool RackView::boardMouseButton (int button, bool pressed, int mods, double x, d
                     invalidatePlate (ownerId);
                 }
                 else
-                    knobDrag = KnobDrag { ownerId, parameterIndex, y, owner->processor->getParameter (parameterIndex).getNormalisedValue() };
+                {
+                    knobDrag = KnobDrag { ownerId, parameterIndex, y, owner->processor->getParameter (parameterIndex).getNormalisedValue(), false };
+                    touchedKnob = { ownerId, parameterIndex };
+                    if (pedal->groupId < 0)
+                    {
+                        selectedNode = ownerId; // the pots follow the module whose knob was touched
+                        selectedGroup = -1;
+                        boardSelection = { ownerId };
+                    }
+                }
                 dirty = true;
                 return true;
             }
@@ -3809,7 +4625,7 @@ float RackView::paletteRowTop (int row) const noexcept
 {
     // Group headings take a taller row before the first entry of each group.
     const auto& catalogue = moduleCatalogue();
-    float y = hudHeight + 12.0f - paletteScroll;
+    float y = hudHeight() + 12.0f - paletteScroll;
     juce::String group;
     for (int index = 0; index <= row && index < static_cast<int> (catalogue.size()); ++index)
     {
@@ -3827,7 +4643,7 @@ float RackView::paletteRowTop (int row) const noexcept
 
 int RackView::paletteRowAt (double x, double y) const noexcept
 {
-    if (! paletteVisible || x < 0.0 || x > paletteWidth || y < hudHeight)
+    if (! paletteVisible || x < 0.0 || x > paletteWidth || y < hudHeight())
         return -1;
     const auto& catalogue = moduleCatalogue();
     for (int index = 0; index < static_cast<int> (catalogue.size()); ++index)
@@ -3844,18 +4660,18 @@ void RackView::drawPalette (int height)
     if (! paletteVisible)
         return;
     nvgBeginPath (vg);
-    nvgRect (vg, 0, hudHeight, paletteWidth, static_cast<float> (height) - hudHeight);
+    nvgRect (vg, 0, hudHeight(), paletteWidth, static_cast<float> (height) - hudHeight());
     nvgFillColor (vg, alpha (palette::panel, 0.96f));
     nvgFill (vg);
     nvgBeginPath (vg);
-    nvgMoveTo (vg, paletteWidth, hudHeight);
+    nvgMoveTo (vg, paletteWidth, hudHeight());
     nvgLineTo (vg, paletteWidth, static_cast<float> (height));
     nvgStrokeColor (vg, nvgRGBAf (0, 0, 0, 0.4f));
     nvgStrokeWidth (vg, 1.0f);
     nvgStroke (vg);
 
     nvgSave (vg);
-    nvgScissor (vg, 0, hudHeight, paletteWidth, static_cast<float> (height) - hudHeight);
+    nvgScissor (vg, 0, hudHeight(), paletteWidth, static_cast<float> (height) - hudHeight());
     nvgFontFaceId (vg, font);
     const auto& catalogue = moduleCatalogue();
     juce::String group;
@@ -3995,19 +4811,85 @@ void RackView::tick (double now)
         animating = true; // caret blink
         dirty = true;
     }
-    if (touchMode && pressActive && ! longPressFired && ! menu.isOpen() && ! prompt.isOpen() && ! browser.isOpen() && ! toneBrowser.isOpen())
+    if (touchMode && pressActive && ! longPressFired && ! anyModalOpen())
     {
         animating = true; // keep frames coming so the press can ripen
-        if (now - pressTime > 0.7 && ! draggingNode.has_value() && ! knobDrag.has_value() && ! cableDrag.has_value()
-            && ! boardDrag.has_value() && ! marquee.has_value() && ! paletteDrag.has_value()
-            && juce::Point<double> (mouseX, mouseY).getDistanceFrom ({ pressX, pressY }) < 8.0)
+        // A plate or pedal held still counts too: its drag has not started moving anything.
+        if (now - pressTime > 0.7 && ! (draggingNode.has_value() && nodeDragMoved) && ! knobDrag.has_value() && ! cableDrag.has_value()
+            && ! (boardDrag.has_value() && boardDrag->moved) && ! marquee.has_value() && ! paletteDrag.has_value()
+            && juce::Point<double> (mouseX, mouseY).getDistanceFrom ({ pressX, pressY }) < dragSlop())
         {
+            if (draggingNode.has_value() || boardDrag.has_value())
+            {
+                draggingNode.reset();
+                boardDrag.reset();
+                dragStartPositions.clear();
+                engine.closeEditGesture();
+            }
             longPressFired = true;   // a held finger is a right click
             mouseButton (GLFW_MOUSE_BUTTON_RIGHT, true, 0, pressX * uiScale, pressY * uiScale);
             mouseButton (GLFW_MOUSE_BUTTON_RIGHT, false, 0, pressX * uiScale, pressY * uiScale);
         }
     }
     pollGamepad (now);
+    if (controllerPage.wantsRedraw())
+        dirty = true;
+    {
+        // What the controller's app actions point at, for its display.
+        const controller::ViewContext view { touchedKnob.first, touchedKnob.second, selectedNode, engine.isPanicMuted() };
+        if (! controllerViewKnown || view.touchedNode != controllerViewSent.touchedNode || view.touchedParameter != controllerViewSent.touchedParameter
+            || view.selectedNode != controllerViewSent.selectedNode || view.muted != controllerViewSent.muted)
+        {
+            controllerViewSent = view;
+            controllerViewKnown = true;
+            engine.setControllerView (view);
+        }
+        // A C3 reporting another channel or other numbers than the mappings were made for
+        // (changed on the SETTINGS page, reset, or in an earlier session): they move along.
+        if (const auto c3 = controllerPage.controller(); c3.has_value() && c3->settingsKnown)
+        {
+            auto layoutOf = [] (const std::map<int, int>& values)
+            {
+                std::map<int, int> layout;
+                for (const auto& [key, value] : values)
+                    if (key <= 0x0B)
+                        layout[key] = value;
+                return layout;
+            };
+            if (knownControllerSettings.empty() && settings != nullptr)
+            {
+                const auto saved = juce::JSON::parse (settings->getValue ("controller.layout"));
+                if (auto* list = saved.getArray())
+                    for (int key = 0; key < list->size(); ++key)
+                        knownControllerSettings[key] = static_cast<int> ((*list)[key]);
+            }
+            const auto current = layoutOf (c3->settings);
+            if (current != knownControllerSettings)
+            {
+                if (! knownControllerSettings.empty())
+                    remapControls (ControllerPage::controlsFor (knownControllerSettings), ControllerPage::controlsFor (current));
+                knownControllerSettings = current;
+                if (settings != nullptr)
+                {
+                    juce::Array<juce::var> list;
+                    for (const auto& [key, value] : current)
+                        list.add (value);
+                    settings->setValue ("controller.layout", juce::JSON::toString (juce::var (list), true));
+                    settings->saveIfNeeded();
+                }
+            }
+        }
+        // The first time a C3 shows up and nothing is mapped app-wide, it gets the default layout.
+        if (settings != nullptr && ! settings->getBoolValue ("controller.defaultsApplied", false) && engine.getGlobalMappings().empty())
+            for (const auto& connected : engine.getControllers())
+                if (connected.model == controller::handheldC3 && connected.settingsKnown)
+                {
+                    applyDefaultControllerLayout();
+                    settings->setValue ("controller.defaultsApplied", true);
+                    settings->saveIfNeeded();
+                    break;
+                }
+    }
     if (toneBrowser.consumeDirty())
         dirty = true;
     if (toneBrowser.isOpen())
@@ -4636,12 +5518,64 @@ void RackView::drawNode (const Layout& layout, double now)
     }
 }
 
+RackView::HudLayout RackView::hudLayout (int width) const noexcept
+{
+    const auto w = static_cast<float> (width);
+    HudLayout layout;
+    if (! touchMode)
+    {
+        layout.view = { w - 392.0f, 6.0f, 86.0f, 22.0f };
+        layout.audio = { w - 300.0f, 6.0f, 54.0f, 22.0f };
+        layout.file = { w - 240.0f, 6.0f, 50.0f, 22.0f };
+        layout.mute = { w - 176.0f, 6.0f, 160.0f, 22.0f };
+        layout.controller = { w - 496.0f, 6.0f, 96.0f, 22.0f };
+        layout.nameRight = w - 506.0f;
+        return layout;
+    }
+    const auto top = 6.0f, height = hudHeight() - 12.0f;
+    layout.mute = { w - 12.0f - 196.0f, top, 196.0f, height };
+    layout.file = { layout.mute.getX() - 8.0f - 80.0f, top, 80.0f, height };
+    layout.audio = { layout.file.getX() - 8.0f - 92.0f, top, 92.0f, height };
+    layout.view = { layout.audio.getX() - 8.0f - 110.0f, top, 110.0f, height };
+    layout.controller = { layout.view.getX() - 8.0f - 150.0f, top, 150.0f, height };
+    layout.nameRight = layout.controller.getX() - 14.0f;
+    return layout;
+}
+
+bool RackView::hudButtonPressed (double x, double y)
+{
+    if (y >= hudHeight())
+        return false;
+    const auto hud = hudLayout (windowW);
+    // The whole height of the strip counts: a finger lands a little high or low.
+    auto hits = [&] (juce::Rectangle<float> area) { return x >= area.getX() - 3.0 && x < area.getRight() + 3.0; };
+    if (hits (hud.file))
+        showFileMenu (hud.file.getX(), hudHeight());
+    else if (hits (hud.audio))
+        showAudioMenu (hud.audio.getX(), hudHeight());
+    else if (hits (hud.view))
+        setMode (mode == Mode::rack ? Mode::board : Mode::rack);
+    else if (hits (hud.controller))
+        toggleControllerPage();
+    else if (hits (hud.mute) && (touchMode || engine.isPanicMuted()))
+    {
+        engine.togglePanic();
+        say (engine.isPanicMuted() ? "Muted" : "Fading in");
+    }
+    else
+        return false;
+    dirty = true;
+    return true;
+}
+
 void RackView::drawHud (int width, int height, double now)
 {
     juce::ignoreUnused (now);
     const auto status = engine.getStatus();
     nvgBeginPath (vg);
-    nvgRect (vg, 0, 0, static_cast<float> (width), 34.0f);
+    const auto hud = hudLayout (width);
+    const auto midY = hudHeight() * 0.5f;
+    nvgRect (vg, 0, 0, static_cast<float> (width), hudHeight());
     nvgFillColor (vg, alpha (palette::panel, 0.92f));
     nvgFill (vg);
     nvgFontFaceId (vg, font);
@@ -4649,7 +5583,7 @@ void RackView::drawHud (int width, int height, double now)
     nvgTextLetterSpacing (vg, 0.8f);
     nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
     nvgFillColor (vg, palette::text);
-    nvgText (vg, 16.0f, 17.0f, "SIGNALPATCH", nullptr);
+    nvgText (vg, 16.0f, midY, "SIGNALPATCH", nullptr);
     nvgTextLetterSpacing (vg, 0.0f);
     nvgFontSize (vg, 11.0f);
     nvgFillColor (vg, palette::mutedText);
@@ -4667,14 +5601,14 @@ void RackView::drawHud (int width, int height, double now)
     // about 400 px from the edge; drop the least useful stats when the window is narrow.
     float nameBounds[4] {};
     nvgFontSize (vg, 10.5f);
-    nvgTextBounds (vg, static_cast<float> (width) - 402.0f, 17.0f,
+    nvgTextBounds (vg, hud.nameRight, midY,
                    (currentFile == juce::File() ? juce::String ("untitled") : currentFile.getFileName()).toRawUTF8(), nullptr, nameBounds);
     nvgFontSize (vg, 11.0f);
-    const auto rightEdge = static_cast<float> (width) - 402.0f - (nameBounds[2] - nameBounds[0]) - 24.0f;
+    const auto rightEdge = hud.nameRight - (nameBounds[2] - nameBounds[0]) - 24.0f;
     auto textRight = [&] (const juce::String& text)
     {
         float bounds[4] {};
-        nvgTextBounds (vg, 150.0f, 17.0f, text.toRawUTF8(), nullptr, bounds);
+        nvgTextBounds (vg, 150.0f, midY, text.toRawUTF8(), nullptr, bounds);
         return bounds[2];
     };
     juce::String shown = line;
@@ -4686,7 +5620,7 @@ void RackView::drawHud (int width, int height, double now)
               + (status.realtimeThread ? juce::String() : juce::String ("   NO RT"));
     if (textRight (shown) > rightEdge)
         shown = juce::String();
-    nvgText (vg, 150.0f, 17.0f, shown.toRawUTF8(), nullptr);
+    nvgText (vg, 150.0f, midY, shown.toRawUTF8(), nullptr);
     {
         const auto inputs = engine.getOpenMidiInputNames();
         const auto midiLine = inputs.isEmpty() ? juce::String ("MIDI: none")
@@ -4695,82 +5629,104 @@ void RackView::drawHud (int width, int height, double now)
         const auto midiText = midiLine + (pad.present ? "   GAMEPAD" : "");
         const auto x = textRight (shown) + 24.0f;
         float bounds[4] {};
-        nvgTextBounds (vg, x, 17.0f, midiText.toRawUTF8(), nullptr, bounds);
+        nvgTextBounds (vg, x, midY, midiText.toRawUTF8(), nullptr, bounds);
         if (bounds[2] <= rightEdge)
         {
             nvgFillColor (vg, inputs.isEmpty() ? alpha (palette::mutedText, 0.6f) : palette::control);
-            nvgText (vg, x, 17.0f, midiText.toRawUTF8(), nullptr);
+            nvgText (vg, x, midY, midiText.toRawUTF8(), nullptr);
         }
+    }
+    if (assignArmed.has_value())
+    {
+        const auto text = "ASSIGN " + assignArmed->name.toUpperCase() + " - tap a knob, a footswitch, a button or a slot   (Esc cancels)";
+        nvgBeginPath (vg);
+        nvgRoundedRect (vg, static_cast<float> (width) * 0.5f - 300.0f, hudHeight() + 10.0f, 600.0f, 34.0f, 6.0f);
+        nvgFillColor (vg, alpha (palette::control, 0.9f));
+        nvgFill (vg);
+        nvgFontSize (vg, 13.0f);
+        nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgFillColor (vg, palette::nodeDark);
+        nvgText (vg, static_cast<float> (width) * 0.5f, hudHeight() + 27.0f, text.toRawUTF8(), nullptr);
     }
     if (learnTarget.has_value())
     {
         nvgBeginPath (vg);
-        nvgRoundedRect (vg, static_cast<float> (width) * 0.5f - 230.0f, 44.0f, 460.0f, 34.0f, 6.0f);
+        nvgRoundedRect (vg, static_cast<float> (width) * 0.5f - 230.0f, hudHeight() + 10.0f, 460.0f, 34.0f, 6.0f);
         nvgFillColor (vg, alpha (palette::control, 0.9f));
         nvgFill (vg);
         nvgFontSize (vg, 13.0f);
         nvgTextLetterSpacing (vg, 0.8f);
         nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
         nvgFillColor (vg, palette::nodeDark);
-        nvgText (vg, static_cast<float> (width) * 0.5f, 61.0f, "MIDI LEARN - move or press a control on your controller   (Esc cancels)", nullptr);
+        nvgText (vg, static_cast<float> (width) * 0.5f, hudHeight() + 27.0f, "MIDI LEARN - move or press a control on your controller   (Esc cancels)", nullptr);
         nvgTextLetterSpacing (vg, 0.0f);
     }
 
-    // View toggle, AUDIO and FILE buttons and the current patch name.
-    nvgBeginPath (vg);
-    nvgRoundedRect (vg, static_cast<float> (width) - 392.0f, 6.0f, 86.0f, 22.0f, 4.0f);
-    nvgFillColor (vg, mode == Mode::board ? mix (palette::panelRaised, palette::selection, 0.3f) : palette::panelRaised);
-    nvgFill (vg);
-    nvgFontSize (vg, 10.5f);
-    nvgTextLetterSpacing (vg, 0.8f);
-    nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-    nvgFillColor (vg, palette::text);
-    nvgText (vg, static_cast<float> (width) - 349.0f, 17.0f, mode == Mode::board ? "RACK  (Tab)" : "BOARD  (Tab)", nullptr);
-    nvgBeginPath (vg);
-    nvgRoundedRect (vg, static_cast<float> (width) - 300.0f, 6.0f, 54.0f, 22.0f, 4.0f);
-    nvgFillColor (vg, palette::panelRaised);
-    nvgFill (vg);
-    nvgFontSize (vg, 10.5f);
-    nvgTextLetterSpacing (vg, 0.8f);
-    nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-    nvgFillColor (vg, palette::text);
-    nvgText (vg, static_cast<float> (width) - 273.0f, 17.0f, "AUDIO", nullptr);
-    nvgBeginPath (vg);
-    nvgRoundedRect (vg, static_cast<float> (width) - 240.0f, 6.0f, 50.0f, 22.0f, 4.0f);
-    nvgFillColor (vg, palette::panelRaised);
-    nvgFill (vg);
-    nvgFontSize (vg, 10.5f);
-    nvgTextLetterSpacing (vg, 0.8f);
-    nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-    nvgFillColor (vg, palette::text);
-    nvgText (vg, static_cast<float> (width) - 215.0f, 17.0f, "FILE", nullptr);
-    nvgTextLetterSpacing (vg, 0.0f);
-    nvgTextAlign (vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
-    nvgFillColor (vg, palette::mutedText);
-    nvgText (vg, static_cast<float> (width) - 402.0f, 17.0f,
-             (currentFile == juce::File() ? juce::String ("untitled") : currentFile.getFileName()).toRawUTF8(), nullptr);
-
-    if (status.panicMuted)
+    // View toggle, AUDIO and FILE buttons, mute and the current patch name.
+    auto headerButton = [this] (juce::Rectangle<float> area, const juce::String& label, NVGcolor fill)
     {
         nvgBeginPath (vg);
-        nvgRoundedRect (vg, static_cast<float> (width) - 176.0f, 6.0f, 160.0f, 22.0f, 4.0f);
-        nvgFillColor (vg, darker (palette::warning, 0.4f));
+        nvgRoundedRect (vg, area.getX(), area.getY(), area.getWidth(), area.getHeight(), touchMode ? 7.0f : 4.0f);
+        nvgFillColor (vg, fill);
         nvgFill (vg);
-        nvgFontSize (vg, 11.0f);
+        nvgFontSize (vg, touchMode ? 13.0f : 10.5f);
+        nvgTextLetterSpacing (vg, 0.8f);
         nvgTextAlign (vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
         nvgFillColor (vg, palette::text);
-        nvgText (vg, static_cast<float> (width) - 96.0f, 17.0f, "MUTED - press M to fade in", nullptr);
+        nvgText (vg, area.getCentreX(), area.getCentreY(), label.toRawUTF8(), nullptr);
+        nvgTextLetterSpacing (vg, 0.0f);
+    };
+    headerButton (hud.view, mode == Mode::board ? (touchMode ? "RACK" : "RACK  (Tab)") : (touchMode ? "BOARD" : "BOARD  (Tab)"),
+                  mode == Mode::board ? mix (palette::panelRaised, palette::selection, 0.3f) : palette::panelRaised);
+    headerButton (hud.audio, "AUDIO", palette::panelRaised);
+    {
+        const bool connected = engine.getControllerCount() > 0;
+        headerButton (hud.controller, touchMode ? "CONTROLLER" : "CONTROLLER", controllerPage.isOpen() ? mix (palette::panelRaised, palette::control, 0.35f) : palette::panelRaised);
+        nvgBeginPath (vg);
+        nvgCircle (vg, hud.controller.getX() + 9.0f, hud.controller.getCentreY(), touchMode ? 4.0f : 3.0f);
+        nvgFillColor (vg, connected ? palette::okay : alpha (palette::mutedText, 0.4f));
+        nvgFill (vg);
     }
-
+    headerButton (hud.file, "FILE", palette::panelRaised);
     nvgFontSize (vg, 10.5f);
+    nvgTextAlign (vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+    nvgFillColor (vg, palette::mutedText);
+    nvgText (vg, hud.nameRight, midY, (currentFile == juce::File() ? juce::String ("untitled") : currentFile.getFileName()).toRawUTF8(), nullptr);
+    // The mute: a badge while muted; on a touch screen always there, since there is no M key.
+    if (status.panicMuted)
+        headerButton (hud.mute, touchMode ? "MUTED - TAP TO PLAY" : "MUTED - press M to fade in", darker (palette::warning, 0.4f));
+    else if (touchMode)
+        headerButton (hud.mute, "MUTE", palette::panelRaised);
+
+    nvgFontSize (vg, touchMode ? 12.0f : 10.5f);
     nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
-    nvgFillColor (vg, alpha (palette::mutedText, 0.75f));
+    nvgFillColor (vg, message.isNotEmpty() ? alpha (palette::text, 0.9f) : alpha (palette::mutedText, 0.75f));
     const auto hint = message.isNotEmpty() ? message
         : mode == Mode::board
-            ? juce::String ("drag pedals to place them  |  Shift+click to select several, right-click to group them into one pedal  |  1-5 load a slot (knobs glide), Shift+1-5 store  |  Tab rack")
-            : touchMode ? juce::String ("touch: tap an output then an input to connect  |  hold for a menu  |  drag the space to pan, double tap fits  |  - + FIT bottom right  |  palette: tap adds")
-                        : juce::String ("palette: click adds, drag drops (P hides)  |  drag a port to cable  |  drag the space to pan, Shift+drag selects  |  wheel zooms  |  Del  Ctrl+A  Ctrl+Z  Ctrl+D  Ctrl+T TONE3000  I inspector  M mute  F fit  |  Ctrl +/- UI scale  |  Tab board");
-    nvgText (vg, 16.0f, static_cast<float> (height) - 10.0f, hint.toRawUTF8(), nullptr);
+            ? (touchMode ? juce::String ("tap + between pedals to add one  |  hold a pedal for its menu (move, remove, MIDI)  |  tap a knob to set it  |  slots below: tap loads, hold stores")
+                         : juce::String ("+ between pedals adds one  |  drag pedals to place them  |  Shift+click to select several, right-click to group them into one pedal  |  1-5 load a slot (knobs glide), Shift+1-5 store  |  A add  |  Tab rack"))
+            : touchMode ? juce::String ("tap an output then an input to connect  |  hold for a menu  |  drag the space to pan, double tap fits  |  tap a knob to set it")
+                        : juce::String ("palette: click adds, drag drops (P hides)  |  A adds after the selected module  |  drag a port to cable  |  drag the space to pan, Shift+drag selects  |  wheel zooms  |  Del  Ctrl+A  Ctrl+Z  Ctrl+D  Ctrl+T TONE3000  I inspector  M mute  F fit  |  Ctrl +/- UI scale  |  Tab board");
+    // On the Board the line sits above the slot bar; with touch buttons it fits between them.
+    auto hintLeft = 16.0f, hintRight = static_cast<float> (width) - 16.0f;
+    auto hintBottom = static_cast<float> (height) - (mode == Mode::board ? slotBarHeight + 6.0f : 10.0f);
+    if (touchMode)
+    {
+        hintLeft = touchButtonBounds (5).getRight() + 16.0f;
+        hintRight = touchButtonBounds (3).getX() - 16.0f;
+        hintBottom = touchButtonBounds (5).getBottom() - 4.0f;
+    }
+    nvgSave (vg);
+    nvgScissor (vg, hintLeft, hintBottom - 40.0f, juce::jmax (0.0f, hintRight - hintLeft), 44.0f);
+    if (touchMode)
+    {
+        // Two lines at most: wrap rather than run under the buttons.
+        nvgTextAlign (vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+        nvgTextBox (vg, hintLeft, hintBottom - 36.0f, juce::jmax (40.0f, hintRight - hintLeft), hint.toRawUTF8(), nullptr);
+    }
+    else
+        nvgText (vg, hintLeft, hintBottom, hint.toRawUTF8(), nullptr);
+    nvgRestore (vg);
 }
 
 void RackView::render (int physicalWidth, int physicalHeight, float ratio, double now)
@@ -4826,9 +5782,12 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
         nvgFill (vg);
         drawBoard (width, height, now);
         drawSlotBar (width, height);
-        inspector.draw (width, height, hudHeight, slotBarHeight);
+        inspector.draw (width, height, hudHeight(), slotBarHeight);
+        controllerPage.draw (width, height, hudHeight(), slotBarHeight);
         drawTouchButtons();
         drawHud (width, height, now);
+        valueSheet.draw (0.0f, static_cast<float> (width) - rightDock(), height, slotBarHeight);
+        picker.draw (width, height);
         menu.draw (width, height);
         browser.draw (width, height);
         toneBrowser.draw (width, height, now);
@@ -4915,9 +5874,12 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
     drawPalette (height);
     if (inspector.isOpen() && selectedNode != 0 && selectedNode != inspector.node())
         inspector.show (selectedNode); // the panel follows the selection
-    inspector.draw (width, height, hudHeight, 0.0f);
+    inspector.draw (width, height, hudHeight(), 0.0f);
+    controllerPage.draw (width, height, hudHeight(), 0.0f);
     drawTouchButtons();
     drawHud (width, height, now);
+    valueSheet.draw (paletteVisible ? paletteWidth : 0.0f, static_cast<float> (width) - rightDock(), height, 0.0f);
+    picker.draw (width, height);
     menu.draw (width, height);
     browser.draw (width, height);
     toneBrowser.draw (width, height, now);
@@ -4938,6 +5900,11 @@ void RackView::render (int physicalWidth, int physicalHeight, float ratio, doubl
 
 void RackView::character (unsigned int codepoint)
 {
+    if (swallowNextCharacter)
+    {
+        swallowNextCharacter = false;
+        return;
+    }
     if (swallowSpaceCharacter && codepoint == ' ')
     {
         swallowSpaceCharacter = false; // the Space that picked a menu item
@@ -4945,7 +5912,7 @@ void RackView::character (unsigned int codepoint)
     }
     swallowSpaceCharacter = false;
     if (prompt.character (static_cast<juce::juce_wchar> (codepoint)) || browser.character (static_cast<juce::juce_wchar> (codepoint))
-        || toneBrowser.character (static_cast<juce::juce_wchar> (codepoint)))
+        || toneBrowser.character (static_cast<juce::juce_wchar> (codepoint)) || picker.character (static_cast<juce::juce_wchar> (codepoint)))
         dirty = true;
 }
 
@@ -4955,6 +5922,12 @@ void RackView::mouseMove (double x, double y)
     y /= uiScale;
     mouseX = x;
     mouseY = y;
+    if (picker.isOpen() && ! prompt.isOpen())
+    {
+        picker.mouseMove (static_cast<float> (x), static_cast<float> (y));
+        dirty = true;
+        return;
+    }
     if (toneBrowser.isOpen())
     {
         toneBrowser.mouseMove (static_cast<float> (x), static_cast<float> (y));
@@ -4978,6 +5951,16 @@ void RackView::mouseMove (double x, double y)
         dirty = true;
         return;
     }
+    if (valueSheet.mouseMove (static_cast<float> (x), static_cast<float> (y)))
+    {
+        dirty = true;
+        return;
+    }
+    if (controllerPage.mouseMove (static_cast<float> (x), static_cast<float> (y)))
+    {
+        dirty = true;
+        return;
+    }
     const auto world = toWorld (x, y);
     if (paletteDrag.has_value())
     {
@@ -4996,6 +5979,8 @@ void RackView::mouseMove (double x, double y)
     }
     if (boardDrag.has_value())
     {
+        if (! boardDrag->moved && juce::Point<double> (x, y).getDistanceFrom ({ pressX, pressY }) < dragSlop())
+            return; // a tap must not pin the pedal where it is
         const auto board = toBoard (x, y);
         const auto position = board - boardDrag->offset;
         boardDrag->moved = true;
@@ -5012,6 +5997,9 @@ void RackView::mouseMove (double x, double y)
     }
     if (draggingNode.has_value())
     {
+        if (! nodeDragMoved && juce::Point<double> (x, y).getDistanceFrom ({ pressX, pressY }) < dragSlop())
+            return;
+        nodeDragMoved = true;
         if (dragStartPositions.size() > 1)
         {
             const auto delta = world - dragStartWorld;
@@ -5048,8 +6036,15 @@ void RackView::mouseMove (double x, double y)
             }
             const auto& parameter = node->processor->getParameter (knobDrag->parameter);
             const auto fine = glfwGetKey (glfwGetCurrentContext(), GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? 0.2f : 1.0f;
+            // A finger shakes: on touch the knob turns only after 6 px, and from there.
+            const auto deadZone = touchMode ? 6.0 : 0.0;
+            auto travel = knobDrag->startY - y;
+            if (! knobDrag->moved && std::abs (travel) < deadZone)
+                return;
+            knobDrag->moved = true;
+            travel -= travel > 0.0 ? juce::jmin (deadZone, travel) : juce::jmax (-deadZone, travel);
             const auto normalised = juce::jlimit (0.0f, 1.0f,
-                knobDrag->startNormalised + static_cast<float> (knobDrag->startY - y) / 180.0f * fine);
+                knobDrag->startNormalised + static_cast<float> (travel) / 180.0f * fine);
             engine.setParameter (knobDrag->node, knobDrag->parameter, parameter.valueFromNormalised (normalised));
             invalidatePlate (knobDrag->node);
             dirty = true;
@@ -5118,6 +6113,12 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
         dirty = true;
         return;
     }
+    if (picker.isOpen())
+    {
+        picker.mouseButton (button, pressed, static_cast<float> (x), static_cast<float> (y));
+        dirty = true;
+        return;
+    }
     if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && touchButtonPressed (x, y))
         return;
     if (toneBrowser.isOpen())
@@ -5144,15 +6145,30 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
         dirty = true;
         return;
     }
-    // HUD: the FILE button top-right of the header strip.
-    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < (touchMode ? 52.0 : 34.0) && x >= windowW - 240.0 && x < windowW - 190.0)
+    if (valueSheet.isOpen() && (valueSheet.isDragging() || valueSheet.contains (static_cast<float> (x), static_cast<float> (y)))
+        && valueSheet.mouseButton (button, pressed, static_cast<float> (x), static_cast<float> (y)))
     {
-        showFileMenu (x, 34.0);
+        dirty = true;
         return;
     }
-    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < (touchMode ? 52.0 : 34.0) && x >= windowW - 300.0 && x < windowW - 246.0)
+    if (controllerPage.isOpen() && (controllerPage.isDragging() || controllerPage.contains (static_cast<float> (x), static_cast<float> (y)))
+        && controllerPage.mouseButton (button, pressed, static_cast<float> (x), static_cast<float> (y)))
     {
-        showAudioMenu (x, 34.0);
+        dirty = true;
+        return;
+    }
+    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && hudButtonPressed (x, y))
+        return;
+    if (assignArmed.has_value() && pressed && button == GLFW_MOUSE_BUTTON_LEFT)
+    {
+        // "Tap what it should drive": the next tap names the target.
+        const auto control = *assignArmed;
+        assignArmed.reset();
+        if (const auto target = mappingTargetAt (x, y))
+            assignControl (control, *target);
+        else
+            say ("Nothing to drive there - assigning cancelled");
+        dirty = true;
         return;
     }
     const auto world = toWorld (x, y);
@@ -5166,7 +6182,7 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
         paletteDrag.reset();
         if (dropOnCanvas || click)
         {
-            const auto centre = toWorld ((paletteWidth + windowW) * 0.5, (hudHeight + windowH) * 0.5);
+            const auto centre = toWorld ((paletteWidth + windowW) * 0.5, (hudHeight() + windowH) * 0.5);
             const auto position = dropOnCanvas ? world - juce::Point<float> (118.0f, 22.0f) : centre - juce::Point<float> (118.0f, 100.0f);
             const auto created = engine.addNode (kind, position);
             if (created != 0)
@@ -5179,22 +6195,16 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
         dirty = true;
         return;
     }
-    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && paletteVisible && mode == Mode::rack && x < paletteWidth && y >= hudHeight)
+    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && paletteVisible && mode == Mode::rack && x < paletteWidth && y >= hudHeight())
     {
         const auto row = paletteRowAt (x, y);
         if (row >= 0)
             paletteDrag = PaletteDrag { moduleCatalogue()[static_cast<std::size_t> (row)].kind, x, y, false };
         return;
     }
-    if (pressed && paletteVisible && mode == Mode::rack && x < paletteWidth && y >= hudHeight)
+    if (pressed && paletteVisible && mode == Mode::rack && x < paletteWidth && y >= hudHeight())
         return; // clicks on the panel never reach the canvas
 
-    // View toggle in the header strip.
-    if (pressed && button == GLFW_MOUSE_BUTTON_LEFT && y < (touchMode ? hudHeight * 1.5f : hudHeight) && x >= windowW - 392.0 && x < windowW - 306.0)
-    {
-        setMode (mode == Mode::rack ? Mode::board : Mode::rack);
-        return;
-    }
     if (mode == Mode::board)
     {
         boardMouseButton (button, pressed, mods, x, y);
@@ -5250,6 +6260,7 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
     {
         if (draggingNode.has_value() || knobDrag.has_value() || sequencerDrag.has_value())
             engine.closeEditGesture();
+        openValueSheetIfTapped (x, y);
         sequencerDrag.reset();
         bool connected = false;
         if (cableDrag.has_value())
@@ -5434,7 +6445,8 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
                     return;
                 }
                 knobDrag = KnobDrag { layout.id, parameterIndex, y,
-                                      model->processor->getParameter (parameterIndex).getNormalisedValue() };
+                                      model->processor->getParameter (parameterIndex).getNormalisedValue(), false };
+                touchedKnob = { layout.id, parameterIndex };
                 selectedNode = layout.id;
                 selectedCable.reset();
                 dirty = true;
@@ -5499,6 +6511,7 @@ void RackView::mouseButton (int button, bool pressed, int mods, double x, double
             rackSelection = { layout.id };
         selectedNode = layout.id;
         draggingNode = layout.id;
+        nodeDragMoved = false;
         dragOffset = world - origin;
         dragStartWorld = world;
         dragStartPositions.clear();
@@ -5560,6 +6573,11 @@ void RackView::scroll (double dx, double dy, int mods, double x, double y)
 {
     x /= uiScale;
     y /= uiScale;
+    if (picker.scroll (dy))
+    {
+        dirty = true;
+        return;
+    }
     if (toneBrowser.isOpen())
     {
         toneBrowser.scroll (dy);
@@ -5572,15 +6590,16 @@ void RackView::scroll (double dx, double dy, int mods, double x, double y)
         dirty = true;
         return;
     }
-    if (inspector.scroll (dy, static_cast<float> (x), static_cast<float> (y)))
+    if (inspector.scroll (dy, static_cast<float> (x), static_cast<float> (y))
+        || controllerPage.scroll (dy, static_cast<float> (x), static_cast<float> (y)))
     {
         dirty = true;
         return;
     }
-    if (paletteVisible && x < paletteWidth && y >= hudHeight)
+    if (paletteVisible && x < paletteWidth && y >= hudHeight())
     {
-        const auto contentHeight = paletteRowTop (static_cast<int> (moduleCatalogue().size()) - 1) + paletteScroll + 40.0f - hudHeight;
-        paletteScroll = juce::jlimit (0.0f, juce::jmax (0.0f, contentHeight - (windowH - hudHeight)), paletteScroll - static_cast<float> (dy) * 40.0f);
+        const auto contentHeight = paletteRowTop (static_cast<int> (moduleCatalogue().size()) - 1) + paletteScroll + 40.0f - hudHeight();
+        paletteScroll = juce::jlimit (0.0f, juce::jmax (0.0f, contentHeight - (windowH - hudHeight())), paletteScroll - static_cast<float> (dy) * 40.0f);
         paletteHover = paletteRowAt (x, y);
         dirty = true;
         return;
@@ -5646,9 +6665,16 @@ void RackView::key (int keyCode, bool pressed, int mods)
 {
     if (! pressed)
         return;
+    swallowNextCharacter = false;
     if (prompt.isOpen())
     {
         prompt.key (keyCode, mods);
+        dirty = true;
+        return;
+    }
+    if (picker.isOpen())
+    {
+        picker.key (keyCode, mods);
         dirty = true;
         return;
     }
@@ -5669,6 +6695,11 @@ void RackView::key (int keyCode, bool pressed, int mods)
     {
         swallowSpaceCharacter = keyCode == GLFW_KEY_SPACE;
         menu.key (keyCode);
+        dirty = true;
+        return;
+    }
+    if (valueSheet.key (keyCode, mods))
+    {
         dirty = true;
         return;
     }
@@ -5766,6 +6797,11 @@ void RackView::key (int keyCode, bool pressed, int mods)
         paletteVisible = ! paletteVisible;
         dirty = true;
     }
+    else if (keyCode == GLFW_KEY_A && ! ctrl)
+    {
+        swallowNextCharacter = true; // the 'a' must not land in the picker's filter
+        addModuleHere();
+    }
     else if (keyCode == GLFW_KEY_I && (mods & (GLFW_MOD_CONTROL | GLFW_MOD_ALT)) == 0)
         toggleInspector();
     else if (keyCode == GLFW_KEY_M)
@@ -5775,6 +6811,12 @@ void RackView::key (int keyCode, bool pressed, int mods)
     }
     else if (keyCode == GLFW_KEY_ESCAPE)
     {
+        if (assignArmed.has_value())
+        {
+            assignArmed.reset();
+            say ("Assigning cancelled");
+            return;
+        }
         if (learnTarget.has_value())
         {
             learnTarget.reset();

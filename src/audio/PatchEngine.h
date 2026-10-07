@@ -6,11 +6,16 @@
 #include "PatchHistory.h"
 #include "MidiMap.h"
 #include "ControllerFeedback.h"
+#include "ChainEdit.h"
 
 #include <array>
 #include <atomic>
 #include <functional>
+#include <memory>
+#include <optional>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace signalpatch
 {
@@ -59,11 +64,43 @@ public:
     [[nodiscard]] juce::StringArray getOpenMidiInputNames() const;
     [[nodiscard]] bool hasMidiInputs() const noexcept { return midiInputsOpen > 0; }
     [[nodiscard]] juce::String getLastMidiDescription() const { return lastMidiDescription; }
+    // App-wide mappings (view actions such as "next slot" or "knob 1 of the
+    // selected module"): not saved with the patch, not undoable; the UI keeps
+    // them in its settings. A message that matches no patch mapping goes
+    // through these, so a patch mapping on the same control wins.
+    void setGlobalMappings (std::vector<MidiMapping> mappings);
+    [[nodiscard]] const std::vector<MidiMapping>& getGlobalMappings() const noexcept { return globalMappings; }
+    /** The last CC value, or a note's state (127 down, 0 up), seen on any channel; nullopt before the first. */
+    [[nodiscard]] std::optional<int> getLastControlValue (MidiMapping::Source source, int number) const;
+    /** Moves on every CC, note or program change the engine handles: the UI's cue to redraw live values. */
+    [[nodiscard]] juce::uint32 getControlActivityVersion() const noexcept { return controlActivityVersion; }
+
     // Controller feedback (docs/CONTROLLER.md): a device that says hello on
     // its input gets its same-named output opened and receives switch LEDs,
-    // labels, the live slot and the rig name, diffed on the engine timer.
+    // labels, the live slot, the rig name, labels and values for its
+    // continuous controls and the mute flag, diffed on the engine timer.
     void setControllerContext (int activeSlot, const juce::String& rigName);
-    [[nodiscard]] int getControllerCount() const noexcept { return static_cast<int> (controllerOutputs.size()); }
+    /** What the view actions point at (knob last touched, selected module). The timer's diff sends it. */
+    void setControllerView (const controller::ViewContext& view);
+    [[nodiscard]] int getControllerCount() const noexcept;
+
+    struct ConnectedController
+    {
+        juce::String name;            // the MIDI input's name
+        int model = 0;                // controller::Model
+        int firmwareMajor = 0, firmwareMinor = 0;
+        bool hasOutput = false;       // feedback port open
+        bool settingsKnown = false;
+        std::map<int, int> settings;  // key -> value, from the last 0x11
+    };
+    /** Every device that said hello (or sent its settings), until its input disappears. */
+    [[nodiscard]] std::vector<ConnectedController> getControllers() const;
+    /** Settings SysEx to the named controller (its input's name); nothing when its output is not open.
+        The controller answers with its settings, which update getControllers() and broadcast a change. */
+    void requestControllerSettings (const juce::String& name);
+    void setControllerSettings (const juce::String& name, const std::vector<std::pair<int, int>>& changes);
+    void resetControllerSettings (const juce::String& name);
+    void zeroControllerGyro (const juce::String& name);
 
     PatchEngine();
     ~PatchEngine() override;
@@ -151,8 +188,29 @@ public:
     /** Copies a node (parameters, mod depths, bypass, extra state) next to the
         original. Returns the new id, or 0. */
     NodeId duplicateNode (NodeId id);
+    /** The chain edits of ChainEdit.h applied to this engine: compiled and undoable. */
+    [[nodiscard]] chain::Editor& chainEditor() noexcept { return chainEditorImpl; }
 
 private:
+    class ChainEditorImpl final : public chain::Editor
+    {
+    public:
+        explicit ChainEditorImpl (PatchEngine& owner) noexcept : engine (owner) {}
+        [[nodiscard]] const PatchDocument& document() const override { return engine.document; }
+        NodeId add (NodeKind kind, juce::Point<float> position) override { return engine.addNode (kind, position); }
+        bool remove (NodeId id) override { return engine.removeNode (id); }
+        juce::Result connect (Connection connection) override { return engine.connect (connection); }
+        bool disconnect (const Connection& connection) override { return engine.disconnect (connection); }
+        void move (NodeId id, juce::Point<float> position) override { engine.moveNode (id, position); }
+        void beginStep (const juce::String& description) override { engine.beginCompoundEditGesture (description); }
+        void endStep() override { engine.closeEditGesture(); }
+        void undoStep() override { engine.undo(); }
+
+    private:
+        PatchEngine& engine;
+    };
+    ChainEditorImpl chainEditorImpl { *this };
+
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData,
                                            int numInputChannels,
                                            float* const* outputChannelData,
@@ -232,12 +290,31 @@ private:
     std::unordered_map<NodeId, juce::uint32> seenAudioVersions;        // recordings noticed by the timer
     std::atomic<bool> midiNotesLost { false };                          // MIDI thread sets, audio thread releases all notes
     juce::StringArray knownMidiInputs;                                  // identifiers present at the last refresh
-    void openControllerOutput (const juce::String& inputName);
+    // One per device that said hello, keyed by its input's name.
+    struct ControllerLink
+    {
+        ConnectedController info;
+        std::unique_ptr<juce::MidiOutput> output;
+        controller::State sent; // what the output last received
+    };
+    ControllerLink& controllerLink (const juce::String& inputName);
+    ControllerLink* findControllerLink (const juce::String& inputName) noexcept;
+    void handleControllerSysEx (const juce::String& inputName, const juce::MidiMessage& message);
+    void openControllerOutput (ControllerLink& link);
+    void sendControllerMessage (const juce::String& inputName, const juce::MidiMessage& message);
     void sendControllerFeedback (bool full);
-    std::vector<std::unique_ptr<juce::MidiOutput>> controllerOutputs;
-    controller::State controllerState;
+    void sendControllerFeedback (ControllerLink& link, bool full);
+    std::vector<ControllerLink> controllers;
+    controller::ViewContext controllerView;
     int controllerSlot = -1;
     juce::String controllerRig;
+    std::vector<MidiMapping> globalMappings;
+    std::array<int, 128> lastControlValues;  // per CC, -1 = none yet
+    std::array<int, 128> lastNoteValues;     // per note: 127 down, 0 up, -1 = none yet
+    juce::uint32 controlActivityVersion = 0;
+    // Messages hop from the MIDI thread to the message thread; the ones still
+    // queued when the engine is destroyed find this false and do nothing.
+    std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>> (true);
     bool audioCallbackRegistered = false;
     bool restoredAudioDeviceState = false;
     juce::String configuredDeviceSignature;

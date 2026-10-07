@@ -20,8 +20,10 @@ both, scaled to the screen.
 - Go through every module while playing it and fix what the notes say:
   default ranges, curves, units. The inspector exists to find out what those
   should be.
-- The foot controller. The protocol is in `CONTROLLER.md`; the firmware is an
-  ESP32-S3 patch made with Daisypatcher, kept as a template in both repos.
+- The C3 handheld controller on real hardware: pairing with Windows 11 and
+  BlueZ, ADC noise, the gyro axes, the display. Firmware and protocol are
+  in `controller/c3-oled/` and `CONTROLLER.md`.
+- The foot controller. Same protocol; an ESP32-S3 over USB MIDI.
 - MIDI clock in.
 - Touch and gamepad fixes from real use on the Ally.
 

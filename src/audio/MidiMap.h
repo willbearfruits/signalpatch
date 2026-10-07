@@ -8,11 +8,14 @@ namespace signalpatch
 {
 // One MIDI control bound to one thing in the patch. Saved with the patch
 // ("midi" array), so a rig carries its controller layout, and slots that
-// glide adopt the target's map.
+// glide adopt the target's map. A view mapping is an app action rather than
+// a module: the knob last touched, a knob of the selected module, the next
+// or previous slot, mute (the action is in `command`). The app keeps those
+// in its settings too, as mappings that work in every patch.
 struct MidiMapping
 {
     enum class Source { controlChange, note, programChange };
-    enum class Target { parameter, bypass, command, slot, groupBypass };
+    enum class Target { parameter, bypass, command, slot, groupBypass, view };
 
     Source source = Source::controlChange;
     int channel = 0;      // 0 = any channel
@@ -22,7 +25,8 @@ struct MidiMapping
     int parameter = -1;   // parameter target
     int groupId = -1;     // groupBypass target
     int slot = -1;        // slot target (0-based)
-    juce::String command; // command target (e.g. "rec")
+    juce::String command; // command target (e.g. "rec"); view action: "knob", "next-knob",
+                          // "module-knob-1".."module-knob-3", "next-slot", "prev-slot", "mute"
     bool relative = false; // CC 64 +/- n nudges the knob instead of setting it (encoders)
     int low = 0, high = 127; // expression calibration: this CC span covers the whole knob
 

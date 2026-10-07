@@ -12,6 +12,7 @@ Options:
 | `SIGNALPATCH_ALLOW_JUCE_FETCH` | ON | OFF requires an installed JUCE |
 | `SIGNALPATCH_CPU_BASELINE` | `x86-64-v3` | instruction set to build for. AVX2 makes neural captures about a quarter cheaper; set it to empty for CPUs older than 2013 |
 | `SIGNALPATCH_ENABLE_ASIO` | OFF | Windows ASIO; needs Steinberg's SDK and its licence |
+| `SIGNALPATCH_WINDOWS_BLE_MIDI` | ON | Windows: JUCE's WinRT MIDI backend, which also sees paired Bluetooth LE MIDI devices (the C3 controller). It handles USB MIDI too; turn it off if a USB device misbehaves |
 | `SIGNALPATCH_BUILD_JUCE_UI` | OFF | also build the retired JUCE rack (`signalpatch_juce`) |
 
 ## Linux
@@ -78,6 +79,11 @@ ctest --test-dir build -C Release --output-on-failure
 The release zips are the CI build plus its `fonts/` folder. WASAPI is the
 default backend.
 
+On a touch screen the window turns off Windows' press-and-hold (the ring
+that becomes a right click), so a finger's press reaches the app at once
+and the app's own long press opens menus, as on Linux. On a screen too
+small for the default 1600 x 1000 window the first start is maximised.
+
 ## Flatpak
 
 ```sh
@@ -99,11 +105,16 @@ SignalPatch [options] [patch.signalpatch | bundle.zip]
   --scale=1.25   UI scale; also SIGNALPATCH_SCALE, and Ctrl +/- in the app
 ```
 
-Touch mode turns itself on for a small high-DPI screen: larger targets, tap
-an output (anywhere on the right edge of the plate at socket height) and
-then tap the module it should go into, hold for the menu a right click
-opens, double tap to fit. A module's menu can also send its output to any
-other module.
+Touch mode turns itself on for a small high-DPI screen: larger targets, a
+taller header, + ADD, UNDO and REDO on screen, tap an output (anywhere on
+the right edge of the plate at socket height) and then tap the module it
+should go into, hold for the menu a right click opens, tap a knob for a
+large slider, double tap to fit. A module's menu can also send its output
+to any other module, and put a new module before or after it.
+
+`SIGNALPATCH_UI_SCRIPT=<file>` plays taps, holds, drags and keys from a
+file and saves screenshots (see `src/v2/UiScript.h`). It is how the touch
+flows were checked on a machine without a touch screen.
 
 ## Tests
 
